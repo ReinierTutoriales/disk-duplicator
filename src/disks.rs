@@ -14,6 +14,7 @@ use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
 const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00A0;
+const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 
@@ -73,8 +74,8 @@ impl DiskInfo {
     }
 }
 
-struct Handle(HANDLE);
-impl Drop for Handle {
+pub struct RawHandle(pub HANDLE);
+impl Drop for RawHandle {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.0);
@@ -86,7 +87,7 @@ fn last_err() -> u32 {
     windows::core::Error::from_win32().code().0 as u32
 }
 
-fn open_path(path: &str, access: u32) -> Result<Handle, u32> {
+fn open_path(path: &str, access: u32) -> Result<RawHandle, u32> {
     let w = wide_z(path);
     match unsafe {
         CreateFileW(
@@ -99,16 +100,25 @@ fn open_path(path: &str, access: u32) -> Result<Handle, u32> {
             None,
         )
     } {
-        Ok(h) if !h.is_invalid() => Ok(Handle(h)),
+        Ok(h) if !h.is_invalid() => Ok(RawHandle(h)),
         Ok(_) => Err(last_err()),
         Err(e) => Err(e.code().0 as u32),
     }
 }
 
-fn open_query(path: &str) -> Result<Handle, u32> {
-    open_path(path, GENERIC_READ)
-        .or_else(|_| open_path(path, GENERIC_READ | GENERIC_WRITE))
-        .or_else(|_| open_path(path, 0))
+pub fn open_disk(path: &str, write: bool) -> Result<RawHandle, u32> {
+    let acc = if write {
+        GENERIC_READ | GENERIC_WRITE
+    } else {
+        GENERIC_READ
+    };
+    open_path(path, acc).or_else(|_| {
+        if write {
+            open_path(path, GENERIC_WRITE).or_else(|_| open_path(path, GENERIC_READ))
+        } else {
+            open_path(path, 0)
+        }
+    })
 }
 
 fn ioctl(h: HANDLE, code: u32, inp: Option<*const u8>, in_len: u32, out: *mut u8, out_len: u32) -> bool {
@@ -247,27 +257,52 @@ fn windows_dir_letter() -> Option<char> {
     String::from_utf16_lossy(&buf[..n as usize]).chars().next()
 }
 
-fn extents_disk_numbers(letter: char) -> Vec<u32> {
-    let Ok(h) = open_query(&volume_path(letter)) else {
-        return Vec::new();
-    };
-    let mut buf = vec![0u8; 1024];
-    if !ioctl(
+fn volume_device_number(letter: char) -> Option<u32> {
+    let h = open_path(&volume_path(letter), GENERIC_READ)
+        .or_else(|_| open_path(&volume_path(letter), 0))
+        .ok()?;
+    let mut buf = [0u8; 12];
+    if ioctl(
         h.0,
-        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        IOCTL_STORAGE_GET_DEVICE_NUMBER,
         None,
         0,
         buf.as_mut_ptr(),
         buf.len() as u32,
     ) {
-        return Vec::new();
+        return Some(u32_at(&buf, 4));
     }
-    let n = u32_at(&buf, 0) as usize;
+    let mut ext = vec![0u8; 256];
+    if ioctl(
+        h.0,
+        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        None,
+        0,
+        ext.as_mut_ptr(),
+        ext.len() as u32,
+    ) {
+        if u32_at(&ext, 0) >= 1 {
+            return Some(u32_at(&ext, 4));
+        }
+    }
+    None
+}
+
+pub fn letters_for_disk(index: u32) -> Vec<char> {
     let mut out = Vec::new();
-    for i in 0..n.min(16) {
-        let off = 4 + i * 24;
-        if off + 4 <= buf.len() {
-            out.push(u32_at(&buf, off));
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26u32 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let letter = char::from(b'A' + i as u8);
+        let root = wide_z(&format!(r"{letter}:\\"));
+        let dtype = unsafe { GetDriveTypeW(pcw(&root)) };
+        if dtype == 5 {
+            continue;
+        }
+        if volume_device_number(letter) == Some(index) {
+            out.push(letter);
         }
     }
     out
@@ -278,7 +313,7 @@ pub fn enumerate_disks() -> Result<Vec<DiskInfo>, String> {
     let mut first_err: Option<(u32, u32)> = None;
     for i in 0..32u32 {
         let path = physical_path(i);
-        match open_query(&path) {
+        match open_disk(&path, false) {
             Ok(h) => {
                 let Some(size) = disk_length(h.0) else {
                     if first_err.is_none() {
@@ -306,7 +341,6 @@ pub fn enumerate_disks() -> Result<Vec<DiskInfo>, String> {
                 if i == 0 {
                     first_err = Some((i, e));
                 }
-                continue;
             }
         }
     }
@@ -320,29 +354,12 @@ pub fn enumerate_disks() -> Result<Vec<DiskInfo>, String> {
         };
         return Err(extra);
     }
-    let mask = unsafe { GetLogicalDrives() };
-    for i in 0..26u32 {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        let letter = char::from(b'A' + i as u8);
-        let root = wide_z(&format!(r"{letter}:\\"));
-        let dtype = unsafe { GetDriveTypeW(pcw(&root)) };
-        if dtype == 5 {
-            continue;
-        }
-        for n in extents_disk_numbers(letter) {
-            if let Some(d) = disks.iter_mut().find(|d| d.index == n) {
-                if !d.letters.contains(&letter) {
-                    d.letters.push(letter);
-                }
-            }
-        }
+    for d in disks.iter_mut() {
+        d.letters = letters_for_disk(d.index);
     }
     if let Some(sys) = windows_dir_letter() {
-        let sys_disks = extents_disk_numbers(sys);
         for d in disks.iter_mut() {
-            if sys_disks.contains(&d.index) || d.letters.contains(&sys) {
+            if d.letters.contains(&sys) {
                 d.is_system = true;
             }
         }
