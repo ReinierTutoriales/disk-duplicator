@@ -1,48 +1,40 @@
 # Disk Duplicator
 
-Herramienta de duplicación de discos a nivel de bloque para Windows.
+Duplicador **libre** de discos físicos para Windows. 1 origen → N destinos.
 
-## Características
+No es Paquetecopies. Es una reescritura: bloque raw (`\\.\PhysicalDriveN`), UI propia, MIT.
 
-- Copia 1 fuente → N destinos simultáneamente
-- Acceso raw a disco físico (\\.\PhysicalDriveN)
-- Buffers alineados a sector para máximo rendimiento
-- Verificación BLAKE3 opcional
-- Protección contra selección accidental del disco de sistema
+## Qué hace
 
-## Compilación
+- Enumera `PhysicalDrive0..N` con modelo, serial, bus, letras y disco de sistema (extents de `C:\Windows`).
+- Eliges **un origen** y marcas **varios destinos**.
+- Cada destino abre el origen por su cuenta y escribe a su techo (USB lento no frena USB rápido).
+- Confirmación: últimas 4 del serial del origen.
+- Disco de sistema no seleccionable.
+- Destino más chico que el origen = bloqueo.
+- Intenta lock/dismount de volúmenes del destino antes de escribir.
+- Tema oscuro tipo Obsidian (referencia visual, no el `.vsf` de VCL).
 
-### Local
+## Compilar
+
+Administrador. Windows x64.
 
 ```bash
 cargo build --release
 ```
 
-El ejecutable estará en `target/release/disk-duplicator.exe`
-
-### GitHub Actions
-
-El proyecto incluye un workflow que compila automáticamente el ejecutable en cada push a la rama `main`.
-
-Para descargar el ejecutable:
-
-1. Ve a la pestaña "Actions" en GitHub
-2. Selecciona el workflow más reciente
-3. Descarga el artifact "disk-duplicator"
+GitHub Actions publica `disk-duplicator.exe` en Artifacts.
 
 ## Uso
 
-1. Ejecuta el programa como administrador
-2. Selecciona el disco fuente
-3. Selecciona los discos destino (separados por comas)
-4. Confirma la operación
+1. Ejecutar como administrador.
+2. Actualizar discos.
+3. Radio = origen. Checkbox = destinos.
+4. Escribir serial (4 últimos).
+5. Iniciar.
 
-## Requisitos
+Un uso incorrecto destruye el destino. No hay deshacer.
 
-- Windows 10/11
-- Permisos de administrador
-- Discos de destino >= tamaño del origen
+## Licencia
 
-## Advertencia
-
-Este software escribe directamente a discos físicos. Un uso incorrecto puede causar pérdida de datos. Verifica cuidadosamente antes de confirmar.
+MIT.
