@@ -13,6 +13,9 @@ use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
+const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 = 0x0007_00A0;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusKind {
@@ -79,40 +82,80 @@ impl Drop for Handle {
     }
 }
 
-fn open_query(path: &str) -> Option<Handle> {
+fn last_err() -> u32 {
+    windows::core::Error::from_win32().code().0 as u32
+}
+
+fn open_path(path: &str, access: u32) -> Result<Handle, u32> {
     let w = wide_z(path);
-    let h = unsafe {
+    match unsafe {
         CreateFileW(
             pcw(&w),
-            0,
+            access,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             None,
         )
+    } {
+        Ok(h) if !h.is_invalid() => Ok(Handle(h)),
+        Ok(_) => Err(last_err()),
+        Err(e) => Err(e.code().0 as u32),
     }
-    .ok()?;
-    Some(Handle(h))
 }
 
-fn disk_length(h: HANDLE) -> Option<u64> {
-    let mut info = GET_LENGTH_INFORMATION::default();
+fn open_query(path: &str) -> Result<Handle, u32> {
+    open_path(path, GENERIC_READ)
+        .or_else(|_| open_path(path, GENERIC_READ | GENERIC_WRITE))
+        .or_else(|_| open_path(path, 0))
+}
+
+fn ioctl(h: HANDLE, code: u32, inp: Option<*const u8>, in_len: u32, out: *mut u8, out_len: u32) -> bool {
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
             h,
-            IOCTL_DISK_GET_LENGTH_INFO,
-            None,
-            0,
-            Some((&mut info as *mut GET_LENGTH_INFORMATION).cast()),
-            size_of::<GET_LENGTH_INFORMATION>() as u32,
+            code,
+            inp.map(|p| p as *const _),
+            in_len,
+            Some(out.cast()),
+            out_len,
             Some(&mut ret),
             None,
         )
-        .ok()?;
+        .is_ok()
     }
-    Some(info.Length as u64)
+}
+
+fn disk_length(h: HANDLE) -> Option<u64> {
+    let mut info = GET_LENGTH_INFORMATION::default();
+    if ioctl(
+        h,
+        IOCTL_DISK_GET_LENGTH_INFO,
+        None,
+        0,
+        (&mut info as *mut GET_LENGTH_INFORMATION).cast(),
+        size_of::<GET_LENGTH_INFORMATION>() as u32,
+    ) && info.Length > 0
+    {
+        return Some(info.Length as u64);
+    }
+    let mut geo = [0u8; 64];
+    if ioctl(
+        h,
+        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+        None,
+        0,
+        geo.as_mut_ptr(),
+        geo.len() as u32,
+    ) {
+        let size = i64::from_le_bytes(geo[24..32].try_into().ok()?);
+        if size > 0 {
+            return Some(size as u64);
+        }
+    }
+    None
 }
 
 fn descriptor(h: HANDLE) -> (String, String, BusKind, bool) {
@@ -122,21 +165,15 @@ fn descriptor(h: HANDLE) -> (String, String, BusKind, bool) {
         AdditionalParameters: [0; 1],
     };
     let mut buf = vec![0u8; 2048];
-    let mut ret = 0u32;
-    let ok = unsafe {
-        DeviceIoControl(
-            h,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
-            size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            Some(buf.as_mut_ptr().cast()),
-            buf.len() as u32,
-            Some(&mut ret),
-            None,
-        )
-        .is_ok()
-    };
-    if !ok || (ret as usize) < size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
+    let ok = ioctl(
+        h,
+        IOCTL_STORAGE_QUERY_PROPERTY,
+        Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
+        size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+        buf.as_mut_ptr(),
+        buf.len() as u32,
+    );
+    if !ok {
         return ("Desconocido".into(), "-".into(), BusKind::Unknown, false);
     }
     let vendor_off = u32_at(&buf, 12);
@@ -211,25 +248,18 @@ fn windows_dir_letter() -> Option<char> {
 }
 
 fn extents_disk_numbers(letter: char) -> Vec<u32> {
-    let Some(h) = open_query(&volume_path(letter)) else {
+    let Ok(h) = open_query(&volume_path(letter)) else {
         return Vec::new();
     };
     let mut buf = vec![0u8; 1024];
-    let mut ret = 0u32;
-    let ok = unsafe {
-        DeviceIoControl(
-            h.0,
-            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-            None,
-            0,
-            Some(buf.as_mut_ptr().cast()),
-            buf.len() as u32,
-            Some(&mut ret),
-            None,
-        )
-        .is_ok()
-    };
-    if !ok {
+    if !ioctl(
+        h.0,
+        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        None,
+        0,
+        buf.as_mut_ptr(),
+        buf.len() as u32,
+    ) {
         return Vec::new();
     }
     let n = u32_at(&buf, 0) as usize;
@@ -245,29 +275,50 @@ fn extents_disk_numbers(letter: char) -> Vec<u32> {
 
 pub fn enumerate_disks() -> Result<Vec<DiskInfo>, String> {
     let mut disks = Vec::new();
+    let mut first_err: Option<(u32, u32)> = None;
     for i in 0..32u32 {
         let path = physical_path(i);
-        let Some(h) = open_query(&path) else {
-            continue;
-        };
-        let Some(size) = disk_length(h.0) else {
-            continue;
-        };
-        if size == 0 {
-            continue;
+        match open_query(&path) {
+            Ok(h) => {
+                let Some(size) = disk_length(h.0) else {
+                    if first_err.is_none() {
+                        first_err = Some((i, last_err()));
+                    }
+                    continue;
+                };
+                if size == 0 {
+                    continue;
+                }
+                let (model, serial, bus, removable) = descriptor(h.0);
+                disks.push(DiskInfo {
+                    index: i,
+                    path,
+                    model,
+                    serial,
+                    size_bytes: size,
+                    bus,
+                    removable,
+                    letters: Vec::new(),
+                    is_system: false,
+                });
+            }
+            Err(e) => {
+                if i == 0 {
+                    first_err = Some((i, e));
+                }
+                continue;
+            }
         }
-        let (model, serial, bus, removable) = descriptor(h.0);
-        disks.push(DiskInfo {
-            index: i,
-            path,
-            model,
-            serial,
-            size_bytes: size,
-            bus,
-            removable,
-            letters: Vec::new(),
-            is_system: false,
-        });
+    }
+    if disks.is_empty() {
+        let extra = match first_err {
+            Some((i, 5)) => format!(
+                "PD{i} acceso denegado (5). Ejecuta el .exe como administrador (UAC)."
+            ),
+            Some((i, e)) => format!("PD{i} error Win32 {e}."),
+            None => "No se pudo leer el tamaño de ningún PhysicalDrive.".into(),
+        };
+        return Err(extra);
     }
     let mask = unsafe { GetLogicalDrives() };
     for i in 0..26u32 {

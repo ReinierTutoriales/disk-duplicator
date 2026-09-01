@@ -1,9 +1,7 @@
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 use windows::core::PCWSTR;
 
 pub fn wide_z(s: &str) -> Vec<u16> {
-    Path::new(s).as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 pub fn pcw(buf: &[u16]) -> PCWSTR {
