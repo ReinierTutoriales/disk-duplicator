@@ -14,6 +14,8 @@ jobs:
       with:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
+    - name: Test
+      run: cargo test --verbose
     - name: Build release
       run: cargo build --release --verbose
     - name: Upload executable
