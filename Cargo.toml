@@ -1,6 +1,6 @@
 [package]
 name = "disk-duplicator"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Copiador de archivos 1 origen → N destinos"
 license = "MIT"
@@ -9,7 +9,6 @@ license = "MIT"
 eframe = "0.29"
 egui = "0.29"
 blake3 = "1.5"
-crossbeam-channel = "0.5"
 walkdir = "2"
 rfd = "0.15"
 
