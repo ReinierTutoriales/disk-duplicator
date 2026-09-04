@@ -1,49 +1,33 @@
-use crate::disks::{
-    ioctl, letters_for_disk, open_disk_strict, DiskInfo, RawHandle, FILE_FLAG_NO_BUFFERING,
-    FILE_FLAG_WRITE_THROUGH,
-};
-use crate::winpath::{pcw, volume_path, wide_z};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME};
+use std::time::{Duration, Instant};
+use walkdir::WalkDir;
 
 const BLOCK: usize = 1024 * 1024;
-const ALIGN: usize = 4096;
-const GENERIC_READ: u32 = 0x8000_0000;
-const GENERIC_WRITE: u32 = 0x4000_0000;
-const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
+const QUEUE: usize = 16;
 
-struct AlignedBuf {
-    raw: Vec<u8>,
-    off: usize,
-    len: usize,
-}
-
-impl AlignedBuf {
-    fn new(len: usize) -> Self {
-        let raw = vec![0u8; len + ALIGN];
-        let addr = raw.as_ptr() as usize;
-        let off = (ALIGN - (addr % ALIGN)) % ALIGN;
-        debug_assert!((raw.as_ptr() as usize + off) % ALIGN == 0);
-        Self { raw, off, len }
-    }
-
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.raw[self.off..self.off + self.len]
-    }
+#[derive(Clone)]
+enum Msg {
+    Begin {
+        rel: PathBuf,
+        size: u64,
+    },
+    Chunk(Arc<[u8]>),
+    End {
+        hash: [u8; 32],
+        verify: bool,
+    },
+    Done,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DestPhase {
     Idle,
-    Locking,
     Copying,
     Verifying,
     Done,
@@ -53,19 +37,22 @@ pub enum DestPhase {
 
 #[derive(Clone)]
 pub struct DestProgress {
-    pub index: u32,
+    pub label: String,
     pub written: u64,
-    pub verified: u64,
     pub total: u64,
+    pub files_done: u64,
     pub bps: f64,
     pub phase: DestPhase,
     pub error: Option<String>,
-    pub hash: Option<String>,
+    pub last_file: String,
 }
 
 pub struct JobState {
     pub running: AtomicBool,
     pub cancel: AtomicBool,
+    pub pause: AtomicBool,
+    pub files_total: AtomicU64,
+    pub bytes_total: AtomicU64,
     pub dests: Mutex<Vec<DestProgress>>,
 }
 
@@ -75,79 +62,159 @@ impl JobState {
     }
 }
 
-fn win_err(prefix: &str) -> String {
-    let e = windows::core::Error::from_win32();
-    format!("{prefix}: {e}")
-}
-
-fn open_volume(letter: char) -> Result<RawHandle, String> {
-    let path = volume_path(letter);
-    let w = wide_z(&path);
-    unsafe {
-        CreateFileW(
-            pcw(&w),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }
-    .map(RawHandle)
-    .map_err(|e| format!("volumen {letter}: {e}"))
-}
-
-fn ctl(h: HANDLE, code: u32) -> bool {
-    ioctl(h, code, None, 0, None, 0)
-}
-
-fn lock_volumes(index: u32, known: &[char]) -> Result<Vec<RawHandle>, String> {
-    let mut letters = known.to_vec();
-    for l in letters_for_disk(index) {
-        if !letters.contains(&l) {
-            letters.push(l);
+fn list_files(root: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    let mut out = Vec::new();
+    for e in WalkDir::new(root).follow_links(false) {
+        let e = e.map_err(|err| err.to_string())?;
+        if !e.file_type().is_file() {
+            continue;
         }
+        let meta = e.metadata().map_err(|err| err.to_string())?;
+        let rel = e
+            .path()
+            .strip_prefix(root)
+            .map_err(|err| err.to_string())?
+            .to_path_buf();
+        out.push((rel, meta.len()));
     }
-    let mut held = Vec::new();
-    for letter in letters {
-        let h = open_volume(letter)?;
-        let _ = ctl(h.0, FSCTL_ALLOW_EXTENDED_DASD_IO);
-        let _ = ctl(h.0, FSCTL_DISMOUNT_VOLUME);
-        if !ctl(h.0, FSCTL_LOCK_VOLUME) {
-            let _ = ctl(h.0, FSCTL_DISMOUNT_VOLUME);
-            if !ctl(h.0, FSCTL_LOCK_VOLUME) {
-                return Err(format!(
-                    "No se pudo bloquear {letter}:. Cierra Explorer y programas que usen ese disco. No se escribió nada."
-                ));
-            }
+    Ok(out)
+}
+
+fn dest_inside_source(src: &Path, dst: &Path) -> bool {
+    let Ok(s) = src.canonicalize() else {
+        return false;
+    };
+    let Ok(d) = dst.canonicalize() else {
+        return false;
+    };
+    d == s || d.starts_with(&s)
+}
+
+fn wait_paused(state: &JobState) {
+    while state.pause.load(Ordering::Relaxed) && !state.cancel.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn fanout(txs: &[Sender<Msg>], msg: Msg, state: &JobState) -> Result<(), String> {
+    let mut pending: Vec<usize> = (0..txs.len()).collect();
+    while !pending.is_empty() {
+        if state.cancel.load(Ordering::Relaxed) {
+            return Err("Cancelado".into());
         }
-        held.push(h);
-    }
-    Ok(held)
-}
-
-fn seek_to(h: HANDLE, pos: u64) -> Result<(), String> {
-    unsafe { SetFilePointerEx(h, pos as i64, None, FILE_BEGIN) }.map_err(|e| format!("seek {pos}: {e}"))
-}
-
-fn read_exact(h: HANDLE, buf: &mut [u8]) -> Result<(), String> {
-    let mut n = 0u32;
-    unsafe { ReadFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("lectura"))?;
-    if n as usize != buf.len() {
-        return Err(format!("lectura parcial: {n} de {}. Se detiene.", buf.len()));
+        wait_paused(state);
+        pending.retain(|&i| match txs[i].try_send(msg.clone()) {
+            Ok(()) => false,
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
+        if !pending.is_empty() {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
     Ok(())
 }
 
-fn write_exact(h: HANDLE, buf: &[u8]) -> Result<(), String> {
-    let mut n = 0u32;
-    unsafe { WriteFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("escritura"))?;
-    if n as usize != buf.len() {
-        return Err(format!(
-            "escritura parcial: {n} de {}. Se detiene para no dejar el disco a medias.",
-            buf.len()
-        ));
+fn writer_loop(rx: Receiver<Msg>, root: PathBuf, state: Arc<JobState>, slot: usize) {
+    let t0 = Instant::now();
+    let mut current: Option<File> = None;
+    let mut current_path = PathBuf::new();
+    let mut current_size = 0u64;
+    loop {
+        if state.cancel.load(Ordering::Relaxed) {
+            set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+            return;
+        }
+        let Ok(msg) = rx.recv() else {
+            set_phase(&state, slot, DestPhase::Failed, Some("Canal cerrado".into()));
+            return;
+        };
+        match msg {
+            Msg::Begin { rel, size } => {
+                let path = root.join(&rel);
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        set_phase(&state, slot, DestPhase::Failed, Some(format!("mkdir: {e}")));
+                        return;
+                    }
+                }
+                match File::create(&path) {
+                    Ok(f) => {
+                        current = Some(f);
+                        current_path = path;
+                        current_size = size;
+                        let mut g = state.dests.lock().unwrap();
+                        g[slot].phase = DestPhase::Copying;
+                        g[slot].last_file = rel.to_string_lossy().into_owned();
+                        g[slot].error = None;
+                    }
+                    Err(e) => {
+                        set_phase(&state, slot, DestPhase::Failed, Some(format!("crear: {e}")));
+                        return;
+                    }
+                }
+            }
+            Msg::Chunk(data) => {
+                let Some(f) = current.as_mut() else {
+                    set_phase(&state, slot, DestPhase::Failed, Some("chunk sin archivo".into()));
+                    return;
+                };
+                if let Err(e) = f.write_all(&data) {
+                    set_phase(&state, slot, DestPhase::Failed, Some(format!("escritura: {e}")));
+                    return;
+                }
+                let mut g = state.dests.lock().unwrap();
+                g[slot].written += data.len() as u64;
+                let elapsed = t0.elapsed().as_secs_f64();
+                if elapsed > 0.05 {
+                    g[slot].bps = g[slot].written as f64 / elapsed;
+                }
+            }
+            Msg::End { hash, verify } => {
+                if let Some(mut f) = current.take() {
+                    let _ = f.flush();
+                    drop(f);
+                }
+                if verify {
+                    set_phase(&state, slot, DestPhase::Verifying, None);
+                    match verify_file(&current_path, current_size, hash) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            set_phase(&state, slot, DestPhase::Failed, Some(e));
+                            return;
+                        }
+                    }
+                    set_phase(&state, slot, DestPhase::Copying, None);
+                }
+                state.dests.lock().unwrap()[slot].files_done += 1;
+            }
+            Msg::Done => {
+                set_phase(&state, slot, DestPhase::Done, None);
+                return;
+            }
+        }
+    }
+}
+
+fn verify_file(path: &Path, size: u64, expect: [u8; 32]) -> Result<(), String> {
+    let mut f = File::open(path).map_err(|e| format!("verificar open: {e}"))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; BLOCK];
+    let mut seen = 0u64;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("verificar read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        seen += n as u64;
+    }
+    if seen != size {
+        return Err(format!("tamaño {seen} != {size} en {}", path.display()));
+    }
+    let got = *hasher.finalize().as_bytes();
+    if got != expect {
+        return Err(format!("BLAKE3 no coincide en {}", path.display()));
     }
     Ok(())
 }
@@ -158,250 +225,133 @@ fn set_phase(state: &JobState, slot: usize, phase: DestPhase, err: Option<String
     g[slot].error = err;
 }
 
-fn set_hash(state: &JobState, slot: usize, hash: String) {
-    state.dests.lock().unwrap()[slot].hash = Some(hash);
-}
-
-fn add_written(state: &JobState, slot: usize, n: u64, elapsed: f64) {
-    let mut g = state.dests.lock().unwrap();
-    g[slot].written += n;
-    if elapsed > 0.05 {
-        g[slot].bps = g[slot].written as f64 / elapsed;
-    }
-}
-
-fn add_verified(state: &JobState, slot: usize, n: u64) {
-    state.dests.lock().unwrap()[slot].verified += n;
-}
-
-fn cancelled(state: &JobState, slot: usize) -> bool {
-    if state.cancel.load(Ordering::Relaxed) {
-        set_phase(
-            state,
-            slot,
-            DestPhase::Cancelled,
-            Some("Cancelado. El destino puede estar incompleto.".into()),
-        );
-        true
-    } else {
-        false
-    }
-}
-
-fn transfer_range(
-    src: HANDLE,
-    dst: Option<HANDLE>,
-    hasher: &mut blake3::Hasher,
-    buf: &mut [u8],
-    start: u64,
-    end: u64,
-    block: usize,
-    state: &JobState,
-    slot: usize,
-    writing: bool,
-    t0: Instant,
-) -> Result<(), String> {
-    seek_to(src, start)?;
-    if let Some(d) = dst {
-        seek_to(d, start)?;
-    }
-    let mut pos = start;
-    while pos < end {
-        if cancelled(state, slot) {
-            return Err("Cancelado".into());
-        }
-        let chunk = ((end - pos) as usize).min(block);
-        let slice = &mut buf[..chunk];
-        read_exact(src, slice)?;
-        if writing {
-            write_exact(dst.expect("dst"), slice)?;
-            hasher.update(slice);
-            add_written(state, slot, chunk as u64, t0.elapsed().as_secs_f64());
-        } else {
-            hasher.update(slice);
-            add_verified(state, slot, chunk as u64);
-        }
-        pos += chunk as u64;
-    }
-    Ok(())
-}
-
-fn copy_one(
-    source: DiskInfo,
-    dest: DiskInfo,
+fn reader(
+    source: PathBuf,
+    files: Vec<(PathBuf, u64)>,
+    txs: Vec<Sender<Msg>>,
     state: Arc<JobState>,
-    slot: usize,
     verify: bool,
-) -> Result<(), String> {
-    if dest.is_system {
-        return Err("destino es disco de sistema".into());
-    }
-    if dest.index == source.index {
-        return Err("origen y destino son el mismo disco".into());
-    }
-    if dest.size_bytes < source.size_bytes {
-        return Err("destino más pequeño que el origen".into());
-    }
-
-    set_phase(&state, slot, DestPhase::Locking, None);
-    let _locks = lock_volumes(dest.index, &dest.letters)?;
-
-    let total = source.size_bytes;
-    let aligned = total - (total % ALIGN as u64);
-    let rest = total - aligned;
-
-    let src = open_disk_strict(&source.path, false, FILE_FLAG_NO_BUFFERING)?;
-    let dst = open_disk_strict(
-        &dest.path,
-        true,
-        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
-    )?;
-
-    set_phase(&state, slot, DestPhase::Copying, None);
-    let mut buf = AlignedBuf::new(BLOCK);
-    let mut hasher = blake3::Hasher::new();
-    let t0 = Instant::now();
-
-    if aligned > 0 {
-        transfer_range(
-            src.0,
-            Some(dst.0),
-            &mut hasher,
-            buf.as_mut(),
-            0,
-            aligned,
-            BLOCK,
+) {
+    let mut buf = vec![0u8; BLOCK];
+    for (rel, size) in files {
+        if state.cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        wait_paused(&state);
+        if fanout(
+            &txs,
+            Msg::Begin {
+                rel: rel.clone(),
+                size,
+            },
             &state,
-            slot,
-            true,
-            t0,
-        )?;
-    }
-
-    if rest > 0 {
-        drop(src);
-        drop(dst);
-        let src_b = open_disk_strict(&source.path, false, 0)?;
-        let dst_b = open_disk_strict(&dest.path, true, FILE_FLAG_WRITE_THROUGH)?;
-        transfer_range(
-            src_b.0,
-            Some(dst_b.0),
-            &mut hasher,
-            buf.as_mut(),
-            aligned,
-            total,
-            rest as usize,
-            &state,
-            slot,
-            true,
-            t0,
-        )?;
-    }
-
-    {
-        let written = state.dests.lock().unwrap()[slot].written;
-        if written != total {
-            return Err(format!(
-                "incompleto: {written} de {total} bytes. Destino no es una copia fiel."
-            ));
+        )
+        .is_err()
+        {
+            break;
+        }
+        let path = source.join(&rel);
+        let mut f = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                for i in 0..txs.len() {
+                    set_phase(&state, i, DestPhase::Failed, Some(format!("origen: {e}")));
+                }
+                return;
+            }
+        };
+        let mut hasher = blake3::Hasher::new();
+        loop {
+            if state.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            wait_paused(&state);
+            let n = match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    for i in 0..txs.len() {
+                        set_phase(&state, i, DestPhase::Failed, Some(format!("lectura: {e}")));
+                    }
+                    return;
+                }
+            };
+            hasher.update(&buf[..n]);
+            let chunk: Arc<[u8]> = Arc::from(&buf[..n]);
+            if fanout(&txs, Msg::Chunk(chunk), &state).is_err() {
+                return;
+            }
+        }
+        let hash = *hasher.finalize().as_bytes();
+        if fanout(&txs, Msg::End { hash, verify }, &state).is_err() {
+            return;
         }
     }
-
-    let expect = hasher.finalize();
-    set_hash(&state, slot, expect.to_hex().to_string());
-
-    if verify {
-        set_phase(&state, slot, DestPhase::Verifying, None);
-        let mut check = blake3::Hasher::new();
-        let src_v = open_disk_strict(&dest.path, false, FILE_FLAG_NO_BUFFERING)?;
-        if aligned > 0 {
-            transfer_range(
-                src_v.0,
-                None,
-                &mut check,
-                buf.as_mut(),
-                0,
-                aligned,
-                BLOCK,
-                &state,
-                slot,
-                false,
-                t0,
-            )?;
-        }
-        drop(src_v);
-        if rest > 0 {
-            let src_vb = open_disk_strict(&dest.path, false, 0)?;
-            transfer_range(
-                src_vb.0,
-                None,
-                &mut check,
-                buf.as_mut(),
-                aligned,
-                total,
-                rest as usize,
-                &state,
-                slot,
-                false,
-                t0,
-            )?;
-        }
-        let got = check.finalize();
-        if got != expect {
-            return Err(format!(
-                "hash no coincide (origen {} destino {}). El destino no es fiable.",
-                expect.to_hex(),
-                got.to_hex()
-            ));
-        }
-    }
-
-    set_phase(&state, slot, DestPhase::Done, None);
-    Ok(())
+    let _ = fanout(&txs, Msg::Done, &state);
 }
 
 pub fn start_job(
-    source: DiskInfo,
-    dests: Vec<DiskInfo>,
+    source: PathBuf,
+    dests: Vec<PathBuf>,
     verify: bool,
-) -> (Arc<JobState>, Vec<JoinHandle<()>>) {
+) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+    if !source.is_dir() {
+        return Err("El origen debe ser una carpeta.".into());
+    }
+    if dests.is_empty() {
+        return Err("Agrega al menos un destino.".into());
+    }
+    for d in &dests {
+        if dest_inside_source(&source, d) {
+            return Err(format!(
+                "El destino {} está dentro del origen.",
+                d.display()
+            ));
+        }
+        fs::create_dir_all(d).map_err(|e| format!("destino {}: {e}", d.display()))?;
+    }
+    let files = list_files(&source)?;
+    let bytes_total: u64 = files.iter().map(|(_, n)| n).sum();
+    let files_total = files.len() as u64;
+
     let progress = dests
         .iter()
         .map(|d| DestProgress {
-            index: d.index,
+            label: d.display().to_string(),
             written: 0,
-            verified: 0,
-            total: source.size_bytes,
+            total: bytes_total,
+            files_done: 0,
             bps: 0.0,
             phase: DestPhase::Idle,
             error: None,
-            hash: None,
+            last_file: String::new(),
         })
         .collect();
+
     let state = Arc::new(JobState {
         running: AtomicBool::new(true),
         cancel: AtomicBool::new(false),
+        pause: AtomicBool::new(false),
+        files_total: AtomicU64::new(files_total),
+        bytes_total: AtomicU64::new(bytes_total),
         dests: Mutex::new(progress),
     });
-    let done = Arc::new(AtomicU64::new(0));
-    let n = dests.len() as u64;
+
+    let mut txs = Vec::new();
     let mut handles = Vec::new();
     for (slot, dest) in dests.into_iter().enumerate() {
-        let src = source.clone();
+        let (tx, rx) = bounded::<Msg>(QUEUE);
+        txs.push(tx);
         let st = Arc::clone(&state);
-        let counter = Arc::clone(&done);
-        handles.push(thread::spawn(move || {
-            if let Err(e) = copy_one(src, dest, Arc::clone(&st), slot, verify) {
-                if st.dests.lock().unwrap()[slot].phase != DestPhase::Cancelled {
-                    set_phase(&st, slot, DestPhase::Failed, Some(e));
-                }
-            }
-            if counter.fetch_add(1, Ordering::Relaxed) + 1 >= n {
-                st.running.store(false, Ordering::Relaxed);
-            }
-        }));
+        handles.push(thread::spawn(move || writer_loop(rx, dest, st, slot)));
     }
-    (state, handles)
+
+    let st = Arc::clone(&state);
+    handles.push(thread::spawn(move || {
+        reader(source, files, txs, Arc::clone(&st), verify);
+        st.running.store(false, Ordering::Relaxed);
+    }));
+    Ok((state, handles))
 }
 
 pub fn format_bps(bps: f64) -> String {
@@ -413,5 +363,17 @@ pub fn format_bps(bps: f64) -> String {
         format!("{:.0} KB/s", bps / 1024.0)
     } else {
         format!("{:.0} B/s", bps)
+    }
+}
+
+pub fn format_bytes(n: u64) -> String {
+    if n >= 1_073_741_824 {
+        format!("{:.2} GB", n as f64 / 1_073_741_824.0)
+    } else if n >= 1_048_576 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{:.0} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
     }
 }
