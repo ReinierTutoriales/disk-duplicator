@@ -1,6 +1,6 @@
 [package]
 name = "disk-duplicator"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Copiador de archivos 1 origen → N destinos"
 license = "MIT"

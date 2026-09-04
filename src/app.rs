@@ -1,5 +1,5 @@
-use crate::engine::{format_bps, format_bytes, start_job, DestPhase, JobState};
-use eframe::egui::{self, Align, Color32, Layout, RichText};
+use crate::engine::{format_bps, format_bytes, start_job, CopyOpts, DestPhase, JobState};
+use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -19,6 +19,8 @@ pub struct CopierApp {
     source: String,
     dests: Vec<String>,
     verify: bool,
+    skip_same: bool,
+    keep_going: bool,
     status: String,
     job: Option<Arc<JobState>>,
     workers: Vec<JoinHandle<()>>,
@@ -29,8 +31,10 @@ impl CopierApp {
         Self {
             source: String::new(),
             dests: Vec::new(),
-            verify: true,
-            status: "Carpeta origen → varias carpetas destino. No clona discos.".into(),
+            verify: false,
+            skip_same: true,
+            keep_going: true,
+            status: "Una carpeta origen, varios destinos. Cada destino a su velocidad.".into(),
             job: None,
             workers: Vec::new(),
         }
@@ -56,10 +60,15 @@ impl CopierApp {
             .map(|s| PathBuf::from(s.trim()))
             .filter(|p| !p.as_os_str().is_empty())
             .collect();
-        match start_job(src, dests, self.verify) {
+        let opts = CopyOpts {
+            verify: self.verify,
+            skip_same: self.skip_same,
+            keep_going: self.keep_going,
+        };
+        match start_job(src, dests, opts) {
             Ok((state, handles)) => {
                 self.status = format!(
-                    "Copiando {} archivos, {}.",
+                    "{} archivos · {}",
                     state.files_total.load(std::sync::atomic::Ordering::Relaxed),
                     format_bytes(state.bytes_total.load(std::sync::atomic::Ordering::Relaxed))
                 );
@@ -79,13 +88,26 @@ impl eframe::App for CopierApp {
         });
         if self.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        } else if let Some(job) = &self.job {
+            let snaps = job.snapshot();
+            if snaps.iter().all(|d| {
+                matches!(d.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
+            }) && !snaps.is_empty()
+            {
+                let ok = snaps.iter().filter(|d| d.phase == DestPhase::Done && d.files_err == 0).count();
+                self.status = format!("Listo. {ok}/{} destinos sin errores.", snaps.len());
+            }
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Copiador");
-                ui.weak("1 carpeta → N destinos");
-                ui.checkbox(&mut self.verify, "Releer y comparar hash");
+                ui.separator();
+                ui.add_enabled_ui(!self.busy(), |ui| {
+                    ui.checkbox(&mut self.skip_same, "Omitir iguales");
+                    ui.checkbox(&mut self.keep_going, "Seguir si hay error");
+                    ui.checkbox(&mut self.verify, "Verificar hash");
+                });
             });
         });
 
@@ -96,37 +118,42 @@ impl eframe::App for CopierApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Origen");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.source)
-                        .desired_width(520.0)
-                        .hint_text("Carpeta a copiar"),
-                );
-                if ui.button("Examinar").clicked() {
-                    if let Some(p) = Self::pick_dir() {
-                        self.source = p;
-                    }
-                }
-            });
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Destinos");
-                if ui.button("Agregar").clicked() {
-                    if let Some(p) = Self::pick_dir() {
-                        if !self.dests.contains(&p) {
-                            self.dests.push(p);
+                ui.add_enabled_ui(!self.busy(), |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.source)
+                            .desired_width(500.0)
+                            .hint_text("Carpeta a copiar"),
+                    );
+                    if ui.button("Examinar").clicked() {
+                        if let Some(p) = Self::pick_dir() {
+                            self.source = p;
                         }
                     }
-                }
+                });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Destinos");
+                ui.add_enabled_ui(!self.busy(), |ui| {
+                    if ui.button("Agregar").clicked() {
+                        if let Some(p) = Self::pick_dir() {
+                            if !self.dests.contains(&p) {
+                                self.dests.push(p);
+                            }
+                        }
+                    }
+                });
             });
 
             let mut remove = None;
             for (i, d) in self.dests.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(d);
-                    if ui.small_button("Quitar").clicked() {
-                        remove = Some(i);
-                    }
+                    ui.add_enabled_ui(!self.busy(), |ui| {
+                        if ui.small_button("Quitar").clicked() {
+                            remove = Some(i);
+                        }
+                    });
                 });
             }
             if let Some(i) = remove {
@@ -135,7 +162,7 @@ impl eframe::App for CopierApp {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.add_enabled_ui(!self.busy(), |ui| {
+                ui.add_enabled_ui(!self.busy() && !self.source.is_empty() && !self.dests.is_empty(), |ui| {
                     if ui.button(RichText::new("Iniciar").strong()).clicked() {
                         self.start();
                     }
@@ -148,20 +175,19 @@ impl eframe::App for CopierApp {
                     if ui.button("Cancelar").clicked() {
                         job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                         job.pause.store(false, std::sync::atomic::Ordering::Relaxed);
-                        self.status = "Cancelando…".into();
                     }
                 }
             });
 
             if let Some(job) = &self.job {
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.separator();
                 let total_files = job.files_total.load(std::sync::atomic::Ordering::Relaxed);
                 for dp in job.snapshot() {
                     let frac = if dp.total == 0 {
                         0.0
                     } else {
-                        dp.written as f32 / dp.total as f32
+                        (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
                     };
                     let tag = match dp.phase {
                         DestPhase::Idle => "en cola",
@@ -173,16 +199,18 @@ impl eframe::App for CopierApp {
                     };
                     ui.label(RichText::new(&dp.label).small());
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::ProgressBar::new(frac)
-                                .desired_width(360.0)
-                                .show_percentage(),
-                        );
+                        ui.add(egui::ProgressBar::new(frac).desired_width(340.0).show_percentage());
                         ui.label(format_bps(dp.bps));
                         ui.colored_label(phase_color(dp.phase), tag);
-                        ui.weak(format!("{}/{} archivos", dp.files_done, total_files));
+                        ui.weak(format!("{}/{}", dp.files_done, total_files));
+                        if dp.files_skip > 0 {
+                            ui.weak(format!("omitidos {}", dp.files_skip));
+                        }
+                        if dp.files_err > 0 {
+                            ui.colored_label(Color32::from_rgb(200, 60, 60), format!("err {}", dp.files_err));
+                        }
                     });
-                    if !dp.last_file.is_empty() {
+                    if !dp.last_file.is_empty() && dp.phase == DestPhase::Copying {
                         ui.label(RichText::new(&dp.last_file).small().weak());
                     }
                     if let Some(e) = dp.error {
@@ -191,7 +219,5 @@ impl eframe::App for CopierApp {
                 }
             }
         });
-        let _ = Align::Min;
-        let _ = Layout::left_to_right(Align::Min);
     }
 }
