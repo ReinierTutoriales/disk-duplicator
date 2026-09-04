@@ -1,40 +1,29 @@
 # Disk Duplicator
 
-Duplicador **libre** de discos físicos para Windows. 1 origen → N destinos.
+Copia bloque a bloque `\\.\PhysicalDriveN` de **un origen a N destinos** en Windows.
+Cada destino corre en su propio hilo: un USB lento no frena a otro rápido.
 
-No es Paquetecopies. Es una reescritura: bloque raw (`\\.\PhysicalDriveN`), UI propia, MIT.
+## Reglas (no negociables)
 
-## Qué hace
+- Requiere administrador (manifiesto UAC).
+- No escribe el disco de sistema.
+- Destino debe ser **mayor o igual** que el origen.
+- Si un volumen del destino no se puede **bloquear y desmontar**, ese destino **no se toca**.
+- Los handles de lock se mantienen abiertos hasta terminar (o fallar).
+- No degrada permisos en silencio a la hora de escribir.
+- No marca éxito si no se escribieron todos los bytes del origen.
+- Verificación CRC32 del destino (recomendada; duplica el tiempo).
 
-- Enumera `PhysicalDrive0..N` con modelo, serial, bus, letras y disco de sistema (extents de `C:\Windows`).
-- Eliges **un origen** y marcas **varios destinos**.
-- Cada destino abre el origen por su cuenta y escribe a su techo (USB lento no frena USB rápido).
-- Confirmación: últimas 4 del serial del origen.
-- Disco de sistema no seleccionable.
-- Destino más chico que el origen = bloqueo.
-- Intenta lock/dismount de volúmenes del destino antes de escribir.
-- Tema oscuro tipo Obsidian (referencia visual, no el `.vsf` de VCL).
+## Uso
+
+1. Actions → artifact `disk-duplicator.exe`.
+2. Ejecuta; acepta UAC.
+3. Cierra Explorer en los destinos.
+4. Origen = radio. Destinos = checks.
+5. Confirma la lista. Iniciar **borra todo** en los destinos.
 
 ## Compilar
-
-Administrador. Windows x64.
 
 ```bash
 cargo build --release
 ```
-
-GitHub Actions publica `disk-duplicator.exe` en Artifacts.
-
-## Uso
-
-1. Ejecutar como administrador.
-2. Actualizar discos.
-3. Radio = origen. Checkbox = destinos.
-4. Escribir serial (4 últimos).
-5. Iniciar.
-
-Un uso incorrecto destruye el destino. No hay deshacer.
-
-## Licencia
-
-MIT.

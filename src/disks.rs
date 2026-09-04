@@ -18,6 +18,9 @@ const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 
+pub const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
+pub const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusKind {
     Unknown,
@@ -69,16 +72,42 @@ pub struct DiskInfo {
 }
 
 impl DiskInfo {
-    pub fn size_gb(&self) -> u64 {
-        self.size_bytes / 1_073_741_824
+    pub fn size_gb(&self) -> f64 {
+        self.size_bytes as f64 / 1_073_741_824.0
+    }
+
+    pub fn label(&self) -> String {
+        let vols = if self.letters.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [{}]",
+                self.letters
+                    .iter()
+                    .map(|c| format!("{c}:"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        };
+        format!(
+            "PD{} {}  {:.1} GB  {}{}",
+            self.index,
+            self.model,
+            self.size_gb(),
+            self.bus.label(),
+            vols
+        )
     }
 }
 
 pub struct RawHandle(pub HANDLE);
+
 impl Drop for RawHandle {
     fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
         }
     }
 }
@@ -87,7 +116,7 @@ fn last_err() -> u32 {
     windows::core::Error::from_win32().code().0 as u32
 }
 
-fn open_path(path: &str, access: u32) -> Result<RawHandle, u32> {
+fn create_file(path: &str, access: u32, flags: u32) -> Result<RawHandle, u32> {
     let w = wide_z(path);
     match unsafe {
         CreateFileW(
@@ -96,7 +125,7 @@ fn open_path(path: &str, access: u32) -> Result<RawHandle, u32> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(flags),
             None,
         )
     } {
@@ -106,22 +135,48 @@ fn open_path(path: &str, access: u32) -> Result<RawHandle, u32> {
     }
 }
 
+/// Enumeración: puede relajar acceso. Nunca usar esto para escribir.
 pub fn open_disk(path: &str, write: bool) -> Result<RawHandle, u32> {
     let acc = if write {
         GENERIC_READ | GENERIC_WRITE
     } else {
         GENERIC_READ
     };
-    open_path(path, acc).or_else(|_| {
-        if write {
-            open_path(path, GENERIC_WRITE).or_else(|_| open_path(path, GENERIC_READ))
+    create_file(path, acc, FILE_ATTRIBUTE_NORMAL.0)
+        .or_else(|_| create_file(path, if write { GENERIC_WRITE } else { GENERIC_READ }, FILE_ATTRIBUTE_NORMAL.0))
+        .or_else(|_| {
+            if write {
+                Err(5)
+            } else {
+                create_file(path, 0, FILE_ATTRIBUTE_NORMAL.0)
+            }
+        })
+}
+
+/// Copia: permiso exacto o error. Sin fallback a handle de solo lectura.
+pub fn open_disk_strict(path: &str, write: bool, extra_flags: u32) -> Result<RawHandle, String> {
+    let acc = if write {
+        GENERIC_READ | GENERIC_WRITE
+    } else {
+        GENERIC_READ
+    };
+    create_file(path, acc, FILE_ATTRIBUTE_NORMAL.0 | extra_flags).map_err(|e| {
+        if e == 5 {
+            format!("{path}: acceso denegado (5). Admin + volumen desmontado.")
         } else {
-            open_path(path, 0)
+            format!("{path}: CreateFile Win32 {e}")
         }
     })
 }
 
-fn ioctl(h: HANDLE, code: u32, inp: Option<*const u8>, in_len: u32, out: *mut u8, out_len: u32) -> bool {
+pub fn ioctl(
+    h: HANDLE,
+    code: u32,
+    inp: Option<*const u8>,
+    in_len: u32,
+    out: Option<*mut u8>,
+    out_len: u32,
+) -> bool {
     let mut ret = 0u32;
     unsafe {
         DeviceIoControl(
@@ -129,7 +184,7 @@ fn ioctl(h: HANDLE, code: u32, inp: Option<*const u8>, in_len: u32, out: *mut u8
             code,
             inp.map(|p| p as *const _),
             in_len,
-            Some(out.cast()),
+            out.map(|p| p as *mut _),
             out_len,
             Some(&mut ret),
             None,
@@ -145,7 +200,7 @@ fn disk_length(h: HANDLE) -> Option<u64> {
         IOCTL_DISK_GET_LENGTH_INFO,
         None,
         0,
-        (&mut info as *mut GET_LENGTH_INFORMATION).cast(),
+        Some((&mut info as *mut GET_LENGTH_INFORMATION).cast()),
         size_of::<GET_LENGTH_INFORMATION>() as u32,
     ) && info.Length > 0
     {
@@ -157,7 +212,7 @@ fn disk_length(h: HANDLE) -> Option<u64> {
         IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
         None,
         0,
-        geo.as_mut_ptr(),
+        Some(geo.as_mut_ptr()),
         geo.len() as u32,
     ) {
         let size = i64::from_le_bytes(geo[24..32].try_into().ok()?);
@@ -175,24 +230,18 @@ fn descriptor(h: HANDLE) -> (String, String, BusKind, bool) {
         AdditionalParameters: [0; 1],
     };
     let mut buf = vec![0u8; 2048];
-    let ok = ioctl(
+    if !ioctl(
         h,
         IOCTL_STORAGE_QUERY_PROPERTY,
         Some((&query as *const STORAGE_PROPERTY_QUERY).cast()),
         size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-        buf.as_mut_ptr(),
+        Some(buf.as_mut_ptr()),
         buf.len() as u32,
-    );
-    if !ok {
+    ) {
         return ("Desconocido".into(), "-".into(), BusKind::Unknown, false);
     }
-    let vendor_off = u32_at(&buf, 12);
-    let product_off = u32_at(&buf, 16);
-    let serial_off = u32_at(&buf, 24);
-    let bus_raw = i32_at(&buf, 28);
-    let removable = buf.get(10).copied().unwrap_or(0) != 0;
-    let model = join_id(&buf, vendor_off, product_off);
-    let serial = cstr_at(&buf, serial_off).unwrap_or_else(|| "-".into());
+    let model = join_id(&buf, u32_at(&buf, 12), u32_at(&buf, 16));
+    let serial = cstr_at(&buf, u32_at(&buf, 24)).unwrap_or_else(|| "-".into());
     (
         if model.is_empty() {
             "Desconocido".into()
@@ -200,8 +249,8 @@ fn descriptor(h: HANDLE) -> (String, String, BusKind, bool) {
             model
         },
         serial,
-        BusKind::from_raw(bus_raw),
-        removable,
+        BusKind::from_raw(i32_at(&buf, 28)),
+        buf.get(10).copied().unwrap_or(0) != 0,
     )
 }
 
@@ -223,13 +272,14 @@ fn cstr_at(buf: &[u8], off: u32) -> Option<String> {
     if off == 0 || off as usize >= buf.len() {
         return None;
     }
-    let s = buf[off as usize..]
+    let t = buf[off as usize..]
         .iter()
         .copied()
         .take_while(|&b| b != 0)
         .map(|b| b as char)
-        .collect::<String>();
-    let t = s.trim().to_string();
+        .collect::<String>()
+        .trim()
+        .to_string();
     if t.is_empty() {
         None
     } else {
@@ -238,14 +288,11 @@ fn cstr_at(buf: &[u8], off: u32) -> Option<String> {
 }
 
 fn join_id(buf: &[u8], vendor: u32, product: u32) -> String {
-    let mut parts = Vec::new();
-    if let Some(v) = cstr_at(buf, vendor) {
-        parts.push(v);
-    }
-    if let Some(p) = cstr_at(buf, product) {
-        parts.push(p);
-    }
-    parts.join(" ")
+    [cstr_at(buf, vendor), cstr_at(buf, product)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn windows_dir_letter() -> Option<char> {
@@ -258,8 +305,8 @@ fn windows_dir_letter() -> Option<char> {
 }
 
 fn volume_device_number(letter: char) -> Option<u32> {
-    let h = open_path(&volume_path(letter), GENERIC_READ)
-        .or_else(|_| open_path(&volume_path(letter), 0))
+    let h = create_file(&volume_path(letter), GENERIC_READ, FILE_ATTRIBUTE_NORMAL.0)
+        .or_else(|_| create_file(&volume_path(letter), 0, FILE_ATTRIBUTE_NORMAL.0))
         .ok()?;
     let mut buf = [0u8; 12];
     if ioctl(
@@ -267,7 +314,7 @@ fn volume_device_number(letter: char) -> Option<u32> {
         IOCTL_STORAGE_GET_DEVICE_NUMBER,
         None,
         0,
-        buf.as_mut_ptr(),
+        Some(buf.as_mut_ptr()),
         buf.len() as u32,
     ) {
         return Some(u32_at(&buf, 4));
@@ -278,12 +325,11 @@ fn volume_device_number(letter: char) -> Option<u32> {
         IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
         None,
         0,
-        ext.as_mut_ptr(),
+        Some(ext.as_mut_ptr()),
         ext.len() as u32,
-    ) {
-        if u32_at(&ext, 0) >= 1 {
-            return Some(u32_at(&ext, 4));
-        }
+    ) && u32_at(&ext, 0) >= 1
+    {
+        return Some(u32_at(&ext, 4));
     }
     None
 }
@@ -297,8 +343,7 @@ pub fn letters_for_disk(index: u32) -> Vec<char> {
         }
         let letter = char::from(b'A' + i as u8);
         let root = wide_z(&format!(r"{letter}:\\"));
-        let dtype = unsafe { GetDriveTypeW(pcw(&root)) };
-        if dtype == 5 {
+        if unsafe { GetDriveTypeW(pcw(&root)) } == 5 {
             continue;
         }
         if volume_device_number(letter) == Some(index) {
@@ -345,23 +390,18 @@ pub fn enumerate_disks() -> Result<Vec<DiskInfo>, String> {
         }
     }
     if disks.is_empty() {
-        let extra = match first_err {
-            Some((i, 5)) => format!(
-                "PD{i} acceso denegado (5). Ejecuta el .exe como administrador (UAC)."
-            ),
+        return Err(match first_err {
+            Some((i, 5)) => format!("PD{i} acceso denegado (5). Ejecuta como administrador."),
             Some((i, e)) => format!("PD{i} error Win32 {e}."),
-            None => "No se pudo leer el tamaño de ningún PhysicalDrive.".into(),
-        };
-        return Err(extra);
+            None => "No se abrió ningún PhysicalDrive.".into(),
+        });
     }
     for d in disks.iter_mut() {
         d.letters = letters_for_disk(d.index);
     }
     if let Some(sys) = windows_dir_letter() {
         for d in disks.iter_mut() {
-            if d.letters.contains(&sys) {
-                d.is_system = true;
-            }
+            d.is_system = d.letters.contains(&sys);
         }
     }
     disks.sort_by_key(|d| d.index);
