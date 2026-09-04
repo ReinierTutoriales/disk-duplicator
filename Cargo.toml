@@ -1,22 +1,17 @@
 [package]
 name = "disk-duplicator"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2021"
-description = "Duplicador de discos físicos 1→N para Windows"
+description = "Copiador de archivos 1 origen → N destinos"
 license = "MIT"
 
 [dependencies]
 eframe = "0.29"
 egui = "0.29"
 blake3 = "1.5"
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",
-    "Win32_System_IO",
-    "Win32_System_Ioctl",
-    "Win32_System_SystemInformation",
-    "Win32_Security",
-]}
+crossbeam-channel = "0.5"
+walkdir = "2"
+rfd = "0.15"
 
 [build-dependencies]
 embed-resource = "2.4"
