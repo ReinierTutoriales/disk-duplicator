@@ -1,15 +1,16 @@
 # Copiador 1→N
 
-Copia **archivos y carpetas** de un origen a varios destinos. No clona discos físicos.
+Copia una carpeta a varios destinos a la vez. Cada destino escribe a **su** tope
+(USB lento no frena USB rápido). El origen se lee por destino; Windows deja
+el archivo en caché, así el disco rápido no se lee N veces desde el plato.
 
-- Un solo lector. Cada destino tiene su cola: un USB lento no frena a otro rápido
-  mientras el origen aguante la suma de escrituras.
-- BLAKE3 por archivo al vuelo. Verificación opcional (relee el destino).
-- Sin administrador. Pausa y cancelar.
+## Por qué así (como ExtremeCopy)
+
+Un solo lector con cola chica acaba yendo a la velocidad del destino **más lento**
+cuando la RAM se llena. Aquí cada destino es una sesión independiente: 10 USB
+a 150 MB/s pueden ir los 10 a 150, si el origen (SSD + caché) da ~1.5 GB/s.
 
 ## Uso
 
-1. Artifact `disk-duplicator.exe` (Actions).
-2. Elige carpeta origen.
-3. Agrega una o más carpetas destino.
-4. Iniciar. No pongas un destino *dentro* del origen.
+Artifact `disk-duplicator.exe`. Origen = carpeta. Destinos = otras carpetas.
+No pongas un destino dentro del origen.
