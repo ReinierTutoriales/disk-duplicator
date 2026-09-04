@@ -9,6 +9,13 @@ use walkdir::WalkDir;
 
 const BLOCK: usize = 4 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+pub struct CopyOpts {
+    pub verify: bool,
+    pub skip_same: bool,
+    pub keep_going: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DestPhase {
     Idle,
@@ -25,6 +32,8 @@ pub struct DestProgress {
     pub written: u64,
     pub total: u64,
     pub files_done: u64,
+    pub files_skip: u64,
+    pub files_err: u64,
     pub bps: f64,
     pub phase: DestPhase,
     pub error: Option<String>,
@@ -86,12 +95,19 @@ fn set_phase(state: &JobState, slot: usize, phase: DestPhase, err: Option<String
     g[slot].error = err;
 }
 
-fn add_written(state: &JobState, slot: usize, n: u64, t0: Instant) {
-    let mut g = state.dests.lock().unwrap();
-    g[slot].written += n;
-    let s = t0.elapsed().as_secs_f64();
-    if s > 0.05 {
-        g[slot].bps = g[slot].written as f64 / s;
+fn same_enough(src: &Path, dst: &Path) -> bool {
+    let Ok(a) = fs::metadata(src) else {
+        return false;
+    };
+    let Ok(b) = fs::metadata(dst) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    match (a.modified(), b.modified()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => true,
     }
 }
 
@@ -99,6 +115,7 @@ fn copy_file(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
+    let meta = fs::metadata(src).ok();
     let mut inn = File::open(src).map_err(|e| format!("abrir origen: {e}"))?;
     let mut out = File::create(dst).map_err(|e| format!("crear destino: {e}"))?;
     let mut buf = vec![0u8; BLOCK];
@@ -112,6 +129,9 @@ fn copy_file(src: &Path, dst: &Path, verify: bool) -> Result<(), String> {
         hasher.update(&buf[..n]);
     }
     out.flush().map_err(|e| format!("flush: {e}"))?;
+    if let Some(m) = meta.as_ref().and_then(|m| m.modified().ok()) {
+        let _ = out.set_modified(m);
+    }
     drop(out);
     drop(inn);
     if verify {
@@ -138,7 +158,7 @@ fn dest_worker(
     files: Arc<Vec<(PathBuf, u64)>>,
     state: Arc<JobState>,
     slot: usize,
-    verify: bool,
+    opts: CopyOpts,
 ) {
     let t0 = Instant::now();
     set_phase(&state, slot, DestPhase::Copying, None);
@@ -148,29 +168,53 @@ fn dest_worker(
             return;
         }
         wait_pause(&state);
-        {
-            let mut g = state.dests.lock().unwrap();
-            g[slot].last_file = rel.to_string_lossy().into_owned();
-            if verify {
-                g[slot].phase = DestPhase::Copying;
-            }
-        }
+        state.dests.lock().unwrap()[slot].last_file = rel.to_string_lossy().into_owned();
         let src = source.join(rel);
         let dst = dest.join(rel);
-        if let Err(e) = copy_file(&src, &dst, verify) {
-            set_phase(&state, slot, DestPhase::Failed, Some(e));
-            return;
+        if opts.skip_same && same_enough(&src, &dst) {
+            let mut g = state.dests.lock().unwrap();
+            g[slot].files_skip += 1;
+            g[slot].files_done += 1;
+            g[slot].written += *size;
+            continue;
         }
-        add_written(&state, slot, *size, t0);
-        state.dests.lock().unwrap()[slot].files_done += 1;
+        if let Err(e) = copy_file(&src, &dst, opts.verify) {
+            let mut g = state.dests.lock().unwrap();
+            g[slot].files_err += 1;
+            g[slot].error = Some(format!("{}: {e}", rel.display()));
+            if !opts.keep_going {
+                g[slot].phase = DestPhase::Failed;
+                return;
+            }
+            continue;
+        }
+        {
+            let mut g = state.dests.lock().unwrap();
+            g[slot].written += *size;
+            g[slot].files_done += 1;
+            let s = t0.elapsed().as_secs_f64();
+            if s > 0.05 {
+                g[slot].bps = g[slot].written as f64 / s;
+            }
+        }
     }
-    set_phase(&state, slot, DestPhase::Done, None);
+    let errs = state.dests.lock().unwrap()[slot].files_err;
+    if errs > 0 {
+        set_phase(
+            &state,
+            slot,
+            DestPhase::Done,
+            Some(format!("Terminado con {errs} error(es).")),
+        );
+    } else {
+        set_phase(&state, slot, DestPhase::Done, None);
+    }
 }
 
 pub fn start_job(
     source: PathBuf,
     dests: Vec<PathBuf>,
-    verify: bool,
+    opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     if !source.is_dir() {
         return Err("El origen debe ser una carpeta.".into());
@@ -185,9 +229,11 @@ pub fn start_job(
         fs::create_dir_all(d).map_err(|e| format!("destino {}: {e}", d.display()))?;
     }
     let files = Arc::new(list_files(&source)?);
+    if files.is_empty() {
+        return Err("El origen no tiene archivos.".into());
+    }
     let bytes_total: u64 = files.iter().map(|(_, n)| *n).sum();
     let files_total = files.len() as u64;
-
     let progress = dests
         .iter()
         .map(|d| DestProgress {
@@ -195,13 +241,14 @@ pub fn start_job(
             written: 0,
             total: bytes_total,
             files_done: 0,
+            files_skip: 0,
+            files_err: 0,
             bps: 0.0,
             phase: DestPhase::Idle,
             error: None,
             last_file: String::new(),
         })
         .collect();
-
     let state = Arc::new(JobState {
         running: AtomicBool::new(true),
         cancel: AtomicBool::new(false),
@@ -210,8 +257,7 @@ pub fn start_job(
         bytes_total: AtomicU64::new(bytes_total),
         dests: Mutex::new(progress),
     });
-
-    let n = dests.len();
+    let n = dests.len() as u64;
     let done = Arc::new(AtomicU64::new(0));
     let mut handles = Vec::new();
     for (slot, dest) in dests.into_iter().enumerate() {
@@ -220,8 +266,8 @@ pub fn start_job(
         let st = Arc::clone(&state);
         let counter = Arc::clone(&done);
         handles.push(thread::spawn(move || {
-            dest_worker(src, dest, list, Arc::clone(&st), slot, verify);
-            if counter.fetch_add(1, Ordering::Relaxed) + 1 >= n as u64 {
+            dest_worker(src, dest, list, Arc::clone(&st), slot, opts);
+            if counter.fetch_add(1, Ordering::Relaxed) + 1 >= n {
                 st.running.store(false, Ordering::Relaxed);
             }
         }));
