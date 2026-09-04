@@ -15,9 +15,31 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME};
 
 const BLOCK: usize = 1024 * 1024;
+const ALIGN: usize = 4096;
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
+
+/// Buffer cuya dirección es múltiplo de 4096. Obligatorio con FILE_FLAG_NO_BUFFERING.
+struct AlignedBuf {
+    raw: Vec<u8>,
+    off: usize,
+    len: usize,
+}
+
+impl AlignedBuf {
+    fn new(len: usize) -> Self {
+        let raw = vec![0u8; len + ALIGN];
+        let addr = raw.as_ptr() as usize;
+        let off = (ALIGN - (addr % ALIGN)) % ALIGN;
+        debug_assert!((raw.as_ptr() as usize + off) % ALIGN == 0);
+        Self { raw, off, len }
+    }
+
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.raw[self.off..self.off + self.len]
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DestPhase {
@@ -80,8 +102,6 @@ fn ctl(h: HANDLE, code: u32) -> bool {
     ioctl(h, code, None, 0, None, 0)
 }
 
-/// Bloquea y desmonta. Si hay letras y alguna falla, no se escribe ese destino.
-/// Los handles viven hasta que `copy_one` termina — soltarlos libera el lock.
 fn lock_volumes(index: u32, known: &[char]) -> Result<Vec<RawHandle>, String> {
     let mut letters = known.to_vec();
     for l in letters_for_disk(index) {
@@ -107,26 +127,26 @@ fn lock_volumes(index: u32, known: &[char]) -> Result<Vec<RawHandle>, String> {
     Ok(held)
 }
 
-fn seek0(h: HANDLE) -> Result<(), String> {
-    unsafe { SetFilePointerEx(h, 0, None, FILE_BEGIN) }.map_err(|e| format!("seek: {e}"))
+fn seek_to(h: HANDLE, pos: u64) -> Result<(), String> {
+    unsafe { SetFilePointerEx(h, pos as i64, None, FILE_BEGIN) }.map_err(|e| format!("seek {pos}: {e}"))
 }
 
-fn read_block(h: HANDLE, buf: &mut [u8]) -> Result<usize, String> {
+/// Una sola llamada. Si Windows no entrega exactamente `buf.len()`, aborta.
+/// Reintentar a mitad de buffer con NO_BUFFERING desalinnea el offset.
+fn read_exact(h: HANDLE, buf: &mut [u8]) -> Result<(), String> {
     let mut n = 0u32;
     unsafe { ReadFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("lectura"))?;
-    Ok(n as usize)
+    if n as usize != buf.len() {
+        return Err(format!("lectura parcial: {n} de {}. Se detiene.", buf.len()));
+    }
+    Ok(())
 }
 
-fn write_block(h: HANDLE, buf: &[u8]) -> Result<(), String> {
-    let mut off = 0usize;
-    while off < buf.len() {
-        let mut n = 0u32;
-        unsafe { WriteFile(h, Some(&buf[off..]), Some(&mut n), None) }
-            .map_err(|_| win_err("escritura"))?;
-        if n == 0 {
-            return Err("escritura: 0 bytes (disco lleno o handle inválido)".into());
-        }
-        off += n as usize;
+fn write_exact(h: HANDLE, buf: &[u8]) -> Result<(), String> {
+    let mut n = 0u32;
+    unsafe { WriteFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("escritura"))?;
+    if n as usize != buf.len() {
+        return Err(format!("escritura parcial: {n} de {}. Se detiene para no dejar el disco a medias.", buf.len()));
     }
     Ok(())
 }
@@ -151,11 +171,49 @@ fn add_verified(state: &JobState, slot: usize, n: u64) {
 
 fn cancelled(state: &JobState, slot: usize) -> bool {
     if state.cancel.load(Ordering::Relaxed) {
-        set_phase(state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        set_phase(state, slot, DestPhase::Cancelled, Some("Cancelado. El destino puede estar incompleto.".into()));
         true
     } else {
         false
     }
+}
+
+fn transfer_range(
+    src: HANDLE,
+    dst: Option<HANDLE>,
+    hasher: &mut crc32fast::Hasher,
+    buf: &mut [u8],
+    start: u64,
+    end: u64,
+    block: usize,
+    state: &JobState,
+    slot: usize,
+    writing: bool,
+    t0: Instant,
+) -> Result<(), String> {
+    seek_to(src, start)?;
+    if let Some(d) = dst {
+        seek_to(d, start)?;
+    }
+    let mut pos = start;
+    while pos < end {
+        if cancelled(state, slot) {
+            return Err("Cancelado".into());
+        }
+        let chunk = ((end - pos) as usize).min(block);
+        let slice = &mut buf[..chunk];
+        read_exact(src, slice)?;
+        if writing {
+            write_exact(dst.expect("dst"), slice)?;
+            hasher.update(slice);
+            add_written(state, slot, chunk as u64, t0.elapsed().as_secs_f64());
+        } else {
+            hasher.update(slice);
+            add_verified(state, slot, chunk as u64);
+        }
+        pos += chunk as u64;
+    }
+    Ok(())
 }
 
 fn copy_one(
@@ -178,6 +236,10 @@ fn copy_one(
     set_phase(&state, slot, DestPhase::Locking, None);
     let _locks = lock_volumes(dest.index, &dest.letters)?;
 
+    let total = source.size_bytes;
+    let aligned = total - (total % ALIGN as u64);
+    let rest = total - aligned;
+
     let src = open_disk_strict(&source.path, false, FILE_FLAG_NO_BUFFERING)?;
     let dst = open_disk_strict(
         &dest.path,
@@ -185,53 +247,92 @@ fn copy_one(
         FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
     )?;
 
-    seek0(src.0)?;
-    seek0(dst.0)?;
     set_phase(&state, slot, DestPhase::Copying, None);
-
-    let mut buf = vec![0u8; BLOCK];
+    let mut buf = AlignedBuf::new(BLOCK);
     let mut hasher = crc32fast::Hasher::new();
-    let mut copied = 0u64;
-    let total = source.size_bytes;
     let t0 = Instant::now();
 
-    while copied < total {
-        if cancelled(&state, slot) {
-            return Err("Cancelado".into());
-        }
-        let want = ((total - copied) as usize).min(BLOCK);
-        // NO_BUFFERING exige múltiplo de sector; el tamaño del disco lo es.
-        let n = read_block(src.0, &mut buf[..want])?;
-        if n == 0 {
-            return Err(format!("lectura corta en offset {copied}"));
-        }
-        write_block(dst.0, &buf[..n])?;
-        hasher.update(&buf[..n]);
-        copied += n as u64;
-        add_written(&state, slot, n as u64, t0.elapsed().as_secs_f64());
+    if aligned > 0 {
+        transfer_range(
+            src.0,
+            Some(dst.0),
+            &mut hasher,
+            buf.as_mut(),
+            0,
+            aligned,
+            BLOCK,
+            &state,
+            slot,
+            true,
+            t0,
+        )?;
     }
-    if copied != total {
-        return Err(format!("incompleto: {copied} de {total} bytes. Destino no es una copia fiel."));
+
+    // Cola que no es múltiplo de 4096: NO_BUFFERING no la puede escribir.
+    // Handle distinto, sin ese flag, solo para esos pocos bytes.
+    if rest > 0 {
+        drop(src);
+        drop(dst);
+        let src_b = open_disk_strict(&source.path, false, 0)?;
+        let dst_b = open_disk_strict(&dest.path, true, FILE_FLAG_WRITE_THROUGH)?;
+        transfer_range(
+            src_b.0,
+            Some(dst_b.0),
+            &mut hasher,
+            buf.as_mut(),
+            aligned,
+            total,
+            rest as usize,
+            &state,
+            slot,
+            true,
+            t0,
+        )?;
+    }
+
+    if state.dests.lock().unwrap()[slot].written != total {
+        return Err(format!(
+            "incompleto: {} de {total} bytes. Destino no es una copia fiel.",
+            state.dests.lock().unwrap()[slot].written
+        ));
     }
 
     if verify {
         set_phase(&state, slot, DestPhase::Verifying, None);
-        seek0(dst.0)?;
         let expect = hasher.finalize();
         let mut check = crc32fast::Hasher::new();
-        let mut seen = 0u64;
-        while seen < total {
-            if cancelled(&state, slot) {
-                return Err("Cancelado".into());
-            }
-            let want = ((total - seen) as usize).min(BLOCK);
-            let n = read_block(dst.0, &mut buf[..want])?;
-            if n == 0 {
-                return Err("verificación: lectura corta".into());
-            }
-            check.update(&buf[..n]);
-            seen += n as u64;
-            add_verified(&state, slot, n as u64);
+        let src_v = open_disk_strict(&dest.path, false, FILE_FLAG_NO_BUFFERING)?;
+        if aligned > 0 {
+            transfer_range(
+                src_v.0,
+                None,
+                &mut check,
+                buf.as_mut(),
+                0,
+                aligned,
+                BLOCK,
+                &state,
+                slot,
+                false,
+                t0,
+            )?;
+        }
+        drop(src_v);
+        if rest > 0 {
+            let src_vb = open_disk_strict(&dest.path, false, 0)?;
+            transfer_range(
+                src_vb.0,
+                None,
+                &mut check,
+                buf.as_mut(),
+                aligned,
+                total,
+                rest as usize,
+                &state,
+                slot,
+                false,
+                t0,
+            )?;
         }
         let got = check.finalize();
         if got != expect {
