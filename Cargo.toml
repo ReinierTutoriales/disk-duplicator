@@ -1,6 +1,6 @@
 [package]
 name = "disk-duplicator"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Duplicador de discos físicos 1→N para Windows"
 license = "MIT"
@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 eframe = "0.29"
 egui = "0.29"
-crc32fast = "1.4"
+blake3 = "1.5"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

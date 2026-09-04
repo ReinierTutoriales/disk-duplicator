@@ -20,7 +20,6 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
 
-/// Buffer cuya dirección es múltiplo de 4096. Obligatorio con FILE_FLAG_NO_BUFFERING.
 struct AlignedBuf {
     raw: Vec<u8>,
     off: usize,
@@ -61,6 +60,7 @@ pub struct DestProgress {
     pub bps: f64,
     pub phase: DestPhase,
     pub error: Option<String>,
+    pub hash: Option<String>,
 }
 
 pub struct JobState {
@@ -131,8 +131,6 @@ fn seek_to(h: HANDLE, pos: u64) -> Result<(), String> {
     unsafe { SetFilePointerEx(h, pos as i64, None, FILE_BEGIN) }.map_err(|e| format!("seek {pos}: {e}"))
 }
 
-/// Una sola llamada. Si Windows no entrega exactamente `buf.len()`, aborta.
-/// Reintentar a mitad de buffer con NO_BUFFERING desalinnea el offset.
 fn read_exact(h: HANDLE, buf: &mut [u8]) -> Result<(), String> {
     let mut n = 0u32;
     unsafe { ReadFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("lectura"))?;
@@ -146,7 +144,10 @@ fn write_exact(h: HANDLE, buf: &[u8]) -> Result<(), String> {
     let mut n = 0u32;
     unsafe { WriteFile(h, Some(buf), Some(&mut n), None) }.map_err(|_| win_err("escritura"))?;
     if n as usize != buf.len() {
-        return Err(format!("escritura parcial: {n} de {}. Se detiene para no dejar el disco a medias.", buf.len()));
+        return Err(format!(
+            "escritura parcial: {n} de {}. Se detiene para no dejar el disco a medias.",
+            buf.len()
+        ));
     }
     Ok(())
 }
@@ -155,6 +156,10 @@ fn set_phase(state: &JobState, slot: usize, phase: DestPhase, err: Option<String
     let mut g = state.dests.lock().unwrap();
     g[slot].phase = phase;
     g[slot].error = err;
+}
+
+fn set_hash(state: &JobState, slot: usize, hash: String) {
+    state.dests.lock().unwrap()[slot].hash = Some(hash);
 }
 
 fn add_written(state: &JobState, slot: usize, n: u64, elapsed: f64) {
@@ -171,7 +176,12 @@ fn add_verified(state: &JobState, slot: usize, n: u64) {
 
 fn cancelled(state: &JobState, slot: usize) -> bool {
     if state.cancel.load(Ordering::Relaxed) {
-        set_phase(state, slot, DestPhase::Cancelled, Some("Cancelado. El destino puede estar incompleto.".into()));
+        set_phase(
+            state,
+            slot,
+            DestPhase::Cancelled,
+            Some("Cancelado. El destino puede estar incompleto.".into()),
+        );
         true
     } else {
         false
@@ -181,7 +191,7 @@ fn cancelled(state: &JobState, slot: usize) -> bool {
 fn transfer_range(
     src: HANDLE,
     dst: Option<HANDLE>,
-    hasher: &mut crc32fast::Hasher,
+    hasher: &mut blake3::Hasher,
     buf: &mut [u8],
     start: u64,
     end: u64,
@@ -249,7 +259,7 @@ fn copy_one(
 
     set_phase(&state, slot, DestPhase::Copying, None);
     let mut buf = AlignedBuf::new(BLOCK);
-    let mut hasher = crc32fast::Hasher::new();
+    let mut hasher = blake3::Hasher::new();
     let t0 = Instant::now();
 
     if aligned > 0 {
@@ -268,8 +278,6 @@ fn copy_one(
         )?;
     }
 
-    // Cola que no es múltiplo de 4096: NO_BUFFERING no la puede escribir.
-    // Handle distinto, sin ese flag, solo para esos pocos bytes.
     if rest > 0 {
         drop(src);
         drop(dst);
@@ -290,17 +298,21 @@ fn copy_one(
         )?;
     }
 
-    if state.dests.lock().unwrap()[slot].written != total {
-        return Err(format!(
-            "incompleto: {} de {total} bytes. Destino no es una copia fiel.",
-            state.dests.lock().unwrap()[slot].written
-        ));
+    {
+        let written = state.dests.lock().unwrap()[slot].written;
+        if written != total {
+            return Err(format!(
+                "incompleto: {written} de {total} bytes. Destino no es una copia fiel."
+            ));
+        }
     }
+
+    let expect = hasher.finalize();
+    set_hash(&state, slot, expect.to_hex().to_string());
 
     if verify {
         set_phase(&state, slot, DestPhase::Verifying, None);
-        let expect = hasher.finalize();
-        let mut check = crc32fast::Hasher::new();
+        let mut check = blake3::Hasher::new();
         let src_v = open_disk_strict(&dest.path, false, FILE_FLAG_NO_BUFFERING)?;
         if aligned > 0 {
             transfer_range(
@@ -337,7 +349,9 @@ fn copy_one(
         let got = check.finalize();
         if got != expect {
             return Err(format!(
-                "CRC no coincide (origen {expect:#010x} destino {got:#010x}). El destino no es fiable."
+                "hash no coincide (origen {} destino {}). El destino no es fiable.",
+                expect.to_hex(),
+                got.to_hex()
             ));
         }
     }
@@ -361,6 +375,7 @@ pub fn start_job(
             bps: 0.0,
             phase: DestPhase::Idle,
             error: None,
+            hash: None,
         })
         .collect();
     let state = Arc::new(JobState {

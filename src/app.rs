@@ -4,6 +4,18 @@ use eframe::egui::{self, Align, Color32, Layout, RichText};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+fn phase_color(phase: DestPhase) -> Color32 {
+    match phase {
+        DestPhase::Idle => Color32::from_gray(140),
+        DestPhase::Locking => Color32::from_rgb(190, 140, 40),
+        DestPhase::Copying => Color32::from_rgb(60, 120, 200),
+        DestPhase::Verifying => Color32::from_rgb(150, 90, 200),
+        DestPhase::Done => Color32::from_rgb(40, 140, 70),
+        DestPhase::Failed => Color32::from_rgb(200, 60, 60),
+        DestPhase::Cancelled => Color32::from_gray(150),
+    }
+}
+
 pub struct DuplicatorApp {
     disks: Vec<DiskInfo>,
     enum_error: Option<String>,
@@ -32,7 +44,8 @@ impl DuplicatorApp {
             hide_system: true,
             verify: true,
             confirm_open: false,
-            status: "Origen con el círculo. Destinos con el check. Cierra Explorer en los destinos.".into(),
+            status: "Origen con el círculo. Destinos con el check. Cierra Explorer en los destinos."
+                .into(),
             job: None,
             workers: Vec::new(),
         }
@@ -118,7 +131,11 @@ impl DuplicatorApp {
             "PD{} → {} destino(s).{}",
             src.index,
             dests.len(),
-            if self.verify { " Verificando CRC." } else { "" }
+            if self.verify {
+                " Releyendo y comparando hash."
+            } else {
+                ""
+            }
         );
         let (state, handles) = start_job(src, dests, self.verify);
         self.job = Some(state);
@@ -142,7 +159,7 @@ impl eframe::App for DuplicatorApp {
                 ui.strong("Disk Duplicator");
                 ui.separator();
                 ui.checkbox(&mut self.hide_system, "Ocultar sistema");
-                ui.checkbox(&mut self.verify, "Verificar CRC");
+                ui.checkbox(&mut self.verify, "Releer y comparar hash");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Actualizar").clicked() {
                         self.refresh();
@@ -276,12 +293,29 @@ impl eframe::App for DuplicatorApp {
                     };
                     ui.horizontal(|ui| {
                         ui.label(format!("PD{}", dp.index));
-                        ui.add(egui::ProgressBar::new(frac).desired_width(260.0).show_percentage());
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .desired_width(260.0)
+                                .show_percentage(),
+                        );
                         ui.label(format_bps(dp.bps));
-                        ui.label(tag);
+                        ui.colored_label(phase_color(dp.phase), tag);
                     });
-                    if let Some(e) = dp.error {
-                        ui.colored_label(Color32::from_rgb(200, 60, 60), e);
+                    if let Some(e) = &dp.error {
+                        ui.colored_label(Color32::from_rgb(200, 60, 60), e.as_str());
+                    }
+                    if let Some(h) = &dp.hash {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("blake3 {h}"))
+                                    .small()
+                                    .monospace()
+                                    .weak(),
+                            );
+                            if ui.small_button("Copiar").clicked() {
+                                ui.output_mut(|o| o.copied_text = h.clone());
+                            }
+                        });
                     }
                 }
             }
@@ -302,7 +336,7 @@ impl eframe::App for DuplicatorApp {
                     ui.add_space(6.0);
                     ui.label(format!("Origen: {src}"));
                     if self.verify {
-                        ui.label("Después se verifica CRC32 del destino.");
+                        ui.label("Después se relee el destino y se compara el hash BLAKE3.");
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
@@ -310,7 +344,11 @@ impl eframe::App for DuplicatorApp {
                             self.confirm_open = false;
                         }
                         if ui
-                            .button(RichText::new("Escribir destinos").color(Color32::WHITE).strong())
+                            .button(
+                                RichText::new("Escribir destinos")
+                                    .color(Color32::WHITE)
+                                    .strong(),
+                            )
                             .clicked()
                         {
                             self.start();
