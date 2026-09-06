@@ -11,6 +11,7 @@ egui = "0.29"
 blake3 = "1.5"
 walkdir = "2"
 rfd = "0.15"
+crossbeam-channel = "0.5"
 
 [build-dependencies]
 embed-resource = "2.4"
