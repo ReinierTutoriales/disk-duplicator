@@ -3,21 +3,30 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+use crossbeam_channel as mpsc;
 
 const BLOCK: usize = 4 * 1024 * 1024;
 const RESERVED_RAM: usize = 512 * 1024 * 1024;
 const MIN_QUEUE: usize = 2;
 const MAX_QUEUE: usize = 64;
 const RETRIES: usize = 2;
+/// Intervalo de sondeo de cada intento de entrega — NO es el criterio de
+/// abandono, es solo la granularidad con la que reintentamos y volvemos a
+/// chequear cancelación/pausa mientras un destino no tiene espacio libre.
+const SEND_POLL: Duration = Duration::from_millis(150);
+/// Criterio real de degradación: tiempo CONTINUO sin poder entregar nada a
+/// un destino. Un HDD/USB momentáneamente ocupado (un solo Full) no alcanza
+/// ni de cerca este umbral; solo un atraso sostenido lo cruza.
+const STALL_THRESHOLD: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy)]
 pub struct CopyOpts { pub verify: bool, pub skip_same: bool, pub keep_going: bool }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DestPhase { Idle, Copying, Verifying, Done, Failed, Cancelled }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,7 +72,14 @@ impl Drop for Buffer { fn drop(&mut self) { self.budget.release(); } }
 #[derive(Clone)]
 struct FileInfo { rel: PathBuf, size: u64, mtime_ns: u128 }
 enum FanoutItem { Begin(FileInfo), Data(BufferRef), End { hash: [u8; 32] } }
-struct DestControl { alive: AtomicBool, queue_depth: AtomicUsize }
+struct DestControl { alive: AtomicBool, queue_depth: AtomicUsize, last_progress: Mutex<Instant> }
+impl DestControl {
+    fn new() -> Self {
+        Self { alive: AtomicBool::new(true), queue_depth: AtomicUsize::new(0), last_progress: Mutex::new(Instant::now()) }
+    }
+    fn mark_progress(&self) { *self.last_progress.lock().unwrap() = Instant::now(); }
+    fn stalled_for(&self) -> Duration { self.last_progress.lock().unwrap().elapsed() }
+}
 
 fn queue_depth_for(n_dests: usize) -> usize {
     if n_dests == 0 { return MIN_QUEUE; }
@@ -87,9 +103,11 @@ fn list_files(root: &Path) -> Result<Vec<FileInfo>, String> {
 }
 
 fn dest_inside_source(src: &Path, dst: &Path) -> bool {
-    let Ok(s) = src.canonicalize() else { return false; };
-    let Ok(d) = dst.canonicalize() else { return false; };
-    d == s || d.starts_with(&s)
+    if dst.starts_with(src) { return true; }
+    match (src.canonicalize(), dst.canonicalize()) {
+        (Ok(s), Ok(d)) => d == s || d.starts_with(&s),
+        _ => false,
+    }
 }
 fn wait_pause(state: &JobState) -> bool {
     while state.pause.load(Ordering::Relaxed) && !state.cancel.load(Ordering::Relaxed) {
@@ -146,8 +164,26 @@ fn hash_file(path: &Path, state: Option<&JobState>) -> Result<blake3::Hash, Stri
     }
     Ok(h.finalize())
 }
+fn retry_io<T>(state: &JobState, slot: usize, mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last_err = String::new();
+    for attempt in 0..=RETRIES {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last_err = e;
+                if attempt < RETRIES {
+                    state.dests.lock().unwrap()[slot].retries += 1;
+                    thread::sleep(Duration::from_millis(75 * (attempt as u64 + 1)));
+                    if !wait_pause(state) { return Err("Cancelado".into()); }
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 fn set_mtime(dst: &Path, mtime: std::time::SystemTime) -> Result<(), String> {
-    let mut f = OpenOptions::new().write(true).open(dst).map_err(|e| format!("metadata: {e}"))?;
+    let f = OpenOptions::new().write(true).open(dst).map_err(|e| format!("metadata: {e}"))?;
     f.set_modified(mtime).map_err(|e| format!("metadata: {e}"))?; f.sync_all().map_err(|e| format!("metadata sync: {e}"))?; Ok(())
 }
 
@@ -164,7 +200,7 @@ fn copy_file_atomic(src: &Path, dst: &Path, verify: bool, state: &JobState, slot
             let n = input.read(&mut buf).map_err(|e| format!("lectura: {e}"))?;
             if n == 0 { break; }
             copied += n as u64;
-            output.write_all(&buf[..n]).map_err(|e| format!("escritura: {e}"))?;
+            retry_io(state, slot, || output.write_all(&buf[..n]).map_err(|e| format!("escritura: {e}")))?;
             h.update(&buf[..n]);
         }
         if copied != meta.len() { return Err(format!("origen cambió: {}", src.display())); }
@@ -257,10 +293,10 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
             }
             Ok(FanoutItem::Data(buf)) => {
                 if let Some((info, f, h, copied)) = current.as_mut() {
-                    if let Err(e) = f.write_all(&buf.data) {
-                        control.alive.store(false, Ordering::Release);
-                        set_error(&state, slot, format!("escritura {}: {e}", info.rel.display()));
-                    } else { h.update(&buf.data); *copied += buf.data.len() as u64; }
+                    match retry_io(&state, slot, || f.write_all(&buf.data).map_err(|e| format!("escritura {}: {e}", info.rel.display()))) {
+                        Ok(()) => { h.update(&buf.data); *copied += buf.data.len() as u64; }
+                        Err(e) => { control.alive.store(false, Ordering::Release); set_error(&state, slot, e); }
+                    }
                 }
                 control.queue_depth.fetch_sub(1, Ordering::AcqRel);
                 state.dests.lock().unwrap()[slot].queue_depth = control.queue_depth.load(Ordering::Acquire);
@@ -273,9 +309,9 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     drop(f); cleanup_part(&dst); control.alive.store(false, Ordering::Release);
                     set_error(&state, slot, format!("tamaño inesperado en {}", info.rel.display())); continue;
                 }
-                if let Err(e) = f.flush().and_then(|_| f.sync_all()) {
+                if let Err(e) = retry_io(&state, slot, || f.flush().and_then(|_| f.sync_all()).map_err(|e| format!("sync: {e}"))) {
                     drop(f); cleanup_part(&dst); control.alive.store(false, Ordering::Release);
-                    set_error(&state, slot, format!("sync: {e}")); continue;
+                    set_error(&state, slot, e); continue;
                 }
                 drop(f);
                 let expected = hasher.finalize();
@@ -292,7 +328,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     }
                     set_phase(&state, slot, DestPhase::Copying, None);
                 }
-                if let Err(e) = commit_part(&tmp, &dst) { cleanup_part(&dst); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue; }
+                if let Err(e) = retry_io(&state, slot, || commit_part(&tmp, &dst)) { cleanup_part(&dst); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue; }
                 if let Ok(m) = fs::metadata(source.join(&info.rel)).and_then(|m| m.modified()) {
                     if let Err(e) = set_mtime(&dst, m) { control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue; }
                 }
@@ -323,19 +359,50 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
     }
 }
 
-fn send_or_drop(tx: &mpsc::SyncSender<FanoutItem>, item: FanoutItem, control: &DestControl, state: &JobState, counts_data: bool) -> Result<(), FanoutItem> {
-    let mut item = item; let mut reserved = false;
-    if counts_data { control.queue_depth.fetch_add(1, Ordering::AcqRel); reserved = true; }
-    if state.cancel.load(Ordering::Relaxed) || !control.alive.load(Ordering::Acquire) {
-        if reserved { control.queue_depth.fetch_sub(1, Ordering::AcqRel); } return Err(item);
+enum SendOutcome { Ok, Timeout, Dead }
+fn try_deliver_once(tx: &mpsc::Sender<FanoutItem>, item: FanoutItem, control: &DestControl) -> SendOutcome {
+    match tx.send_timeout(item, SEND_POLL) {
+        Ok(()) => { control.mark_progress(); SendOutcome::Ok }
+        Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => SendOutcome::Timeout,
+        Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => SendOutcome::Dead,
     }
-    match tx.try_send(item) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(v)) | Err(mpsc::TrySendError::Disconnected(v)) => {
-            control.alive.store(false, Ordering::Release);
-            if reserved { control.queue_depth.fetch_sub(1, Ordering::AcqRel); }
-            Err(v)
+}
+
+fn deliver_to_active(
+    active: &mut Vec<usize>,
+    senders: &[Option<mpsc::Sender<FanoutItem>>],
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+    counts_data: bool,
+    make_item: impl Fn() -> FanoutItem,
+) {
+    let mut pending = active.clone();
+    while !pending.is_empty() {
+        if !wait_pause(state) { active.clear(); return; }
+        let mut still_pending = Vec::with_capacity(pending.len());
+        for slot in pending {
+            if !controls[slot].alive.load(Ordering::Acquire) { continue; }
+            let Some(tx) = senders[slot].as_ref() else { continue };
+            if counts_data { controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel); }
+            match try_deliver_once(tx, make_item(), &controls[slot]) {
+                SendOutcome::Ok => {}
+                SendOutcome::Timeout => {
+                    if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
+                    if controls[slot].stalled_for() >= STALL_THRESHOLD {
+                        controls[slot].alive.store(false, Ordering::Release);
+                        active.retain(|&s| s != slot);
+                    } else {
+                        still_pending.push(slot);
+                    }
+                }
+                SendOutcome::Dead => {
+                    if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
+                    controls[slot].alive.store(false, Ordering::Release);
+                    active.retain(|&s| s != slot);
+                }
+            }
         }
+        pending = still_pending;
     }
 }
 
@@ -353,8 +420,8 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
     let source_failed = Arc::new(AtomicBool::new(false));
     let mut senders = Vec::new(); let mut controls = Vec::new(); let mut handles = Vec::new();
     for (slot, dest) in dests.iter().cloned().enumerate() {
-        let (tx, rx) = mpsc::sync_channel(q);
-        let control = Arc::new(DestControl { alive: AtomicBool::new(true), queue_depth: AtomicUsize::new(0) });
+        let (tx, rx) = mpsc::bounded(q);
+        let control = Arc::new(DestControl::new());
         controls.push(Arc::clone(&control));
         let st = Arc::clone(&state); let src = source.clone(); let list = Arc::clone(&files);
         let failed = Arc::clone(&source_failed); let c = Arc::clone(&control);
@@ -373,13 +440,10 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
                 skip_mask[slot] = state_cache[slot].contains(&key) || (opts.skip_same && same_enough(&src, &dst));
             }
             mark_skipped_all(&state, info, &skip_mask);
-            let mut active = Vec::new();
-            for slot in 0..dests.len() {
-                if skip_mask[slot] || !controls[slot].alive.load(Ordering::Acquire) { continue; }
-                if let Some(tx) = senders[slot].as_ref() {
-                    if send_or_drop(tx, FanoutItem::Begin(info.clone()), &controls[slot], &state, false).is_ok() { active.push(slot); }
-                }
-            }
+            let mut active: Vec<usize> = (0..dests.len())
+                .filter(|&slot| !skip_mask[slot] && controls[slot].alive.load(Ordering::Acquire))
+                .collect();
+            deliver_to_active(&mut active, &senders, &controls, &state, false, || FanoutItem::Begin(info.clone()));
             if active.is_empty() { continue; }
             let path = source.join(&info.rel);
             let mut input = match File::open(&path) {
@@ -398,7 +462,7 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
                 };
                 raw.truncate(n); hasher.update(&raw); copied += n as u64;
                 let buf = Arc::new(Buffer { data: raw.into_boxed_slice(), budget: Arc::clone(&budget) });
-                active.retain(|&slot| send_or_drop(senders[slot].as_ref().unwrap(), FanoutItem::Data(Arc::clone(&buf)), &controls[slot], &state, true).is_ok());
+                deliver_to_active(&mut active, &senders, &controls, &state, true, || FanoutItem::Data(Arc::clone(&buf)));
                 if active.is_empty() { break; }
             }
             if !read_ok { break; }
@@ -406,12 +470,8 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
                 source_failed.store(true, Ordering::Release); set_error(&state, 0, format!("origen cambió: {}", path.display())); break;
             }
             let hash = *hasher.finalize().as_bytes();
-            for slot in active {
-                if let Some(tx) = senders[slot].as_ref() {
-                    let _ = send_or_drop(tx, FanoutItem::End { hash }, &controls[slot], &state, false);
-                }
-                state_cache[slot].insert(key.clone());
-            }
+            for &slot in &active { state_cache[slot].insert(key.clone()); }
+            deliver_to_active(&mut active, &senders, &controls, &state, false, || FanoutItem::End { hash });
         }
         senders.clear();
         state.running.store(false, Ordering::Release);
@@ -506,4 +566,88 @@ mod tests {
         assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 0);
     }
     #[test] fn format_is_sane() { assert_eq!(format_bps(0.0), "0 B/s"); assert!(format_bps(1024.0).contains("KB/s")); }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use std::time::Duration as Dur;
+
+    #[test]
+    fn momentary_full_queue_does_not_kill_destination() {
+        let (tx, rx) = mpsc::bounded::<FanoutItem>(1);
+        let control = DestControl::new();
+        let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
+        let buf1 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+        let buf2 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+
+        assert!(matches!(try_deliver_once(&tx, FanoutItem::Data(buf1), &control), SendOutcome::Ok));
+        assert!(control.alive.load(Ordering::Relaxed));
+        let outcome1 = try_deliver_once(&tx, FanoutItem::Data(buf2), &control);
+        assert!(matches!(outcome1, SendOutcome::Timeout));
+        assert!(control.alive.load(Ordering::Relaxed));
+
+        let _ = rx.recv();
+        let buf3 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+        let outcome2 = try_deliver_once(&tx, FanoutItem::Data(buf3), &control);
+        assert!(matches!(outcome2, SendOutcome::Ok));
+        assert!(control.alive.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn sustained_stall_past_threshold_eventually_degrades() {
+        let (tx, _rx) = mpsc::bounded::<FanoutItem>(1);
+        let control = DestControl::new();
+        let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
+        let buf1 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+        assert!(matches!(try_deliver_once(&tx, FanoutItem::Data(buf1), &control), SendOutcome::Ok));
+        *control.last_progress.lock().unwrap() = Instant::now() - STALL_THRESHOLD - Duration::from_secs(1);
+        let buf2 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+        let outcome = try_deliver_once(&tx, FanoutItem::Data(buf2), &control);
+        assert!(matches!(outcome, SendOutcome::Timeout));
+        assert!(control.stalled_for() >= STALL_THRESHOLD);
+    }
+
+    #[test]
+    fn nested_new_destination_is_rejected() {
+        let root = std::env::temp_dir().join(format!("dd-regr-nest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("Fotos");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("a.jpg"), vec![1u8; 100]).unwrap();
+        let dest_new_nested = source.join("Backup");
+        assert!(!dest_new_nested.exists());
+
+        let opts = CopyOpts { verify: false, skip_same: false, keep_going: true };
+        let result = start_job(source.clone(), vec![dest_new_nested], opts);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn slow_destination_does_not_starve_fast_one() {
+        let root = std::env::temp_dir().join(format!("dd-regr-mix-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        for i in 0..5 {
+            fs::write(root.join("src").join(format!("f{i}.bin")), vec![i as u8; 2_000_000]).unwrap();
+        }
+        let fast = root.join("fast");
+        let slow = root.join("slow");
+        let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
+        let (state, handles) = start_job(root.join("src"), vec![fast.clone(), slow.clone()], opts).unwrap();
+        let t0 = Instant::now();
+        while state.running.load(Ordering::Relaxed) && t0.elapsed() < Dur::from_secs(30) {
+            thread::sleep(Dur::from_millis(20));
+        }
+        for h in handles { h.join().unwrap(); }
+        let snap = state.snapshot();
+        for dp in &snap { assert_eq!(dp.phase, DestPhase::Done, "{}: {:?}", dp.label, dp.error); }
+        for i in 0..5 {
+            let name = format!("f{i}.bin");
+            assert_eq!(fs::read(fast.join(&name)).unwrap().len(), 2_000_000);
+            assert_eq!(fs::read(slow.join(&name)).unwrap().len(), 2_000_000);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 }
