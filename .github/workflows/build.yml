@@ -1,7 +1,7 @@
 name: Build Windows Executable
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feat/fanout-engine ]
   pull_request:
     branches: [ main ]
 jobs:
@@ -14,6 +14,8 @@ jobs:
       with:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
+    - name: Test
+      run: cargo test --verbose
     - name: Build release
       run: cargo build --release --verbose
     - name: Upload executable
