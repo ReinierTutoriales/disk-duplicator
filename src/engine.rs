@@ -18,9 +18,13 @@ const RETRIES: usize = 2;
 /// abandono, es solo la granularidad con la que reintentamos y volvemos a
 /// chequear cancelación/pausa mientras un destino no tiene espacio libre.
 const SEND_POLL: Duration = Duration::from_millis(150);
+/// Sondeo no bloqueante del planificador cuando ya sabemos que un destino
+/// tiene la cola llena. Evita que un destino lento introduzca SEND_POLL de
+/// latencia por cada destino rápido que venga después de él.
+const DELIVERY_RETRY_SLEEP: Duration = Duration::from_millis(2);
 /// Criterio real de degradación: tiempo CONTINUO sin poder entregar nada a
-/// un destino. Un HDD/USB momentáneamente ocupado (un solo Full) no alcanza
-/// ni de cerca este umbral; solo un atraso sostenido lo cruza.
+/// un destino. Un HDD momentáneamente ocupado no alcanza ni de cerca este
+/// umbral; solo un atraso sostenido lo cruza.
 const STALL_THRESHOLD: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy)]
@@ -368,6 +372,17 @@ fn try_deliver_once(tx: &mpsc::Sender<FanoutItem>, item: FanoutItem, control: &D
     }
 }
 
+fn try_deliver_now(tx: &mpsc::Sender<FanoutItem>, item: FanoutItem, control: &DestControl) -> Result<(), FanoutItem> {
+    match tx.try_send(item) {
+        Ok(()) => { control.mark_progress(); Ok(()) }
+        Err(crossbeam_channel::TrySendError::Full(item)) => Err(item),
+        Err(crossbeam_channel::TrySendError::Disconnected(item)) => {
+            control.alive.store(false, Ordering::Release);
+            Err(item)
+        }
+    }
+}
+
 fn deliver_to_active(
     active: &mut Vec<usize>,
     senders: &[Option<mpsc::Sender<FanoutItem>>],
@@ -376,33 +391,53 @@ fn deliver_to_active(
     counts_data: bool,
     make_item: impl Fn() -> FanoutItem,
 ) {
-    let mut pending = active.clone();
+    // Primera pasada completamente no bloqueante: todos los destinos que
+    // tienen espacio reciben el elemento inmediatamente. Un destino lento no
+    // puede interponerse entre el lector y los destinos rápidos.
+    let mut pending: Vec<(usize, FanoutItem)> = Vec::new();
+    for &slot in active.iter() {
+        if !controls[slot].alive.load(Ordering::Acquire) { continue; }
+        let Some(tx) = senders[slot].as_ref() else { continue };
+        match try_deliver_now(tx, make_item(), &controls[slot]) {
+            Ok(()) => {
+                if counts_data {
+                    controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel);
+                    state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire);
+                }
+            }
+            Err(item) if controls[slot].alive.load(Ordering::Acquire) => pending.push((slot, item)),
+            Err(_) => active.retain(|&s| s != slot),
+        }
+    }
+
+    // Solo los destinos que realmente estaban llenos permanecen pendientes.
+    // Se sondean en rondas cortas; no se acumulan 150 ms por destino.
     while !pending.is_empty() {
         if !wait_pause(state) { active.clear(); return; }
-        let mut still_pending = Vec::with_capacity(pending.len());
-        for slot in pending {
+        let mut next = Vec::with_capacity(pending.len());
+        for (slot, item) in pending {
             if !controls[slot].alive.load(Ordering::Acquire) { continue; }
-            let Some(tx) = senders[slot].as_ref() else { continue };
-            if counts_data { controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel); }
-            match try_deliver_once(tx, make_item(), &controls[slot]) {
-                SendOutcome::Ok => {}
-                SendOutcome::Timeout => {
-                    if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
+            let Some(tx) = senders[slot].as_ref() else { continue; };
+            match try_deliver_now(tx, item, &controls[slot]) {
+                Ok(()) => {
+                    if counts_data {
+                        controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel);
+                        state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire);
+                    }
+                }
+                Err(item) if controls[slot].alive.load(Ordering::Acquire) => {
                     if controls[slot].stalled_for() >= STALL_THRESHOLD {
                         controls[slot].alive.store(false, Ordering::Release);
                         active.retain(|&s| s != slot);
                     } else {
-                        still_pending.push(slot);
+                        next.push((slot, item));
                     }
                 }
-                SendOutcome::Dead => {
-                    if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
-                    controls[slot].alive.store(false, Ordering::Release);
-                    active.retain(|&s| s != slot);
-                }
+                Err(_) => active.retain(|&s| s != slot),
             }
         }
-        pending = still_pending;
+        pending = next;
+        if !pending.is_empty() { thread::sleep(DELIVERY_RETRY_SLEEP); }
     }
 }
 
@@ -649,5 +684,36 @@ mod regression_tests {
             assert_eq!(fs::read(slow.join(&name)).unwrap().len(), 2_000_000);
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fast_destination_is_dispatched_before_slow_queue_wait() {
+        let (slow_tx, slow_rx) = mpsc::bounded::<FanoutItem>(1);
+        let (fast_tx, fast_rx) = mpsc::bounded::<FanoutItem>(1);
+        let slow_control = Arc::new(DestControl::new());
+        let fast_control = Arc::new(DestControl::new());
+        let controls = vec![Arc::clone(&slow_control), Arc::clone(&fast_control)];
+        let senders = vec![Some(slow_tx), Some(fast_tx)];
+        let gauge = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(JobState {
+            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
+            files_total: AtomicU64::new(1), bytes_total: AtomicU64::new(1), buffers_in_flight: gauge,
+            max_buffers: 8, fanout: true, dests: Mutex::new(vec![
+                DestProgress { label: "slow".into(), written: 0, total: 1, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None, last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0 },
+                DestProgress { label: "fast".into(), written: 0, total: 1, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None, last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0 },
+            ]),
+        });
+        let _ = slow_tx.send(FanoutItem::End { hash: [0; 32] });
+        let state_for_thread = Arc::clone(&state);
+        let started = Instant::now();
+        let handle = thread::spawn(move || {
+            let mut active = vec![0usize, 1usize];
+            deliver_to_active(&mut active, &senders, &controls, &state_for_thread, false, || FanoutItem::End { hash: [1; 32] });
+        });
+        let fast_item = fast_rx.recv_timeout(Duration::from_millis(50)).expect("el destino rápido debe recibir sin esperar 150 ms");
+        assert!(matches!(fast_item, FanoutItem::End { hash } if hash == [1; 32]));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let _ = slow_rx.recv();
+        handle.join().unwrap();
     }
 }
