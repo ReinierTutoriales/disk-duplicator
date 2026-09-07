@@ -55,8 +55,11 @@ fn list_source_files(root: &Path) -> Result<Vec<PlannedFile>, String> {
         if name.ends_with(".part") || name == "paquetecopies.b3" {
             continue;
         }
-        let meta = entry.metadata().map_err(|e| format!("metadata {}: {e}", entry.path().display()))?;
-        File::open(entry.path()).map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
+        let meta = entry
+            .metadata()
+            .map_err(|e| format!("metadata {}: {e}", entry.path().display()))?;
+        File::open(entry.path())
+            .map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
         let rel = entry
             .path()
             .strip_prefix(root)
@@ -126,7 +129,7 @@ fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> 
 fn same_enough(src: &Path, dst: &Path) -> bool {
     let Ok(a) = fs::metadata(src) else { return false; };
     let Ok(b) = fs::metadata(dst) else { return false; };
-    if !b.is_file() || a.len() != b.len() {
+    if !a.is_file() || !b.is_file() || a.len() != b.len() {
         return false;
     }
     match (a.modified(), b.modified()) {
@@ -208,6 +211,22 @@ fn round_up(value: u64, granularity: u64) -> u64 {
         .saturating_mul(granularity)
 }
 
+fn destination_file_allocation(dst: &Path, granularity: u64) -> Result<Option<u64>, String> {
+    match fs::metadata(dst) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(format!(
+                    "Conflicto en {}: el origen requiere un archivo, pero el destino contiene otro tipo de entrada.",
+                    dst.display()
+                ));
+            }
+            Ok(Some(round_up(meta.len(), granularity)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("No se pudo inspeccionar {}: {e}", dst.display())),
+    }
+}
+
 fn plan_destination(
     source: &Path,
     dest: &Path,
@@ -221,12 +240,10 @@ fn plan_destination(
     let total = fs2::total_space(dest)
         .map_err(|e| format!("No se pudo consultar capacidad de {}: {e}", dest.display()))?;
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
-    let reserve = MIN_FREE_RESERVE.max(total.saturating_mul(RESERVE_PERCENT) / 100);
     let completed = normalize_completed_state(source, dest, files)?;
 
     let mut plan = DestinationPlan {
         available_space: available,
-        reserve_space: reserve,
         ..DestinationPlan::default()
     };
     let mut committed_delta: i128 = 0;
@@ -241,28 +258,32 @@ fn plan_destination(
             continue;
         }
 
+        let old_alloc = destination_file_allocation(&dst, granularity)?;
         let new_alloc = round_up(info.size, granularity);
-        let old_alloc = fs::metadata(&dst)
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|m| round_up(m.len(), granularity))
-            .unwrap_or(0);
 
-        if old_alloc == 0 {
-            plan.new_files += 1;
-        } else {
+        if old_alloc.is_some() {
             plan.replace_files += 1;
+        } else {
+            plan.new_files += 1;
         }
         plan.bytes_to_write = plan.bytes_to_write.saturating_add(info.size);
 
+        // El archivo anterior permanece intacto mientras se escribe el .part.
+        // Solo después del commit se libera su asignación anterior.
         let during_temp = committed_delta.saturating_add(new_alloc as i128);
         peak_extra = peak_extra.max(during_temp);
         committed_delta = committed_delta
             .saturating_add(new_alloc as i128)
-            .saturating_sub(old_alloc as i128);
+            .saturating_sub(old_alloc.unwrap_or(0) as i128);
     }
 
     plan.peak_extra_space = peak_extra.max(0).min(u64::MAX as i128) as u64;
+    plan.reserve_space = if plan.bytes_to_write == 0 {
+        0
+    } else {
+        MIN_FREE_RESERVE.max(total.saturating_mul(RESERVE_PERCENT) / 100)
+    };
+
     let required_with_reserve = plan.peak_extra_space.saturating_add(plan.reserve_space);
     if available < required_with_reserve {
         let missing = required_with_reserve - available;
@@ -271,7 +292,7 @@ fn plan_destination(
             dest.display(),
             plan.peak_extra_space,
             plan.reserve_space,
-            available,
+            plan.available_space,
             missing
         ));
     }
@@ -420,6 +441,10 @@ mod tests {
         p
     }
 
+    fn opts(skip_same: bool) -> CopyOpts {
+        CopyOpts { verify: false, skip_same, keep_going: true }
+    }
+
     #[test]
     fn round_up_tracks_allocation_units() {
         assert_eq!(round_up(0, 4096), 0);
@@ -490,6 +515,53 @@ mod tests {
         let valid = normalize_completed_state(&src, &dst, &files).unwrap();
         assert!(valid.is_empty());
         assert!(load_completed(&dst).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_byte_existing_file_is_replacement() {
+        let root = temp_dir("zero");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.bin"), []).unwrap();
+        fs::write(dst.join("a.bin"), []).unwrap();
+        let files = list_source_files(&src).unwrap();
+        let plan = plan_destination(&src, &dst, &files, opts(false)).unwrap();
+        assert_eq!(plan.new_files, 0);
+        assert_eq!(plan.replace_files, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_file_directory_type_conflict() {
+        let root = temp_dir("type-conflict");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(dst.join("a.bin")).unwrap();
+        fs::write(src.join("a.bin"), b"abc").unwrap();
+        let files = list_source_files(&src).unwrap();
+        assert!(plan_destination(&src, &dst, &files, opts(false)).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn all_skipped_plan_needs_no_free_space_reserve() {
+        let root = temp_dir("no-write");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.bin"), b"abc").unwrap();
+        fs::copy(src.join("a.bin"), dst.join("a.bin")).unwrap();
+        let m = fs::metadata(src.join("a.bin")).unwrap().modified().unwrap();
+        OpenOptions::new().write(true).open(dst.join("a.bin")).unwrap().set_modified(m).unwrap();
+        let files = list_source_files(&src).unwrap();
+        let plan = plan_destination(&src, &dst, &files, opts(true)).unwrap();
+        assert_eq!(plan.bytes_to_write, 0);
+        assert_eq!(plan.reserve_space, 0);
         let _ = fs::remove_dir_all(root);
     }
 }
