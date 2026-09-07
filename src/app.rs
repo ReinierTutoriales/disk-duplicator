@@ -73,6 +73,7 @@ impl CopierApp {
 
     fn busy(&self) -> bool {
         self.job.as_ref().is_some_and(|j| j.running.load(Ordering::Relaxed))
+            || self.workers.iter().any(|h| !h.is_finished())
     }
 
     fn pick_dir() -> Option<String> {
