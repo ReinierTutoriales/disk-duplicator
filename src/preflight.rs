@@ -1,11 +1,12 @@
-use crate::engine_impl::{self, CopyOpts, JobState};
+use crate::engine_impl::{self, CopyOpts, DestPhase, JobState};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const MIN_FREE_RESERVE: u64 = 1024 * 1024 * 1024;
@@ -29,6 +30,20 @@ struct DestinationPlan {
     reserve_space: u64,
 }
 
+#[derive(Clone, Debug)]
+struct PreflightResult {
+    files: Vec<PlannedFile>,
+    plans: Vec<DestinationPlan>,
+}
+
+fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 fn list_source_files(root: &Path) -> Result<Vec<PlannedFile>, String> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
@@ -47,13 +62,11 @@ fn list_source_files(root: &Path) -> Result<Vec<PlannedFile>, String> {
             .strip_prefix(root)
             .map_err(|e| e.to_string())?
             .to_path_buf();
-        let mtime_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        files.push(PlannedFile { rel, size: meta.len(), mtime_ns });
+        files.push(PlannedFile {
+            rel,
+            size: meta.len(),
+            mtime_ns: metadata_mtime_ns(&meta),
+        });
     }
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(files)
@@ -67,9 +80,12 @@ fn state_key(info: &PlannedFile) -> String {
     format!("{hex}|{}|{}", info.size, info.mtime_ns)
 }
 
+fn state_path(dest: &Path) -> PathBuf {
+    dest.join(".disk-duplicator").join("completed.jsonl")
+}
+
 fn load_completed(dest: &Path) -> HashSet<String> {
-    let path = dest.join(".disk-duplicator").join("completed.jsonl");
-    let Ok(text) = fs::read_to_string(path) else {
+    let Ok(text) = fs::read_to_string(state_path(dest)) else {
         return HashSet::new();
     };
     text.lines()
@@ -81,16 +97,66 @@ fn load_completed(dest: &Path) -> HashSet<String> {
         .collect()
 }
 
+fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> {
+    let dir = dest.join(".disk-duplicator");
+    fs::create_dir_all(&dir).map_err(|e| format!("state mkdir {}: {e}", dir.display()))?;
+    let path = state_path(dest);
+    let tmp = dir.join("completed.jsonl.preflight");
+    let result = (|| {
+        let mut f = File::create(&tmp).map_err(|e| format!("state temp {}: {e}", tmp.display()))?;
+        let mut ordered: Vec<&String> = keys.iter().collect();
+        ordered.sort();
+        for key in ordered {
+            writeln!(f, "{{\"key\":\"{key}\"}}").map_err(|e| format!("state write: {e}"))?;
+        }
+        f.sync_all().map_err(|e| format!("state sync: {e}"))?;
+        drop(f);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| format!("state replace {}: {e}", path.display()))?;
+        }
+        fs::rename(&tmp, &path).map_err(|e| format!("state commit {}: {e}", path.display()))?;
+        Ok::<(), String>(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn same_enough(src: &Path, dst: &Path) -> bool {
     let Ok(a) = fs::metadata(src) else { return false; };
     let Ok(b) = fs::metadata(dst) else { return false; };
-    if a.len() != b.len() {
+    if !b.is_file() || a.len() != b.len() {
         return false;
     }
     match (a.modified(), b.modified()) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
+}
+
+fn normalize_completed_state(
+    source: &Path,
+    dest: &Path,
+    files: &[PlannedFile],
+) -> Result<HashSet<String>, String> {
+    let loaded = load_completed(dest);
+    if loaded.is_empty() {
+        return Ok(loaded);
+    }
+
+    let mut valid = HashSet::new();
+    for info in files {
+        let key = state_key(info);
+        if loaded.contains(&key) && same_enough(&source.join(&info.rel), &dest.join(&info.rel)) {
+            valid.insert(key);
+        }
+    }
+
+    if valid != loaded {
+        rewrite_completed(dest, &valid)?;
+    }
+    Ok(valid)
 }
 
 fn part_path(dst: &Path) -> PathBuf {
@@ -156,7 +222,7 @@ fn plan_destination(
         .map_err(|e| format!("No se pudo consultar capacidad de {}: {e}", dest.display()))?;
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
     let reserve = MIN_FREE_RESERVE.max(total.saturating_mul(RESERVE_PERCENT) / 100);
-    let completed = load_completed(dest);
+    let completed = normalize_completed_state(source, dest, files)?;
 
     let mut plan = DestinationPlan {
         available_space: available,
@@ -257,7 +323,7 @@ fn validate_destinations(source: &Path, dests: &[PathBuf]) -> Result<Vec<PathBuf
     Ok(canonical)
 }
 
-fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Vec<DestinationPlan>, String> {
+fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<PreflightResult, String> {
     if !source.is_dir() {
         return Err("El origen debe ser una carpeta.".into());
     }
@@ -271,10 +337,61 @@ fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Vec
         return Err("El origen no tiene archivos.".into());
     }
 
-    canonical_dests
+    let plans = canonical_dests
         .iter()
         .map(|dest| plan_destination(source, dest, &files, opts))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PreflightResult { files, plans })
+}
+
+fn source_change(source: &Path, files: &[PlannedFile]) -> Option<String> {
+    for info in files {
+        let path = source.join(&info.rel);
+        let Ok(meta) = fs::metadata(&path) else {
+            return Some(format!("El archivo de origen desapareció durante la copia: {}", path.display()));
+        };
+        if !meta.is_file() || meta.len() != info.size || metadata_mtime_ns(&meta) != info.mtime_ns {
+            return Some(format!("El archivo de origen cambió durante la copia: {}", path.display()));
+        }
+    }
+    None
+}
+
+fn supervise_job(
+    source: PathBuf,
+    files: Vec<PlannedFile>,
+    state: Arc<JobState>,
+    handles: Vec<JoinHandle<()>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while handles.iter().any(|h| !h.is_finished()) {
+            state.running.store(true, Ordering::Release);
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let mut worker_panicked = false;
+        for handle in handles {
+            if handle.join().is_err() {
+                worker_panicked = true;
+            }
+        }
+
+        let source_problem = source_change(&source, &files);
+        if worker_panicked || source_problem.is_some() {
+            let mut dests = state.dests.lock().unwrap();
+            let message = source_problem.unwrap_or_else(|| "Un worker terminó de forma inesperada.".into());
+            for dest in dests.iter_mut() {
+                if matches!(dest.phase, DestPhase::Done | DestPhase::Idle | DestPhase::Copying | DestPhase::Verifying) {
+                    dest.phase = DestPhase::Failed;
+                    dest.files_err = dest.files_err.saturating_add(1);
+                    dest.error = Some(message.clone());
+                }
+            }
+        }
+
+        state.running.store(false, Ordering::Release);
+    })
 }
 
 pub fn start_job(
@@ -282,8 +399,11 @@ pub fn start_job(
     dests: Vec<PathBuf>,
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-    let _plans = run_preflight(&source, &dests, opts)?;
-    engine_impl::start_job(source, dests, opts)
+    let preflight = run_preflight(&source, &dests, opts)?;
+    let _planned_bytes: u64 = preflight.plans.iter().map(|p| p.bytes_to_write).sum();
+    let (state, handles) = engine_impl::start_job(source.clone(), dests, opts)?;
+    let supervisor = supervise_job(source, preflight.files, Arc::clone(&state), handles);
+    Ok((state, vec![supervisor]))
 }
 
 #[cfg(test)]
@@ -351,6 +471,25 @@ mod tests {
         cleanup_owned_stale_parts(&dst, &files).unwrap();
         assert!(!owned.exists());
         assert!(unrelated.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_completed_state_is_removed() {
+        let root = temp_dir("state");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.bin"), b"abc").unwrap();
+        let files = list_source_files(&src).unwrap();
+        let key = state_key(&files[0]);
+        let dir = dst.join(".disk-duplicator");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("completed.jsonl"), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
+        let valid = normalize_completed_state(&src, &dst, &files).unwrap();
+        assert!(valid.is_empty());
+        assert!(load_completed(&dst).is_empty());
         let _ = fs::remove_dir_all(root);
     }
 }
