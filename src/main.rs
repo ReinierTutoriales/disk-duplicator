@@ -1,7 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod engine;
+#[path = "engine.rs"]
+mod engine_impl;
+mod preflight;
+
+mod engine {
+    pub use crate::engine_impl::{format_bps, CopyMode, CopyOpts, DestPhase, JobState};
+    pub use crate::preflight::start_job;
+}
 
 use app::CopierApp;
 use eframe::egui;
