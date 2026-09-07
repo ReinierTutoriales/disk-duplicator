@@ -2,7 +2,7 @@ use crate::engine_impl::{self, CopyOpts, DestPhase, JobState};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const MIN_FREE_RESERVE: u64 = 1024 * 1024 * 1024;
+const MAX_FREE_RESERVE: u64 = 16 * 1024 * 1024 * 1024;
 const RESERVE_PERCENT: u64 = 1;
 
 #[derive(Clone, Debug)]
@@ -211,6 +212,57 @@ fn round_up(value: u64, granularity: u64) -> u64 {
         .saturating_mul(granularity)
 }
 
+fn reserve_for_volume(total: u64) -> u64 {
+    let percent = total.saturating_mul(RESERVE_PERCENT) / 100;
+    MIN_FREE_RESERVE.max(percent.min(MAX_FREE_RESERVE))
+}
+
+fn validate_destination_layout(dest: &Path, rel: &Path) -> Result<(), String> {
+    let components: Vec<Component<'_>> = rel.components().collect();
+    if components.is_empty() {
+        return Err("Ruta relativa vacía en el plan de copia.".into());
+    }
+
+    let count = components.len();
+    let mut current = dest.to_path_buf();
+    for (index, component) in components.into_iter().enumerate() {
+        match component {
+            Component::Normal(name) => current.push(name),
+            _ => return Err(format!("Ruta relativa no segura: {}", rel.display())),
+        }
+
+        let meta = match fs::symlink_metadata(&current) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", current.display())),
+        };
+
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "No se permite escribir a través del enlace simbólico {}.",
+                current.display()
+            ));
+        }
+
+        let is_last = index + 1 == count;
+        if is_last && meta.is_dir() {
+            return Err(format!(
+                "Conflicto en destino: {} es una carpeta pero el origen contiene un archivo en esa ruta.",
+                current.display()
+            ));
+        }
+        if !is_last && !meta.is_dir() {
+            return Err(format!(
+                "Conflicto en destino: {} debe ser una carpeta para crear {}.",
+                current.display(),
+                rel.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn destination_file_allocation(dst: &Path, granularity: u64) -> Result<Option<u64>, String> {
     match fs::metadata(dst) {
         Ok(meta) => {
@@ -250,6 +302,7 @@ fn plan_destination(
     let mut peak_extra: i128 = 0;
 
     for info in files {
+        validate_destination_layout(dest, &info.rel)?;
         let src = source.join(&info.rel);
         let dst = dest.join(&info.rel);
         let key = state_key(info);
@@ -281,7 +334,7 @@ fn plan_destination(
     plan.reserve_space = if plan.bytes_to_write == 0 {
         0
     } else {
-        MIN_FREE_RESERVE.max(total.saturating_mul(RESERVE_PERCENT) / 100)
+        reserve_for_volume(total)
     };
 
     let required_with_reserve = plan.peak_extra_space.saturating_add(plan.reserve_space);
@@ -311,6 +364,11 @@ fn validate_destinations(source: &Path, dests: &[PathBuf]) -> Result<Vec<PathBuf
 
     for dest in dests {
         fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
+        let root_meta = fs::symlink_metadata(dest)
+            .map_err(|e| format!("destino {}: {e}", dest.display()))?;
+        if root_meta.file_type().is_symlink() {
+            return Err(format!("No se permite usar un enlace simbólico como destino: {}.", dest.display()));
+        }
         let d = canonical_existing(dest, "destino")?;
         if d.parent().is_none() {
             return Err(format!("No se permite usar la raíz {} como destino.", d.display()));
@@ -454,6 +512,12 @@ mod tests {
     }
 
     #[test]
+    fn reserve_is_bounded() {
+        assert_eq!(reserve_for_volume(10 * 1024 * 1024 * 1024), MIN_FREE_RESERVE);
+        assert_eq!(reserve_for_volume(100 * 1024 * 1024 * 1024 * 1024), MAX_FREE_RESERVE);
+    }
+
+    #[test]
     fn rejects_duplicate_destinations() {
         let root = temp_dir("duplicates");
         let src = root.join("src");
@@ -476,6 +540,17 @@ mod tests {
         fs::create_dir_all(&b).unwrap();
         fs::write(src.join("a.bin"), b"x").unwrap();
         let result = validate_destinations(&src, &[a, b]);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_parent_file_layout_conflict() {
+        let root = temp_dir("parent-conflict");
+        let dst = root.join("dst");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("folder"), b"not-a-directory").unwrap();
+        let result = validate_destination_layout(&dst, Path::new("folder/file.bin"));
         assert!(result.is_err());
         let _ = fs::remove_dir_all(root);
     }
