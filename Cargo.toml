@@ -12,6 +12,7 @@ blake3 = "1.5"
 walkdir = "2"
 rfd = "0.15"
 crossbeam-channel = "0.5"
+fs2 = "0.4"
 
 [build-dependencies]
 embed-resource = "2.4"
