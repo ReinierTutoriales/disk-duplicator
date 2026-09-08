@@ -66,8 +66,12 @@ struct Buffer { data: Box<[u8]>, budget: Arc<BufferBudget> }
 type BufferRef = Arc<Buffer>;
 impl Drop for Buffer { fn drop(&mut self) { self.budget.release(); } }
 
-#[derive(Clone)]
-struct FileInfo { rel: PathBuf, size: u64, mtime_ns: u128 }
+#[derive(Clone, Debug)]
+pub(crate) struct FileInfo {
+    pub(crate) rel: PathBuf,
+    pub(crate) size: u64,
+    pub(crate) mtime_ns: u128,
+}
 enum FanoutItem { Begin(FileInfo), Data(BufferRef), End { hash: [u8; 32] } }
 struct DestControl { alive: AtomicBool, queue_depth: AtomicUsize, last_progress: Mutex<Instant> }
 impl DestControl {
@@ -638,14 +642,17 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
     handles.push(reader); handles
 }
 
-pub fn start_job(source: PathBuf, dests: Vec<PathBuf>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+fn validate_job_paths(source: &Path, dests: &[PathBuf]) -> Result<(), String> {
     if !source.is_dir() { return Err("El origen debe ser una carpeta.".into()); }
     if dests.is_empty() { return Err("Agrega al menos un destino.".into()); }
-    for d in &dests {
-        if dest_inside_source(&source, d) { return Err(format!("El destino {} está dentro del origen.", d.display())); }
+    for d in dests {
+        if dest_inside_source(source, d) { return Err(format!("El destino {} está dentro del origen.", d.display())); }
         fs::create_dir_all(d).map_err(|e| format!("destino {}: {e}", d.display()))?;
     }
-    let files = Arc::new(list_files(&source)?);
+    Ok(())
+}
+
+fn build_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     if files.is_empty() { return Err("El origen no tiene archivos.".into()); }
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
     let files_total = files.len() as u64;
@@ -662,6 +669,17 @@ pub fn start_job(source: PathBuf, dests: Vec<PathBuf>, opts: CopyOpts) -> Result
     });
     let handles = fanout_job(source, dests, files, Arc::clone(&state), opts);
     Ok((state, handles))
+}
+
+pub(crate) fn start_job_with_files(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+    validate_job_paths(&source, &dests)?;
+    build_job(source, dests, files, opts)
+}
+
+pub fn start_job(source: PathBuf, dests: Vec<PathBuf>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+    validate_job_paths(&source, &dests)?;
+    let files = Arc::new(list_files(&source)?);
+    build_job(source, dests, files, opts)
 }
 
 pub fn format_bps(bps: f64) -> String {
