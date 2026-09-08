@@ -1,4 +1,4 @@
-use crate::engine_impl::{self, CopyOpts, DestPhase, JobState};
+use crate::engine_impl::{self, CopyOpts, DestPhase, FileInfo, JobState};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -13,12 +13,7 @@ const MIN_FREE_RESERVE: u64 = 1024 * 1024 * 1024;
 const MAX_FREE_RESERVE: u64 = 16 * 1024 * 1024 * 1024;
 const RESERVE_PERCENT: u64 = 1;
 
-#[derive(Clone, Debug)]
-struct PlannedFile {
-    rel: PathBuf,
-    size: u64,
-    mtime_ns: u128,
-}
+type PlannedFile = FileInfo;
 
 #[derive(Clone, Debug, Default)]
 struct DestinationPlan {
@@ -33,7 +28,7 @@ struct DestinationPlan {
 
 #[derive(Clone, Debug)]
 struct PreflightResult {
-    files: Vec<PlannedFile>,
+    files: Arc<Vec<PlannedFile>>,
     plans: Vec<DestinationPlan>,
 }
 
@@ -321,8 +316,6 @@ fn plan_destination(
         }
         plan.bytes_to_write = plan.bytes_to_write.saturating_add(info.size);
 
-        // El archivo anterior permanece intacto mientras se escribe el .part.
-        // Solo después del commit se libera su asignación anterior.
         let during_temp = committed_delta.saturating_add(new_alloc as i128);
         peak_extra = peak_extra.max(during_temp);
         committed_delta = committed_delta
@@ -411,7 +404,7 @@ fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Pre
     }
 
     let canonical_dests = validate_destinations(source, dests)?;
-    let files = list_source_files(source)?;
+    let files = Arc::new(list_source_files(source)?);
     if files.is_empty() {
         return Err("El origen no tiene archivos.".into());
     }
@@ -439,7 +432,7 @@ fn source_change(source: &Path, files: &[PlannedFile]) -> Option<String> {
 
 fn supervise_job(
     source: PathBuf,
-    files: Vec<PlannedFile>,
+    files: Arc<Vec<PlannedFile>>,
     state: Arc<JobState>,
     handles: Vec<JoinHandle<()>>,
 ) -> JoinHandle<()> {
@@ -480,7 +473,12 @@ pub fn start_job(
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     let preflight = run_preflight(&source, &dests, opts)?;
     let _planned_bytes: u64 = preflight.plans.iter().map(|p| p.bytes_to_write).sum();
-    let (state, handles) = engine_impl::start_job(source.clone(), dests, opts)?;
+    let (state, handles) = engine_impl::start_job_with_files(
+        source.clone(),
+        dests,
+        Arc::clone(&preflight.files),
+        opts,
+    )?;
     let supervisor = supervise_job(source, preflight.files, Arc::clone(&state), handles);
     Ok((state, vec![supervisor]))
 }
