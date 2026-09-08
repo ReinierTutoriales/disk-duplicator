@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 use crossbeam_channel as mpsc;
 
@@ -87,6 +87,29 @@ fn queue_depth_for(n_dests: usize) -> usize {
     (RESERVED_RAM / (n_dests * BLOCK)).clamp(MIN_QUEUE, MAX_QUEUE)
 }
 
+fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {
+    meta.modified().ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn expected_mtime(info: &FileInfo) -> Option<SystemTime> {
+    if info.mtime_ns == 0 { return None; }
+    let secs = info.mtime_ns / 1_000_000_000;
+    if secs > u64::MAX as u128 { return None; }
+    let nanos = (info.mtime_ns % 1_000_000_000) as u32;
+    UNIX_EPOCH.checked_add(Duration::new(secs as u64, nanos))
+}
+
+fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> {
+    let meta = fs::metadata(path).map_err(|e| format!("origen {}: {e}", path.display()))?;
+    if !meta.is_file() || meta.len() != info.size || metadata_mtime_ns(&meta) != info.mtime_ns {
+        return Err(format!("origen cambió: {}", path.display()));
+    }
+    Ok(())
+}
+
 fn list_files(root: &Path) -> Result<Vec<FileInfo>, String> {
     let mut out = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
@@ -96,8 +119,7 @@ fn list_files(root: &Path) -> Result<Vec<FileInfo>, String> {
         if name.ends_with(".part") || name == "paquetecopies.b3" { continue; }
         let meta = entry.metadata().map_err(|e| e.to_string())?;
         let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?.to_path_buf();
-        let mtime_ns = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
-        out.push(FileInfo { rel, size: meta.len(), mtime_ns });
+        out.push(FileInfo { rel, size: meta.len(), mtime_ns: metadata_mtime_ns(&meta) });
     }
     out.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(out)
@@ -175,14 +197,9 @@ impl StateJournal {
     }
     fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
 }
-impl Drop for StateJournal {
-    fn drop(&mut self) { let _ = self.checkpoint(); }
-}
+impl Drop for StateJournal { fn drop(&mut self) { let _ = self.checkpoint(); } }
 
-struct ManifestWriter {
-    writer: BufWriter<File>,
-    dirty: bool,
-}
+struct ManifestWriter { writer: BufWriter<File>, dirty: bool }
 impl ManifestWriter {
     fn open(dest: &Path) -> Result<Self, String> {
         let file = OpenOptions::new().create(true).append(true).open(manifest_path(dest)).map_err(|e| format!("manifiesto: {e}"))?;
@@ -191,20 +208,16 @@ impl ManifestWriter {
     fn append(&mut self, rel: &Path, hash: &blake3::Hash) -> Result<(), String> {
         let name = rel.to_string_lossy().replace("\\", "/");
         writeln!(self.writer, "{}  {name}", hash.to_hex()).map_err(|e| format!("manifiesto: {e}"))?;
-        self.dirty = true;
-        Ok(())
+        self.dirty = true; Ok(())
     }
     fn finish(&mut self) -> Result<(), String> {
         if !self.dirty { return Ok(()); }
         self.writer.flush().map_err(|e| format!("manifiesto flush: {e}"))?;
         self.writer.get_ref().sync_all().map_err(|e| format!("manifiesto sync: {e}"))?;
-        self.dirty = false;
-        Ok(())
+        self.dirty = false; Ok(())
     }
 }
-impl Drop for ManifestWriter {
-    fn drop(&mut self) { let _ = self.finish(); }
-}
+impl Drop for ManifestWriter { fn drop(&mut self) { let _ = self.finish(); } }
 
 fn part_path(dst: &Path) -> PathBuf { let mut p = dst.as_os_str().to_os_string(); p.push(".part"); PathBuf::from(p) }
 fn cleanup_part(dst: &Path) { let _ = fs::remove_file(part_path(dst)); }
@@ -243,7 +256,7 @@ fn retry_io<T>(state: &JobState, slot: usize, mut op: impl FnMut() -> Result<T, 
     Err(last_err)
 }
 
-fn set_mtime(dst: &Path, mtime: std::time::SystemTime) -> Result<(), String> {
+fn set_mtime(dst: &Path, mtime: SystemTime) -> Result<(), String> {
     let f = OpenOptions::new().write(true).open(dst).map_err(|e| format!("metadata: {e}"))?;
     f.set_modified(mtime).map_err(|e| format!("metadata: {e}"))?; f.sync_all().map_err(|e| format!("metadata sync: {e}"))?; Ok(())
 }
@@ -264,9 +277,9 @@ fn rollback_write_progress(state: &JobState, slot: usize, size: u64, effective_w
     g[slot].bps = if secs > 0.0 { *effective_written as f64 / secs } else { 0.0 };
 }
 
-fn copy_file_atomic(src: &Path, dst: &Path, verify: bool, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant) -> Result<blake3::Hash, String> {
+fn copy_file_atomic(src: &Path, dst: &Path, info: &FileInfo, verify: bool, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant) -> Result<blake3::Hash, String> {
     if let Some(parent) = dst.parent() { fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?; }
-    let meta = fs::metadata(src).map_err(|e| format!("metadata: {e}"))?;
+    validate_source_snapshot(src, info)?;
     let mut input = File::open(src).map_err(|e| format!("abrir origen: {e}"))?;
     let tmp = part_path(dst); cleanup_part(dst);
     let mut copied = 0u64;
@@ -282,7 +295,8 @@ fn copy_file_atomic(src: &Path, dst: &Path, verify: bool, state: &JobState, slot
             record_write_progress(state, slot, n as u64, effective_written, start);
             h.update(&buf[..n]);
         }
-        if copied != meta.len() { return Err(format!("origen cambió: {}", src.display())); }
+        if copied != info.size { return Err(format!("origen cambió: {}", src.display())); }
+        validate_source_snapshot(src, info)?;
         output.flush().map_err(|e| format!("flush: {e}"))?; output.sync_all().map_err(|e| format!("sync: {e}"))?; drop(output);
         let expected = h.finalize();
         if verify {
@@ -291,7 +305,7 @@ fn copy_file_atomic(src: &Path, dst: &Path, verify: bool, state: &JobState, slot
             set_phase(state, slot, DestPhase::Copying, None);
         }
         commit_part(&tmp, dst)?;
-        if let Ok(m) = meta.modified() { set_mtime(dst, m)?; }
+        if let Some(m) = expected_mtime(info) { set_mtime(dst, m)?; }
         Ok(expected)
     })();
     if result.is_err() {
@@ -304,7 +318,6 @@ fn copy_file_atomic(src: &Path, dst: &Path, verify: bool, state: &JobState, slot
 fn record_skip(state: &JobState, slot: usize, size: u64) {
     let mut g = state.dests.lock().unwrap(); g[slot].files_skip += 1; g[slot].files_done += 1; g[slot].written += size;
 }
-
 fn record_done(state: &JobState, slot: usize) { state.dests.lock().unwrap()[slot].files_done += 1; }
 
 fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
@@ -313,12 +326,12 @@ fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Res
     manifest_result.and(journal_result)
 }
 
-fn copy_one_with_retries(src: &Path, dst: &Path, rel: &Path, opts: CopyOpts, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant, manifest: &mut ManifestWriter) -> bool {
+fn copy_one_with_retries(src: &Path, dst: &Path, info: &FileInfo, opts: CopyOpts, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant, manifest: &mut ManifestWriter) -> bool {
     for attempt in 0..=RETRIES {
         if state.cancel.load(Ordering::Relaxed) { return false; }
-        match copy_file_atomic(src, dst, opts.verify, state, slot, effective_written, start) {
+        match copy_file_atomic(src, dst, info, opts.verify, state, slot, effective_written, start) {
             Ok(hash) => {
-                if let Err(e) = manifest.append(rel, &hash) { set_error(state, slot, e); return false; }
+                if let Err(e) = manifest.append(&info.rel, &hash) { set_error(state, slot, e); return false; }
                 return true;
             }
             Err(e) if e == "Cancelado" => return false,
@@ -338,14 +351,8 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
     let mut effective_written = 0u64;
     { let mut g = state.dests.lock().unwrap(); g[slot].mode = mode; g[slot].phase = DestPhase::Copying; }
     let completed = load_state(&dest);
-    let mut journal = match StateJournal::open(&dest) {
-        Ok(journal) => journal,
-        Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
-    };
-    let mut manifest = match ManifestWriter::open(&dest) {
-        Ok(manifest) => manifest,
-        Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
-    };
+    let mut journal = match StateJournal::open(&dest) { Ok(j) => j, Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; } };
+    let mut manifest = match ManifestWriter::open(&dest) { Ok(m) => m, Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; } };
     for info in files.iter() {
         if !wait_pause(&state) {
             let _ = finish_logs(&mut manifest, &mut journal);
@@ -354,7 +361,7 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
         let key = state_key(info); let src = source.join(&info.rel); let dst = dest.join(&info.rel);
         state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
         if completed.contains(&key) || (opts.skip_same && same_enough(&src, &dst)) { record_skip(&state, slot, info.size); continue; }
-        if !copy_one_with_retries(&src, &dst, &info.rel, opts, &state, slot, &mut effective_written, start, &mut manifest) {
+        if !copy_one_with_retries(&src, &dst, info, opts, &state, slot, &mut effective_written, start, &mut manifest) {
             if state.cancel.load(Ordering::Relaxed) {
                 let _ = finish_logs(&mut manifest, &mut journal);
                 set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return;
@@ -377,9 +384,7 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
         record_done(&state, slot);
     }
     if let Err(e) = finish_logs(&mut manifest, &mut journal) {
-        set_phase(&state, slot, DestPhase::Failed, Some(e));
-        state.dests.lock().unwrap()[slot].files_err += 1;
-        return;
+        set_phase(&state, slot, DestPhase::Failed, Some(e)); state.dests.lock().unwrap()[slot].files_err += 1; return;
     }
     let errs = state.dests.lock().unwrap()[slot].files_err;
     if errs == 0 { set_phase(&state, slot, DestPhase::Done, None); }
@@ -392,14 +397,8 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
     let start = Instant::now();
     let mut effective_written = 0u64;
     let mut current: Option<(FileInfo, File, blake3::Hasher, u64)> = None;
-    let mut journal = match StateJournal::open(&dest) {
-        Ok(journal) => journal,
-        Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
-    };
-    let mut manifest = match ManifestWriter::open(&dest) {
-        Ok(manifest) => manifest,
-        Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
-    };
+    let mut journal = match StateJournal::open(&dest) { Ok(j) => j, Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; } };
+    let mut manifest = match ManifestWriter::open(&dest) { Ok(m) => m, Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; } };
     set_phase(&state, slot, DestPhase::Copying, None);
     loop {
         match rx.recv() {
@@ -419,11 +418,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
             Ok(FanoutItem::Data(buf)) => {
                 if let Some((info, f, h, copied)) = current.as_mut() {
                     match retry_io(&state, slot, || f.write_all(&buf.data).map_err(|e| format!("escritura {}: {e}", info.rel.display()))) {
-                        Ok(()) => {
-                            h.update(&buf.data);
-                            *copied += buf.data.len() as u64;
-                            record_write_progress(&state, slot, buf.data.len() as u64, &mut effective_written, start);
-                        }
+                        Ok(()) => { h.update(&buf.data); *copied += buf.data.len() as u64; record_write_progress(&state, slot, buf.data.len() as u64, &mut effective_written, start); }
                         Err(e) => { control.alive.store(false, Ordering::Release); set_error(&state, slot, e); }
                     }
                 }
@@ -441,8 +436,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     set_error(&state, slot, format!("tamaño inesperado en {}", info.rel.display())); continue;
                 }
                 if let Err(e) = retry_io(&state, slot, || f.flush().and_then(|_| f.sync_all()).map_err(|e| format!("sync: {e}"))) {
-                    drop(f); cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release);
-                    set_error(&state, slot, e); continue;
+                    drop(f); cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                 }
                 drop(f);
                 let expected = hasher.finalize();
@@ -462,7 +456,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                 if let Err(e) = retry_io(&state, slot, || commit_part(&tmp, &dst)) {
                     cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                 }
-                if let Ok(m) = fs::metadata(source.join(&info.rel)).and_then(|m| m.modified()) {
+                if let Some(m) = expected_mtime(&info) {
                     if let Err(e) = set_mtime(&dst, m) {
                         rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                     }
@@ -482,11 +476,9 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     drop(f); cleanup_part(&dest.join(&info.rel)); rollback_write_progress(&state, slot, copied, &mut effective_written, start);
                 }
                 drain_queue(&rx);
-                if let Err(e) = finish_logs(&mut manifest, &mut journal) {
-                    set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
-                }
+                if let Err(e) = finish_logs(&mut manifest, &mut journal) { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
                 if cancelled { set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return; }
-                if source_failed.load(Ordering::Acquire) { set_phase(&state, slot, DestPhase::Failed, Some("Error de lectura del origen.".into())); return; }
+                if source_failed.load(Ordering::Acquire) { set_phase(&state, slot, DestPhase::Failed, Some("Error o cambio detectado en el origen.".into())); return; }
                 if !alive {
                     drop(manifest); drop(journal);
                     per_dest_worker(source, dest, files, state, slot, opts, CopyMode::Fallback);
@@ -500,9 +492,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
             }
             drain_queue(&rx);
             if source_failed.load(Ordering::Acquire) || state.cancel.load(Ordering::Relaxed) { continue; }
-            if let Err(e) = finish_logs(&mut manifest, &mut journal) {
-                set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
-            }
+            if let Err(e) = finish_logs(&mut manifest, &mut journal) { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
             drop(manifest); drop(journal);
             per_dest_worker(source.clone(), dest.clone(), Arc::clone(&files), Arc::clone(&state), slot, opts, CopyMode::Fallback);
             return;
@@ -524,39 +514,23 @@ fn try_deliver_now(tx: &mpsc::Sender<FanoutItem>, item: FanoutItem, control: &De
     match tx.try_send(item) {
         Ok(()) => { control.mark_progress(); Ok(()) }
         Err(crossbeam_channel::TrySendError::Full(item)) => Err(item),
-        Err(crossbeam_channel::TrySendError::Disconnected(item)) => {
-            control.alive.store(false, Ordering::Release);
-            Err(item)
-        }
+        Err(crossbeam_channel::TrySendError::Disconnected(item)) => { control.alive.store(false, Ordering::Release); Err(item) }
     }
 }
 
 fn deliver_to_active(
-    active: &mut Vec<usize>,
-    senders: &[Option<mpsc::Sender<FanoutItem>>],
-    controls: &[Arc<DestControl>],
-    state: &JobState,
-    counts_data: bool,
-    make_item: impl Fn() -> FanoutItem,
+    active: &mut Vec<usize>, senders: &[Option<mpsc::Sender<FanoutItem>>], controls: &[Arc<DestControl>],
+    state: &JobState, counts_data: bool, make_item: impl Fn() -> FanoutItem,
 ) {
     let mut pending: Vec<(usize, FanoutItem)> = Vec::new();
     let initial_slots = active.clone();
-
     for slot in initial_slots {
-        if !controls[slot].alive.load(Ordering::Acquire) {
-            active.retain(|&s| s != slot);
-            continue;
-        }
-        let Some(tx) = senders[slot].as_ref() else {
-            active.retain(|&s| s != slot);
-            continue;
-        };
+        if !controls[slot].alive.load(Ordering::Acquire) { active.retain(|&s| s != slot); continue; }
+        let Some(tx) = senders[slot].as_ref() else { active.retain(|&s| s != slot); continue; };
         if counts_data { controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel); }
         match try_deliver_now(tx, make_item(), &controls[slot]) {
             Ok(()) => {
-                if counts_data {
-                    state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire);
-                }
+                if counts_data { state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire); }
             }
             Err(item) if controls[slot].alive.load(Ordering::Acquire) => {
                 if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
@@ -568,34 +542,22 @@ fn deliver_to_active(
             }
         }
     }
-
     while !pending.is_empty() {
         if !wait_pause(state) { active.clear(); return; }
         let mut next = Vec::with_capacity(pending.len());
         for (slot, item) in pending {
-            if !controls[slot].alive.load(Ordering::Acquire) {
-                active.retain(|&s| s != slot);
-                continue;
-            }
-            let Some(tx) = senders[slot].as_ref() else {
-                active.retain(|&s| s != slot);
-                continue;
-            };
+            if !controls[slot].alive.load(Ordering::Acquire) { active.retain(|&s| s != slot); continue; }
+            let Some(tx) = senders[slot].as_ref() else { active.retain(|&s| s != slot); continue; };
             if counts_data { controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel); }
             match try_deliver_now(tx, item, &controls[slot]) {
                 Ok(()) => {
-                    if counts_data {
-                        state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire);
-                    }
+                    if counts_data { state.dests.lock().unwrap()[slot].queue_depth = controls[slot].queue_depth.load(Ordering::Acquire); }
                 }
                 Err(item) if controls[slot].alive.load(Ordering::Acquire) => {
                     if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
                     if controls[slot].stalled_for() >= STALL_THRESHOLD {
-                        controls[slot].alive.store(false, Ordering::Release);
-                        active.retain(|&s| s != slot);
-                    } else {
-                        next.push((slot, item));
-                    }
+                        controls[slot].alive.store(false, Ordering::Release); active.retain(|&s| s != slot);
+                    } else { next.push((slot, item)); }
                 }
                 Err(_) => {
                     if counts_data { controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel); }
@@ -623,8 +585,7 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
     let mut senders = Vec::new(); let mut controls = Vec::new(); let mut handles = Vec::new();
     for (slot, dest) in dests.iter().cloned().enumerate() {
         let (tx, rx) = mpsc::bounded(q);
-        let control = Arc::new(DestControl::new());
-        controls.push(Arc::clone(&control));
+        let control = Arc::new(DestControl::new()); controls.push(Arc::clone(&control));
         let st = Arc::clone(&state); let src = source.clone(); let list = Arc::clone(&files);
         let failed = Arc::clone(&source_failed); let c = Arc::clone(&control);
         handles.push(thread::spawn(move || fanout_worker(src, dest, rx, c, list, st, slot, opts, failed)));
@@ -642,17 +603,18 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
                 skip_mask[slot] = state_cache[slot].contains(&key) || (opts.skip_same && same_enough(&src, &dst));
             }
             mark_skipped_all(&state, info, &skip_mask);
-            let mut active: Vec<usize> = (0..dests.len())
-                .filter(|&slot| !skip_mask[slot] && controls[slot].alive.load(Ordering::Acquire))
-                .collect();
+            let mut active: Vec<usize> = (0..dests.len()).filter(|&slot| !skip_mask[slot] && controls[slot].alive.load(Ordering::Acquire)).collect();
             deliver_to_active(&mut active, &senders, &controls, &state, false, || FanoutItem::Begin(info.clone()));
             if active.is_empty() { continue; }
             let path = source.join(&info.rel);
+            if let Err(e) = validate_source_snapshot(&path, info) {
+                source_failed.store(true, Ordering::Release); set_error(&state, 0, e); break;
+            }
             let mut input = match File::open(&path) {
                 Ok(f) => f,
                 Err(e) => { source_failed.store(true, Ordering::Release); set_error(&state, 0, format!("origen: {e}")); break; }
             };
-            let mut hasher = blake3::Hasher::new(); let mut copied = 0u64; let mut read_ok = true;
+            let mut hasher = blake3::Hasher::new(); let mut copied = 0u64; let mut read_ok = true; let mut abandoned = false;
             loop {
                 if !wait_pause(&state) { read_ok = false; break; }
                 if !budget.acquire(&state) { read_ok = false; break; }
@@ -665,18 +627,21 @@ fn fanout_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, s
                 raw.truncate(n); hasher.update(&raw); copied += n as u64;
                 let buf = Arc::new(Buffer { data: raw.into_boxed_slice(), budget: Arc::clone(&budget) });
                 deliver_to_active(&mut active, &senders, &controls, &state, true, || FanoutItem::Data(Arc::clone(&buf)));
-                if active.is_empty() { break; }
+                if active.is_empty() { abandoned = true; break; }
             }
             if !read_ok { break; }
-            if copied != info.size && !source_failed.load(Ordering::Acquire) {
+            if abandoned { continue; }
+            if copied != info.size {
                 source_failed.store(true, Ordering::Release); set_error(&state, 0, format!("origen cambió: {}", path.display())); break;
+            }
+            if let Err(e) = validate_source_snapshot(&path, info) {
+                source_failed.store(true, Ordering::Release); set_error(&state, 0, e); break;
             }
             let hash = *hasher.finalize().as_bytes();
             for &slot in &active { state_cache[slot].insert(key.clone()); }
             deliver_to_active(&mut active, &senders, &controls, &state, false, || FanoutItem::End { hash });
         }
-        senders.clear();
-        state.running.store(false, Ordering::Release);
+        senders.clear(); state.running.store(false, Ordering::Release);
     });
     handles.push(reader); handles
 }
@@ -693,32 +658,25 @@ fn validate_job_paths(source: &Path, dests: &[PathBuf]) -> Result<(), String> {
 
 fn build_job(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     if files.is_empty() { return Err("El origen no tiene archivos.".into()); }
-    let bytes_total: u64 = files.iter().map(|f| f.size).sum();
-    let files_total = files.len() as u64;
+    let bytes_total: u64 = files.iter().map(|f| f.size).sum(); let files_total = files.len() as u64;
     let progress = dests.iter().map(|d| DestProgress {
-        label: d.display().to_string(), written: 0, total: bytes_total, files_done: 0,
-        files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None,
-        last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0,
+        label: d.display().to_string(), written: 0, total: bytes_total, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0,
+        phase: DestPhase::Idle, error: None, last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0,
     }).collect();
     let max_buffers = (RESERVED_RAM / BLOCK).max(8);
     let state = Arc::new(JobState {
-        running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
-        files_total: AtomicU64::new(files_total), bytes_total: AtomicU64::new(bytes_total),
-        buffers_in_flight: Arc::new(AtomicUsize::new(0)), max_buffers, fanout: true, dests: Mutex::new(progress),
+        running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false), files_total: AtomicU64::new(files_total),
+        bytes_total: AtomicU64::new(bytes_total), buffers_in_flight: Arc::new(AtomicUsize::new(0)), max_buffers, fanout: true, dests: Mutex::new(progress),
     });
-    let handles = fanout_job(source, dests, files, Arc::clone(&state), opts);
-    Ok((state, handles))
+    let handles = fanout_job(source, dests, files, Arc::clone(&state), opts); Ok((state, handles))
 }
 
 pub(crate) fn start_job_with_files(source: PathBuf, dests: Vec<PathBuf>, files: Arc<Vec<FileInfo>>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-    validate_job_paths(&source, &dests)?;
-    build_job(source, dests, files, opts)
+    validate_job_paths(&source, &dests)?; build_job(source, dests, files, opts)
 }
 
 pub fn start_job(source: PathBuf, dests: Vec<PathBuf>, opts: CopyOpts) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-    validate_job_paths(&source, &dests)?;
-    let files = Arc::new(list_files(&source)?);
-    build_job(source, dests, files, opts)
+    validate_job_paths(&source, &dests)?; let files = Arc::new(list_files(&source)?); build_job(source, dests, files, opts)
 }
 
 pub fn format_bps(bps: f64) -> String {
@@ -731,100 +689,73 @@ pub fn format_bps(bps: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
     fn temp_dir(name: &str) -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("disk-duplicator-{name}-{stamp}"));
-        fs::create_dir_all(&p).unwrap(); p
+        let p = std::env::temp_dir().join(format!("disk-duplicator-{name}-{stamp}")); fs::create_dir_all(&p).unwrap(); p
+    }
+    fn info_for(path: &Path, rel: &str) -> FileInfo {
+        let meta = fs::metadata(path).unwrap(); FileInfo { rel: PathBuf::from(rel), size: meta.len(), mtime_ns: metadata_mtime_ns(&meta) }
     }
     #[test] fn state_key_is_stable() {
         let a = FileInfo { rel: PathBuf::from("a/b.txt"), size: 42, mtime_ns: 7 };
-        assert_eq!(state_key(&a), state_key(&a.clone()));
-        assert_ne!(state_key(&a), state_key(&FileInfo { size: 43, ..a }));
+        assert_eq!(state_key(&a), state_key(&a.clone())); assert_ne!(state_key(&a), state_key(&FileInfo { size: 43, ..a }));
+    }
+    #[test] fn source_snapshot_detects_mutation() {
+        let root = temp_dir("source-snapshot"); let src = root.join("a.bin");
+        fs::write(&src, b"abc").unwrap(); let info = info_for(&src, "a.bin");
+        assert!(validate_source_snapshot(&src, &info).is_ok());
+        fs::write(&src, b"changed-data").unwrap(); assert!(validate_source_snapshot(&src, &info).is_err());
+        let _ = fs::remove_dir_all(root);
     }
     #[test] fn journal_finish_persists_all_keys() {
-        let root = temp_dir("journal");
-        let mut journal = StateJournal::open(&root).unwrap();
-        journal.append("a|1|1").unwrap();
-        journal.append("b|2|2").unwrap();
-        journal.finish().unwrap();
-        let loaded = load_state(&root);
-        assert!(loaded.contains("a|1|1"));
-        assert!(loaded.contains("b|2|2"));
-        let _ = fs::remove_dir_all(root);
+        let root = temp_dir("journal"); let mut journal = StateJournal::open(&root).unwrap();
+        journal.append("a|1|1").unwrap(); journal.append("b|2|2").unwrap(); journal.finish().unwrap();
+        let loaded = load_state(&root); assert!(loaded.contains("a|1|1")); assert!(loaded.contains("b|2|2")); let _ = fs::remove_dir_all(root);
     }
     #[test] fn manifest_finish_persists_multiple_entries() {
-        let root = temp_dir("manifest");
-        let mut manifest = ManifestWriter::open(&root).unwrap();
-        let a = blake3::hash(b"a");
-        let b = blake3::hash(b"b");
-        manifest.append(Path::new("a.bin"), &a).unwrap();
-        manifest.append(Path::new("folder/b.bin"), &b).unwrap();
-        manifest.finish().unwrap();
+        let root = temp_dir("manifest"); let mut manifest = ManifestWriter::open(&root).unwrap();
+        let a = blake3::hash(b"a"); let b = blake3::hash(b"b");
+        manifest.append(Path::new("a.bin"), &a).unwrap(); manifest.append(Path::new("folder/b.bin"), &b).unwrap(); manifest.finish().unwrap();
         let text = fs::read_to_string(manifest_path(&root)).unwrap();
-        assert!(text.contains(&format!("{}  a.bin", a.to_hex())));
-        assert!(text.contains(&format!("{}  folder/b.bin", b.to_hex())));
-        let _ = fs::remove_dir_all(root);
+        assert!(text.contains(&format!("{}  a.bin", a.to_hex()))); assert!(text.contains(&format!("{}  folder/b.bin", b.to_hex()))); let _ = fs::remove_dir_all(root);
     }
     #[test] fn queue_scales_with_dests() {
-        assert_eq!(queue_depth_for(1), MAX_QUEUE);
-        assert!(queue_depth_for(200) >= MIN_QUEUE);
-        assert!(queue_depth_for(200) <= queue_depth_for(2));
+        assert_eq!(queue_depth_for(1), MAX_QUEUE); assert!(queue_depth_for(200) >= MIN_QUEUE); assert!(queue_depth_for(200) <= queue_depth_for(2));
     }
     #[test] fn atomic_copy_leaves_old_on_fail() {
         let root = temp_dir("atomic"); let src = root.join("src.bin"); let dst = root.join("dst.bin");
-        fs::write(&src, b"new-data").unwrap(); fs::write(&dst, b"old-data").unwrap();
+        fs::write(&src, b"new-data").unwrap(); fs::write(&dst, b"old-data").unwrap(); let info = info_for(&src, "src.bin");
         let gauge = Arc::new(AtomicUsize::new(0));
         let state = JobState {
-            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
-            files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, fanout: false, dests: Mutex::new(vec![DestProgress {
-                label: String::new(), written: 0, total: 0, files_done: 0, files_skip: 0, files_err: 0,
-                bps: 0.0, phase: DestPhase::Idle, error: None, last_file: String::new(),
-                mode: CopyMode::PerDestination, queue_depth: 0, retries: 0,
+            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false), files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0),
+            buffers_in_flight: gauge, max_buffers: 2, fanout: false, dests: Mutex::new(vec![DestProgress {
+                label: String::new(), written: 0, total: 0, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle,
+                error: None, last_file: String::new(), mode: CopyMode::PerDestination, queue_depth: 0, retries: 0,
             }]),
         };
         let mut effective_written = 0u64;
-        copy_file_atomic(&src, &dst, true, &state, 0, &mut effective_written, Instant::now()).unwrap();
-        assert_eq!(fs::read(&dst).unwrap(), b"new-data");
-        assert_eq!(state.snapshot()[0].written, 8);
-        assert!(!part_path(&dst).exists());
-        let _ = fs::remove_dir_all(root);
+        copy_file_atomic(&src, &dst, &info, true, &state, 0, &mut effective_written, Instant::now()).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new-data"); assert_eq!(state.snapshot()[0].written, 8); assert!(!part_path(&dst).exists()); let _ = fs::remove_dir_all(root);
     }
     #[test] fn progress_rolls_back_failed_attempt() {
         let gauge = Arc::new(AtomicUsize::new(0));
         let state = JobState {
-            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
-            files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, fanout: false, dests: Mutex::new(vec![DestProgress {
-                label: String::new(), written: 0, total: 10, files_done: 0, files_skip: 0, files_err: 0,
-                bps: 0.0, phase: DestPhase::Copying, error: None, last_file: String::new(),
-                mode: CopyMode::PerDestination, queue_depth: 0, retries: 0,
+            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false), files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0),
+            buffers_in_flight: gauge, max_buffers: 2, fanout: false, dests: Mutex::new(vec![DestProgress {
+                label: String::new(), written: 0, total: 10, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Copying,
+                error: None, last_file: String::new(), mode: CopyMode::PerDestination, queue_depth: 0, retries: 0,
             }]),
         };
-        let mut effective_written = 0u64;
-        let start = Instant::now();
-        record_write_progress(&state, 0, 7, &mut effective_written, start);
-        assert_eq!(state.snapshot()[0].written, 7);
-        rollback_write_progress(&state, 0, 7, &mut effective_written, start);
-        assert_eq!(state.snapshot()[0].written, 0);
-        assert_eq!(effective_written, 0);
+        let mut effective_written = 0u64; let start = Instant::now(); record_write_progress(&state, 0, 7, &mut effective_written, start);
+        assert_eq!(state.snapshot()[0].written, 7); rollback_write_progress(&state, 0, 7, &mut effective_written, start);
+        assert_eq!(state.snapshot()[0].written, 0); assert_eq!(effective_written, 0);
     }
     #[test] fn budget_never_exceeds_limit() {
-        let gauge = Arc::new(AtomicUsize::new(0));
-        let budget = BufferBudget::new(2, Arc::clone(&gauge));
-        let state = JobState {
-            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
-            files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, fanout: true, dests: Mutex::new(Vec::new()),
-        };
-        budget.acquire(&state);
-        let a = Arc::new(Buffer { data: vec![1].into_boxed_slice(), budget: Arc::clone(&budget) });
-        budget.acquire(&state);
-        let b = Arc::new(Buffer { data: vec![2].into_boxed_slice(), budget: Arc::clone(&budget) });
-        assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 2);
-        drop(a); drop(b);
-        assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 0);
+        let gauge = Arc::new(AtomicUsize::new(0)); let budget = BufferBudget::new(2, Arc::clone(&gauge));
+        let state = JobState { running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false), files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge, max_buffers: 2, fanout: true, dests: Mutex::new(Vec::new()) };
+        budget.acquire(&state); let a = Arc::new(Buffer { data: vec![1].into_boxed_slice(), budget: Arc::clone(&budget) });
+        budget.acquire(&state); let b = Arc::new(Buffer { data: vec![2].into_boxed_slice(), budget: Arc::clone(&budget) });
+        assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 2); drop(a); drop(b); assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 0);
     }
     #[test] fn format_is_sane() { assert_eq!(format_bps(0.0), "0 B/s"); assert!(format_bps(1024.0).contains("KB/s")); }
 }
@@ -836,111 +767,64 @@ mod regression_tests {
 
     #[test]
     fn momentary_full_queue_does_not_kill_destination() {
-        let (tx, rx) = mpsc::bounded::<FanoutItem>(1);
-        let control = DestControl::new();
-        let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
+        let (tx, rx) = mpsc::bounded::<FanoutItem>(1); let control = DestControl::new(); let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
         let buf1 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
         let buf2 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
-
-        assert!(matches!(try_deliver_once(&tx, FanoutItem::Data(buf1), &control), SendOutcome::Ok));
-        assert!(control.alive.load(Ordering::Relaxed));
-        let outcome1 = try_deliver_once(&tx, FanoutItem::Data(buf2), &control);
-        assert!(matches!(outcome1, SendOutcome::Timeout));
-        assert!(control.alive.load(Ordering::Relaxed));
-
-        let _ = rx.recv();
-        let buf3 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
-        let outcome2 = try_deliver_once(&tx, FanoutItem::Data(buf3), &control);
-        assert!(matches!(outcome2, SendOutcome::Ok));
-        assert!(control.alive.load(Ordering::Relaxed));
+        assert!(matches!(try_deliver_once(&tx, FanoutItem::Data(buf1), &control), SendOutcome::Ok)); assert!(control.alive.load(Ordering::Relaxed));
+        let outcome1 = try_deliver_once(&tx, FanoutItem::Data(buf2), &control); assert!(matches!(outcome1, SendOutcome::Timeout)); assert!(control.alive.load(Ordering::Relaxed));
+        let _ = rx.recv(); let buf3 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
+        let outcome2 = try_deliver_once(&tx, FanoutItem::Data(buf3), &control); assert!(matches!(outcome2, SendOutcome::Ok)); assert!(control.alive.load(Ordering::Relaxed));
     }
 
     #[test]
     fn sustained_stall_past_threshold_eventually_degrades() {
-        let (tx, _rx) = mpsc::bounded::<FanoutItem>(1);
-        let control = DestControl::new();
-        let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
+        let (tx, _rx) = mpsc::bounded::<FanoutItem>(1); let control = DestControl::new(); let budget = BufferBudget::new(8, Arc::new(AtomicUsize::new(0)));
         let buf1 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
         assert!(matches!(try_deliver_once(&tx, FanoutItem::Data(buf1), &control), SendOutcome::Ok));
         *control.last_progress.lock().unwrap() = Instant::now() - STALL_THRESHOLD - Duration::from_secs(1);
         let buf2 = Arc::new(Buffer { data: vec![0u8; 4].into_boxed_slice(), budget: Arc::clone(&budget) });
-        let outcome = try_deliver_once(&tx, FanoutItem::Data(buf2), &control);
-        assert!(matches!(outcome, SendOutcome::Timeout));
-        assert!(control.stalled_for() >= STALL_THRESHOLD);
+        let outcome = try_deliver_once(&tx, FanoutItem::Data(buf2), &control); assert!(matches!(outcome, SendOutcome::Timeout)); assert!(control.stalled_for() >= STALL_THRESHOLD);
     }
 
     #[test]
     fn nested_new_destination_is_rejected() {
-        let root = std::env::temp_dir().join(format!("dd-regr-nest-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let source = root.join("Fotos");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("a.jpg"), vec![1u8; 100]).unwrap();
-        let dest_new_nested = source.join("Backup");
-        assert!(!dest_new_nested.exists());
-
-        let opts = CopyOpts { verify: false, skip_same: false, keep_going: true };
-        let result = start_job(source.clone(), vec![dest_new_nested], opts);
-        assert!(result.is_err());
-        let _ = fs::remove_dir_all(root);
+        let root = std::env::temp_dir().join(format!("dd-regr-nest-{}", std::process::id())); let _ = fs::remove_dir_all(&root);
+        let source = root.join("Fotos"); fs::create_dir_all(&source).unwrap(); fs::write(source.join("a.jpg"), vec![1u8; 100]).unwrap();
+        let dest_new_nested = source.join("Backup"); assert!(!dest_new_nested.exists());
+        let opts = CopyOpts { verify: false, skip_same: false, keep_going: true }; let result = start_job(source.clone(), vec![dest_new_nested], opts);
+        assert!(result.is_err()); let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn slow_destination_does_not_starve_fast_one() {
-        let root = std::env::temp_dir().join(format!("dd-regr-mix-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        for i in 0..5 {
-            fs::write(root.join("src").join(format!("f{i}.bin")), vec![i as u8; 2_000_000]).unwrap();
-        }
-        let fast = root.join("fast");
-        let slow = root.join("slow");
-        let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
-        let (state, handles) = start_job(root.join("src"), vec![fast.clone(), slow.clone()], opts).unwrap();
-        let t0 = Instant::now();
-        while state.running.load(Ordering::Relaxed) && t0.elapsed() < Dur::from_secs(30) {
-            thread::sleep(Dur::from_millis(20));
-        }
+        let root = std::env::temp_dir().join(format!("dd-regr-mix-{}", std::process::id())); let _ = fs::remove_dir_all(&root); fs::create_dir_all(root.join("src")).unwrap();
+        for i in 0..5 { fs::write(root.join("src").join(format!("f{i}.bin")), vec![i as u8; 2_000_000]).unwrap(); }
+        let fast = root.join("fast"); let slow = root.join("slow"); let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
+        let (state, handles) = start_job(root.join("src"), vec![fast.clone(), slow.clone()], opts).unwrap(); let t0 = Instant::now();
+        while state.running.load(Ordering::Relaxed) && t0.elapsed() < Dur::from_secs(30) { thread::sleep(Dur::from_millis(20)); }
         for h in handles { h.join().unwrap(); }
-        let snap = state.snapshot();
-        for dp in &snap { assert_eq!(dp.phase, DestPhase::Done, "{}: {:?}", dp.label, dp.error); }
-        for i in 0..5 {
-            let name = format!("f{i}.bin");
-            assert_eq!(fs::read(fast.join(&name)).unwrap().len(), 2_000_000);
-            assert_eq!(fs::read(slow.join(&name)).unwrap().len(), 2_000_000);
-        }
+        let snap = state.snapshot(); for dp in &snap { assert_eq!(dp.phase, DestPhase::Done, "{}: {:?}", dp.label, dp.error); }
+        for i in 0..5 { let name = format!("f{i}.bin"); assert_eq!(fs::read(fast.join(&name)).unwrap().len(), 2_000_000); assert_eq!(fs::read(slow.join(&name)).unwrap().len(), 2_000_000); }
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn fast_destination_is_dispatched_before_slow_queue_wait() {
-        let (slow_tx, slow_rx) = mpsc::bounded::<FanoutItem>(1);
-        let (fast_tx, fast_rx) = mpsc::bounded::<FanoutItem>(1);
-        let slow_control = Arc::new(DestControl::new());
-        let fast_control = Arc::new(DestControl::new());
-        let controls = vec![Arc::clone(&slow_control), Arc::clone(&fast_control)];
-        let senders = vec![Some(slow_tx), Some(fast_tx)];
-        let _ = senders[0].as_ref().unwrap().send(FanoutItem::End { hash: [0; 32] });
-        let gauge = Arc::new(AtomicUsize::new(0));
+        let (slow_tx, slow_rx) = mpsc::bounded::<FanoutItem>(1); let (fast_tx, fast_rx) = mpsc::bounded::<FanoutItem>(1);
+        let slow_control = Arc::new(DestControl::new()); let fast_control = Arc::new(DestControl::new());
+        let controls = vec![Arc::clone(&slow_control), Arc::clone(&fast_control)]; let senders = vec![Some(slow_tx), Some(fast_tx)];
+        let _ = senders[0].as_ref().unwrap().send(FanoutItem::End { hash: [0; 32] }); let gauge = Arc::new(AtomicUsize::new(0));
         let state = Arc::new(JobState {
-            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
-            files_total: AtomicU64::new(1), bytes_total: AtomicU64::new(1), buffers_in_flight: gauge,
-            max_buffers: 8, fanout: true,
+            running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false), files_total: AtomicU64::new(1), bytes_total: AtomicU64::new(1), buffers_in_flight: gauge, max_buffers: 8, fanout: true,
             dests: Mutex::new(vec![
                 DestProgress { label: "slow".into(), written: 0, total: 1, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None, last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0 },
                 DestProgress { label: "fast".into(), written: 0, total: 1, files_done: 0, files_skip: 0, files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None, last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0 },
             ]),
         });
-        let state_for_thread = Arc::clone(&state);
-        let started = Instant::now();
-        let handle = thread::spawn(move || {
-            let mut active = vec![0usize, 1usize];
-            deliver_to_active(&mut active, &senders, &controls, &state_for_thread, false, || FanoutItem::End { hash: [1; 32] });
-        });
+        let state_for_thread = Arc::clone(&state); let started = Instant::now();
+        let handle = thread::spawn(move || { let mut active = vec![0usize, 1usize]; deliver_to_active(&mut active, &senders, &controls, &state_for_thread, false, || FanoutItem::End { hash: [1; 32] }); });
         let fast_item = fast_rx.recv_timeout(Duration::from_millis(50)).expect("el destino rápido debe recibir sin esperar 150 ms");
-        assert!(matches!(fast_item, FanoutItem::End { hash } if hash == [1; 32]));
-        assert!(started.elapsed() < Duration::from_millis(100));
-        let _ = slow_rx.recv();
-        handle.join().unwrap();
+        assert!(matches!(fast_item, FanoutItem::End { hash } if hash == [1; 32])); assert!(started.elapsed() < Duration::from_millis(100));
+        let _ = slow_rx.recv(); handle.join().unwrap();
     }
 }
