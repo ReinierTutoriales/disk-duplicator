@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -17,6 +17,8 @@ const RETRIES: usize = 2;
 const SEND_POLL: Duration = Duration::from_millis(150);
 const DELIVERY_RETRY_SLEEP: Duration = Duration::from_millis(2);
 const STALL_THRESHOLD: Duration = Duration::from_secs(6);
+const STATE_BATCH_FILES: usize = 128;
+const STATE_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 pub struct CopyOpts { pub verify: bool, pub skip_same: bool, pub keep_going: bool }
@@ -140,11 +142,39 @@ fn load_state(dest: &Path) -> HashSet<String> {
     text.lines().filter_map(|line| { let (_, rest) = line.split_once("\"key\":\"")?; let (key, _) = rest.split_once('\"')?; Some(key.to_owned()) }).collect()
 }
 
-fn append_state(dest: &Path, key: &str) -> Result<(), String> {
-    fs::create_dir_all(state_dir(dest)).map_err(|e| format!("state mkdir: {e}"))?;
-    let mut f = OpenOptions::new().create(true).append(true).open(state_path(dest)).map_err(|e| format!("state open: {e}"))?;
-    writeln!(f, "{{\"key\":\"{key}\"}}").map_err(|e| format!("state write: {e}"))?;
-    f.sync_all().map_err(|e| format!("state sync: {e}"))?; Ok(())
+struct StateJournal {
+    writer: BufWriter<File>,
+    pending: usize,
+    last_sync: Instant,
+}
+impl StateJournal {
+    fn open(dest: &Path) -> Result<Self, String> {
+        fs::create_dir_all(state_dir(dest)).map_err(|e| format!("state mkdir: {e}"))?;
+        let file = OpenOptions::new().create(true).append(true).open(state_path(dest)).map_err(|e| format!("state open: {e}"))?;
+        Ok(Self { writer: BufWriter::with_capacity(64 * 1024, file), pending: 0, last_sync: Instant::now() })
+    }
+    fn append(&mut self, key: &str) -> Result<(), String> {
+        writeln!(self.writer, "{{\"key\":\"{key}\"}}").map_err(|e| format!("state write: {e}"))?;
+        self.pending += 1;
+        if self.pending >= STATE_BATCH_FILES || self.last_sync.elapsed() >= STATE_BATCH_INTERVAL {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+    fn checkpoint(&mut self) -> Result<(), String> {
+        if self.pending == 0 { return Ok(()); }
+        self.writer.flush().map_err(|e| format!("state flush: {e}"))?;
+        self.writer.get_ref().sync_all().map_err(|e| format!("state sync: {e}"))?;
+        self.pending = 0;
+        self.last_sync = Instant::now();
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
+}
+impl Drop for StateJournal {
+    fn drop(&mut self) {
+        let _ = self.checkpoint();
+    }
 }
 
 fn append_manifest(dest: &Path, rel: &Path, hash: &blake3::Hash) -> Result<(), String> {
@@ -278,23 +308,44 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
     let mut effective_written = 0u64;
     { let mut g = state.dests.lock().unwrap(); g[slot].mode = mode; g[slot].phase = DestPhase::Copying; }
     let completed = load_state(&dest);
+    let mut journal = match StateJournal::open(&dest) {
+        Ok(journal) => journal,
+        Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
+    };
     for info in files.iter() {
-        if !wait_pause(&state) { set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return; }
+        if !wait_pause(&state) {
+            let _ = journal.finish();
+            set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return;
+        }
         let key = state_key(info); let src = source.join(&info.rel); let dst = dest.join(&info.rel);
         state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
         if completed.contains(&key) || (opts.skip_same && same_enough(&src, &dst)) { record_skip(&state, slot, info.size); continue; }
         if !copy_one_with_retries(&src, &dst, &dest, &info.rel, opts, &state, slot, &mut effective_written, start) {
-            if state.cancel.load(Ordering::Relaxed) { set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return; }
+            if state.cancel.load(Ordering::Relaxed) {
+                let _ = journal.finish();
+                set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return;
+            }
             state.dests.lock().unwrap()[slot].files_err += 1;
-            if !opts.keep_going { set_phase(&state, slot, DestPhase::Failed, None); return; }
+            if !opts.keep_going {
+                let _ = journal.finish();
+                set_phase(&state, slot, DestPhase::Failed, None); return;
+            }
             continue;
         }
-        if let Err(e) = append_state(&dest, &key) {
+        if let Err(e) = journal.append(&key) {
             set_error(&state, slot, e); state.dests.lock().unwrap()[slot].files_err += 1;
-            if !opts.keep_going { set_phase(&state, slot, DestPhase::Failed, None); return; }
+            if !opts.keep_going {
+                let _ = journal.finish();
+                set_phase(&state, slot, DestPhase::Failed, None); return;
+            }
             continue;
         }
         record_done(&state, slot);
+    }
+    if let Err(e) = journal.finish() {
+        set_phase(&state, slot, DestPhase::Failed, Some(e));
+        state.dests.lock().unwrap()[slot].files_err += 1;
+        return;
     }
     let errs = state.dests.lock().unwrap()[slot].files_err;
     if errs == 0 { set_phase(&state, slot, DestPhase::Done, None); }
@@ -307,6 +358,10 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
     let start = Instant::now();
     let mut effective_written = 0u64;
     let mut current: Option<(FileInfo, File, blake3::Hasher, u64)> = None;
+    let mut journal = match StateJournal::open(&dest) {
+        Ok(journal) => journal,
+        Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
+    };
     set_phase(&state, slot, DestPhase::Copying, None);
     loop {
         match rx.recv() {
@@ -360,7 +415,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                         Ok(_) => { cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, format!("BLAKE3 no coincide: {}", dst.display())); continue; }
                         Err(e) => {
                             cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start);
-                            if e == "Cancelado" { set_phase(&state, slot, DestPhase::Cancelled, Some(e)); return; }
+                            if e == "Cancelado" { let _ = journal.finish(); set_phase(&state, slot, DestPhase::Cancelled, Some(e)); return; }
                             control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                         }
                     }
@@ -375,7 +430,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     }
                 }
                 let _ = append_manifest(&dest, &info.rel, &expected);
-                if let Err(e) = append_state(&dest, &state_key(&info)) {
+                if let Err(e) = journal.append(&state_key(&info)) {
                     rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                 }
                 record_done(&state, slot);
@@ -387,6 +442,9 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     drop(f); cleanup_part(&dest.join(&info.rel)); rollback_write_progress(&state, slot, copied, &mut effective_written, start);
                 }
                 drain_queue(&rx);
+                if let Err(e) = journal.finish() {
+                    set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
+                }
                 if cancelled { set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return; }
                 if source_failed.load(Ordering::Acquire) { set_phase(&state, slot, DestPhase::Failed, Some("Error de lectura del origen.".into())); return; }
                 if !alive { per_dest_worker(source, dest, files, state, slot, opts, CopyMode::Fallback); }
@@ -400,6 +458,9 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
             }
             drain_queue(&rx);
             if source_failed.load(Ordering::Acquire) || state.cancel.load(Ordering::Relaxed) { continue; }
+            if let Err(e) = journal.finish() {
+                set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
+            }
             per_dest_worker(source.clone(), dest.clone(), Arc::clone(&files), Arc::clone(&state), slot, opts, CopyMode::Fallback);
             return;
         }
@@ -623,6 +684,17 @@ mod tests {
         let a = FileInfo { rel: PathBuf::from("a/b.txt"), size: 42, mtime_ns: 7 };
         assert_eq!(state_key(&a), state_key(&a.clone()));
         assert_ne!(state_key(&a), state_key(&FileInfo { size: 43, ..a }));
+    }
+    #[test] fn journal_finish_persists_all_keys() {
+        let root = temp_dir("journal");
+        let mut journal = StateJournal::open(&root).unwrap();
+        journal.append("a|1|1").unwrap();
+        journal.append("b|2|2").unwrap();
+        journal.finish().unwrap();
+        let loaded = load_state(&root);
+        assert!(loaded.contains("a|1|1"));
+        assert!(loaded.contains("b|2|2"));
+        let _ = fs::remove_dir_all(root);
     }
     #[test] fn queue_scales_with_dests() {
         assert_eq!(queue_depth_for(1), MAX_QUEUE);
