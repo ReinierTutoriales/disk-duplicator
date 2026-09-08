@@ -23,3 +23,8 @@ jobs:
       with:
         name: disk-duplicator
         path: target/release/disk-duplicator.exe
+    - name: Upload generated lockfile
+      uses: actions/upload-artifact@v4
+      with:
+        name: cargo-lock
+        path: Cargo.lock
