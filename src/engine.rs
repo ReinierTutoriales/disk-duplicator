@@ -176,15 +176,34 @@ impl StateJournal {
     fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
 }
 impl Drop for StateJournal {
-    fn drop(&mut self) {
-        let _ = self.checkpoint();
-    }
+    fn drop(&mut self) { let _ = self.checkpoint(); }
 }
 
-fn append_manifest(dest: &Path, rel: &Path, hash: &blake3::Hash) -> Result<(), String> {
-    let mut f = OpenOptions::new().create(true).append(true).open(manifest_path(dest)).map_err(|e| format!("manifiesto: {e}"))?;
-    let name = rel.to_string_lossy().replace("\\", "/");
-    writeln!(f, "{}  {name}", hash.to_hex()).map_err(|e| format!("manifiesto: {e}"))?; Ok(())
+struct ManifestWriter {
+    writer: BufWriter<File>,
+    dirty: bool,
+}
+impl ManifestWriter {
+    fn open(dest: &Path) -> Result<Self, String> {
+        let file = OpenOptions::new().create(true).append(true).open(manifest_path(dest)).map_err(|e| format!("manifiesto: {e}"))?;
+        Ok(Self { writer: BufWriter::with_capacity(64 * 1024, file), dirty: false })
+    }
+    fn append(&mut self, rel: &Path, hash: &blake3::Hash) -> Result<(), String> {
+        let name = rel.to_string_lossy().replace("\\", "/");
+        writeln!(self.writer, "{}  {name}", hash.to_hex()).map_err(|e| format!("manifiesto: {e}"))?;
+        self.dirty = true;
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        if !self.dirty { return Ok(()); }
+        self.writer.flush().map_err(|e| format!("manifiesto flush: {e}"))?;
+        self.writer.get_ref().sync_all().map_err(|e| format!("manifiesto sync: {e}"))?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+impl Drop for ManifestWriter {
+    fn drop(&mut self) { let _ = self.finish(); }
 }
 
 fn part_path(dst: &Path) -> PathBuf { let mut p = dst.as_os_str().to_os_string(); p.push(".part"); PathBuf::from(p) }
@@ -286,15 +305,22 @@ fn record_skip(state: &JobState, slot: usize, size: u64) {
     let mut g = state.dests.lock().unwrap(); g[slot].files_skip += 1; g[slot].files_done += 1; g[slot].written += size;
 }
 
-fn record_done(state: &JobState, slot: usize) {
-    state.dests.lock().unwrap()[slot].files_done += 1;
+fn record_done(state: &JobState, slot: usize) { state.dests.lock().unwrap()[slot].files_done += 1; }
+
+fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
+    let manifest_result = manifest.finish();
+    let journal_result = journal.finish();
+    manifest_result.and(journal_result)
 }
 
-fn copy_one_with_retries(src: &Path, dst: &Path, dest_root: &Path, rel: &Path, opts: CopyOpts, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant) -> bool {
+fn copy_one_with_retries(src: &Path, dst: &Path, rel: &Path, opts: CopyOpts, state: &JobState, slot: usize, effective_written: &mut u64, start: Instant, manifest: &mut ManifestWriter) -> bool {
     for attempt in 0..=RETRIES {
         if state.cancel.load(Ordering::Relaxed) { return false; }
         match copy_file_atomic(src, dst, opts.verify, state, slot, effective_written, start) {
-            Ok(hash) => { let _ = append_manifest(dest_root, rel, &hash); return true; }
+            Ok(hash) => {
+                if let Err(e) = manifest.append(rel, &hash) { set_error(state, slot, e); return false; }
+                return true;
+            }
             Err(e) if e == "Cancelado" => return false,
             Err(_) if attempt < RETRIES => {
                 state.dests.lock().unwrap()[slot].retries += 1;
@@ -316,22 +342,26 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
         Ok(journal) => journal,
         Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
     };
+    let mut manifest = match ManifestWriter::open(&dest) {
+        Ok(manifest) => manifest,
+        Err(e) => { set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
+    };
     for info in files.iter() {
         if !wait_pause(&state) {
-            let _ = journal.finish();
+            let _ = finish_logs(&mut manifest, &mut journal);
             set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return;
         }
         let key = state_key(info); let src = source.join(&info.rel); let dst = dest.join(&info.rel);
         state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
         if completed.contains(&key) || (opts.skip_same && same_enough(&src, &dst)) { record_skip(&state, slot, info.size); continue; }
-        if !copy_one_with_retries(&src, &dst, &dest, &info.rel, opts, &state, slot, &mut effective_written, start) {
+        if !copy_one_with_retries(&src, &dst, &info.rel, opts, &state, slot, &mut effective_written, start, &mut manifest) {
             if state.cancel.load(Ordering::Relaxed) {
-                let _ = journal.finish();
+                let _ = finish_logs(&mut manifest, &mut journal);
                 set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return;
             }
             state.dests.lock().unwrap()[slot].files_err += 1;
             if !opts.keep_going {
-                let _ = journal.finish();
+                let _ = finish_logs(&mut manifest, &mut journal);
                 set_phase(&state, slot, DestPhase::Failed, None); return;
             }
             continue;
@@ -339,14 +369,14 @@ fn per_dest_worker(source: PathBuf, dest: PathBuf, files: Arc<Vec<FileInfo>>, st
         if let Err(e) = journal.append(&key) {
             set_error(&state, slot, e); state.dests.lock().unwrap()[slot].files_err += 1;
             if !opts.keep_going {
-                let _ = journal.finish();
+                let _ = finish_logs(&mut manifest, &mut journal);
                 set_phase(&state, slot, DestPhase::Failed, None); return;
             }
             continue;
         }
         record_done(&state, slot);
     }
-    if let Err(e) = journal.finish() {
+    if let Err(e) = finish_logs(&mut manifest, &mut journal) {
         set_phase(&state, slot, DestPhase::Failed, Some(e));
         state.dests.lock().unwrap()[slot].files_err += 1;
         return;
@@ -364,6 +394,10 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
     let mut current: Option<(FileInfo, File, blake3::Hasher, u64)> = None;
     let mut journal = match StateJournal::open(&dest) {
         Ok(journal) => journal,
+        Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
+    };
+    let mut manifest = match ManifestWriter::open(&dest) {
+        Ok(manifest) => manifest,
         Err(e) => { control.alive.store(false, Ordering::Release); set_phase(&state, slot, DestPhase::Failed, Some(e)); return; }
     };
     set_phase(&state, slot, DestPhase::Copying, None);
@@ -419,7 +453,7 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                         Ok(_) => { cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, format!("BLAKE3 no coincide: {}", dst.display())); continue; }
                         Err(e) => {
                             cleanup_part(&dst); rollback_write_progress(&state, slot, copied, &mut effective_written, start);
-                            if e == "Cancelado" { let _ = journal.finish(); set_phase(&state, slot, DestPhase::Cancelled, Some(e)); return; }
+                            if e == "Cancelado" { let _ = finish_logs(&mut manifest, &mut journal); set_phase(&state, slot, DestPhase::Cancelled, Some(e)); return; }
                             control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                         }
                     }
@@ -433,7 +467,9 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                         rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                     }
                 }
-                let _ = append_manifest(&dest, &info.rel, &expected);
+                if let Err(e) = manifest.append(&info.rel, &expected) {
+                    rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
+                }
                 if let Err(e) = journal.append(&state_key(&info)) {
                     rollback_write_progress(&state, slot, copied, &mut effective_written, start); control.alive.store(false, Ordering::Release); set_error(&state, slot, e); continue;
                 }
@@ -446,13 +482,15 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
                     drop(f); cleanup_part(&dest.join(&info.rel)); rollback_write_progress(&state, slot, copied, &mut effective_written, start);
                 }
                 drain_queue(&rx);
-                if let Err(e) = journal.finish() {
+                if let Err(e) = finish_logs(&mut manifest, &mut journal) {
                     set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
                 }
                 if cancelled { set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into())); return; }
                 if source_failed.load(Ordering::Acquire) { set_phase(&state, slot, DestPhase::Failed, Some("Error de lectura del origen.".into())); return; }
-                if !alive { per_dest_worker(source, dest, files, state, slot, opts, CopyMode::Fallback); }
-                else { set_phase(&state, slot, DestPhase::Done, None); }
+                if !alive {
+                    drop(manifest); drop(journal);
+                    per_dest_worker(source, dest, files, state, slot, opts, CopyMode::Fallback);
+                } else { set_phase(&state, slot, DestPhase::Done, None); }
                 return;
             }
         }
@@ -462,9 +500,10 @@ fn fanout_worker(source: PathBuf, dest: PathBuf, rx: mpsc::Receiver<FanoutItem>,
             }
             drain_queue(&rx);
             if source_failed.load(Ordering::Acquire) || state.cancel.load(Ordering::Relaxed) { continue; }
-            if let Err(e) = journal.finish() {
+            if let Err(e) = finish_logs(&mut manifest, &mut journal) {
                 set_phase(&state, slot, DestPhase::Failed, Some(e)); return;
             }
+            drop(manifest); drop(journal);
             per_dest_worker(source.clone(), dest.clone(), Arc::clone(&files), Arc::clone(&state), slot, opts, CopyMode::Fallback);
             return;
         }
@@ -712,6 +751,19 @@ mod tests {
         let loaded = load_state(&root);
         assert!(loaded.contains("a|1|1"));
         assert!(loaded.contains("b|2|2"));
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test] fn manifest_finish_persists_multiple_entries() {
+        let root = temp_dir("manifest");
+        let mut manifest = ManifestWriter::open(&root).unwrap();
+        let a = blake3::hash(b"a");
+        let b = blake3::hash(b"b");
+        manifest.append(Path::new("a.bin"), &a).unwrap();
+        manifest.append(Path::new("folder/b.bin"), &b).unwrap();
+        manifest.finish().unwrap();
+        let text = fs::read_to_string(manifest_path(&root)).unwrap();
+        assert!(text.contains(&format!("{}  a.bin", a.to_hex())));
+        assert!(text.contains(&format!("{}  folder/b.bin", b.to_hex())));
         let _ = fs::remove_dir_all(root);
     }
     #[test] fn queue_scales_with_dests() {
