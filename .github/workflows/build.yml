@@ -4,6 +4,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -16,6 +20,17 @@ jobs:
         targets: x86_64-pc-windows-msvc
     - name: Test
       run: cargo test --verbose
+    - name: Commit generated lockfile
+      if: github.event_name == 'push'
+      shell: bash
+      run: |
+        if [ -n "$(git status --porcelain -- Cargo.lock)" ]; then
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "build: commit generated Cargo lockfile"
+          git push origin HEAD:main
+        fi
     - name: Build release
       run: cargo build --release --verbose
     - name: Upload executable
@@ -23,8 +38,3 @@ jobs:
       with:
         name: disk-duplicator
         path: target/release/disk-duplicator.exe
-    - name: Upload generated lockfile
-      uses: actions/upload-artifact@v4
-      with:
-        name: cargo-lock
-        path: Cargo.lock
