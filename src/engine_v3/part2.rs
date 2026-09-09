@@ -68,8 +68,6 @@ fn fanout_worker(
     let mut effective_written = 0u64;
     let mut current: Option<CurrentFile> = None;
 
-    // The destination tree is created once by preflight. Only the private
-    // transient directory needs to be ensured once per worker.
     let tmp_dir = state_dir_for(&dest).join("tmp");
     if let Err(e) = fs::create_dir_all(&tmp_dir) {
         control.alive.store(false, Ordering::Release);
@@ -149,6 +147,7 @@ fn fanout_worker(
                             Ok(()) => {
                                 cur.hasher.update(&buf.data);
                                 cur.copied += buf.data.len() as u64;
+                                control.note_progress();
                                 record_write_progress(
                                     &state,
                                     slot,
@@ -320,6 +319,7 @@ fn fanout_worker(
                     }
                 }
 
+                control.note_progress();
                 record_done(&state, slot);
             }
         }
@@ -344,12 +344,11 @@ fn fanout_worker(
     }
 
     let errs = state.dests.lock().unwrap()[slot].files_err;
-    if !control.alive.load(Ordering::Acquire) && !opts.keep_going {
+    if !control.alive.load(Ordering::Acquire) {
         set_phase(&state, slot, DestPhase::Failed, None);
     } else if errs == 0 {
         set_phase(&state, slot, DestPhase::Done, None);
     } else {
-        // Supervisor converts incomplete/error outcomes to Failed after structural validation.
         set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
     }
 }
