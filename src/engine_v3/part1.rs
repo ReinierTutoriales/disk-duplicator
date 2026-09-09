@@ -9,12 +9,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const BLOCK: usize = 4 * 1024 * 1024;
-const RESERVED_RAM: usize = 512 * 1024 * 1024;
+const BLOCK: usize = 16 * 1024 * 1024;
+const RESERVED_RAM: usize = 2048 * 1024 * 1024;
 const MIN_QUEUE: usize = 2;
 const MAX_QUEUE: usize = 64;
 const RETRIES: usize = 2;
-const SEND_POLL: Duration = Duration::from_millis(100);
+const STALL_THRESHOLD: Duration = Duration::from_secs(6);
 const STATE_BATCH_FILES: usize = 128;
 const STATE_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -35,12 +35,9 @@ pub enum DestPhase {
     Cancelled,
 }
 
-// Kept for UI/API compatibility. The engine only assigns Fanout.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CopyMode {
     Fanout,
-    PerDestination,
-    Fallback,
 }
 
 #[derive(Clone)]
@@ -156,11 +153,24 @@ enum FanoutItem {
 struct DestControl {
     alive: AtomicBool,
     queue_depth: AtomicUsize,
+    progress_seq: AtomicU64,
 }
 
 impl DestControl {
     fn new() -> Self {
-        Self { alive: AtomicBool::new(true), queue_depth: AtomicUsize::new(0) }
+        Self {
+            alive: AtomicBool::new(true),
+            queue_depth: AtomicUsize::new(0),
+            progress_seq: AtomicU64::new(0),
+        }
+    }
+
+    fn note_progress(&self) {
+        self.progress_seq.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn progress_seq(&self) -> u64 {
+        self.progress_seq.load(Ordering::Acquire)
     }
 }
 
@@ -180,8 +190,7 @@ fn queue_depth_for(n_dests: usize) -> usize {
 fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {
     meta.modified().ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+        .map(|d| d.as_nanos()).unwrap_or(0)
 }
 
 fn expected_mtime(info: &FileInfo) -> Option<SystemTime> {
@@ -290,14 +299,6 @@ fn manifest_path(dest: &Path) -> PathBuf {
     state_dir_for(dest).join("manifest.b3")
 }
 
-fn state_key(info: &FileInfo) -> String {
-    let mut hex = String::new();
-    for b in info.rel.to_string_lossy().as_bytes() {
-        hex.push_str(&format!("{b:02x}"));
-    }
-    format!("{hex}|{}|{}", info.size, info.mtime_ns)
-}
-
 fn load_state(dest: &Path) -> HashSet<String> {
     let Ok(text) = fs::read_to_string(state_path(dest)) else { return HashSet::new(); };
     text.lines().filter_map(|line| {
@@ -402,49 +403,6 @@ fn backup_path(dest_root: &Path, dst: &Path) -> PathBuf {
 
 fn cleanup_part(dest_root: &Path, dst: &Path) {
     let _ = fs::remove_file(part_path(dest_root, dst));
-}
-
-fn commit_part(dest_root: &Path, part: &Path, dst: &Path) -> Result<(), String> {
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-    }
-
-    if !dst.exists() {
-        return fs::rename(part, dst).map_err(|e| format!("rename {}: {e}", dst.display()));
-    }
-
-    let backup = backup_path(dest_root, dst);
-    if backup.exists() {
-        fs::remove_file(&backup)
-            .map_err(|e| format!("No se pudo limpiar backup {}: {e}", backup.display()))?;
-    }
-    fs::rename(dst, &backup)
-        .map_err(|e| format!("No se pudo preparar reemplazo {}: {e}", dst.display()))?;
-    match fs::rename(part, dst) {
-        Ok(()) => {
-            let _ = fs::remove_file(&backup);
-            Ok(())
-        }
-        Err(e) => {
-            let _ = fs::rename(&backup, dst);
-            Err(format!("No se pudo reemplazar {}: {e}", dst.display()))
-        }
-    }
-}
-
-fn hash_file(path: &Path, state: Option<&JobState>) -> Result<blake3::Hash, String> {
-    let mut f = File::open(path).map_err(|e| format!("verificar: {e}"))?;
-    let mut buf = vec![0u8; BLOCK];
-    let mut h = blake3::Hasher::new();
-    loop {
-        if let Some(s) = state {
-            if !wait_pause(s) { return Err("Cancelado".into()); }
-        }
-        let n = f.read(&mut buf).map_err(|e| format!("verificar: {e}"))?;
-        if n == 0 { break; }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize())
 }
 
 fn retry_io<T>(state: &JobState, slot: usize, mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {
