@@ -1,5 +1,6 @@
 #define RT_MANIFEST 24
 1 RT_MANIFEST "app.manifest"
+1 ICON "assets/RepartoCopier.ico"
 
 1 VERSIONINFO
 FILEVERSION 1,2,0,0
