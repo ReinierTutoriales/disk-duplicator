@@ -54,8 +54,6 @@ fn phase_label(p: DestPhase, files_err: u64) -> (&'static str, Color32) {
 fn mode_label(mode: CopyMode) -> &'static str {
     match mode {
         CopyMode::Fanout => "FAN-OUT",
-        CopyMode::PerDestination => "DESTINO",
-        CopyMode::Fallback => "FALLBACK",
     }
 }
 
@@ -221,14 +219,8 @@ impl eframe::App for CopierApp {
                     ui.separator();
                     ui.weak("analizando");
                 } else if running {
-                    if let Some(job) = &self.job {
-                        ui.separator();
-                        ui.weak(if job.fanout {
-                            "fan-out activo"
-                        } else {
-                            "modo por destino"
-                        });
-                    }
+                    ui.separator();
+                    ui.weak("fan-out activo");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Créditos").clicked() {
@@ -420,11 +412,7 @@ impl eframe::App for CopierApp {
                                         .desired_width(150.0)
                                         .show_percentage(),
                                 );
-                                ui.label(if job.fanout {
-                                    dp.queue_depth.to_string()
-                                } else {
-                                    "—".into()
-                                });
+                                ui.label(dp.queue_depth.to_string());
                                 let response = ui.colored_label(color, label);
                                 if let Some(error) = &dp.error {
                                     response.on_hover_text(error);
