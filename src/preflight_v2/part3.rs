@@ -8,27 +8,68 @@ fn supervise_job(
     opts: CopyOpts,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        while handles.iter().any(|h| !h.is_finished()) {
+        let mut cancel_since: Option<std::time::Instant> = None;
+        loop {
             state.running.store(true, Ordering::Release);
+            let all_finished = handles.iter().all(JoinHandle::is_finished);
+            let all_terminal = state.dests.lock().unwrap().iter().all(|d| {
+                matches!(d.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
+            });
+
+            if all_finished || all_terminal {
+                break;
+            }
+
+            if state.cancel.load(Ordering::Relaxed) {
+                let since = cancel_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= Duration::from_secs(2) {
+                    break;
+                }
+            } else {
+                cancel_since = None;
+            }
+
             thread::sleep(Duration::from_millis(20));
         }
 
         let mut worker_panicked = false;
         for handle in handles {
-            if handle.join().is_err() { worker_panicked = true; }
+            if handle.is_finished() && handle.join().is_err() {
+                worker_panicked = true;
+            }
+            // Dropping an unfinished JoinHandle detaches a worker that is stuck
+            // inside blocking OS I/O. It may return later, but it cannot keep the
+            // healthy destinations or the UI job state blocked forever.
         }
 
         let source_problem = source_change(&source, &files, &dirs);
         let mut final_errors: Vec<Option<String>> = vec![None; dest_paths.len()];
 
+        {
+            let progress = state.dests.lock().unwrap();
+            for (slot, dp) in progress.iter().enumerate() {
+                if dp.phase == DestPhase::Failed {
+                    final_errors[slot] = Some(
+                        dp.error
+                            .clone()
+                            .unwrap_or_else(|| "El destino fue desconectado del FAN-OUT.".into()),
+                    );
+                }
+            }
+        }
+
         if worker_panicked {
             for err in &mut final_errors {
-                *err = Some("Un worker terminó de forma inesperada.".into());
+                if err.is_none() {
+                    *err = Some("Un worker terminó de forma inesperada.".into());
+                }
             }
         }
         if let Some(message) = source_problem {
             for err in &mut final_errors {
-                *err = Some(message.clone());
+                if err.is_none() {
+                    *err = Some(message.clone());
+                }
             }
         }
 
@@ -45,7 +86,7 @@ fn supervise_job(
         let mut progress = state.dests.lock().unwrap();
         for (slot, dp) in progress.iter_mut().enumerate() {
             if state.cancel.load(Ordering::Relaxed) {
-                if !matches!(dp.phase, DestPhase::Cancelled) {
+                if !matches!(dp.phase, DestPhase::Cancelled | DestPhase::Failed) {
                     dp.phase = DestPhase::Cancelled;
                     dp.error = Some("Cancelado".into());
                 }
@@ -61,7 +102,9 @@ fn supervise_job(
 
             if let Some(message) = final_errors[slot].take() {
                 dp.phase = DestPhase::Failed;
-                dp.files_err = dp.files_err.saturating_add(1);
+                if dp.files_err == 0 {
+                    dp.files_err = 1;
+                }
                 dp.error = Some(message);
             } else {
                 dp.phase = DestPhase::Done;
