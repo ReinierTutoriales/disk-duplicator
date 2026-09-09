@@ -1,4 +1,4 @@
-name: Build Windows Executable
+name: Build RepartoCopier Windows Executable
 on:
   push:
     branches: [ main ]
@@ -27,8 +27,8 @@ jobs:
     - name: Upload executable
       uses: actions/upload-artifact@v7.0.1
       with:
-        name: disk-duplicator
-        path: target/release/disk-duplicator.exe
+        name: RepartoCopier
+        path: target/release/RepartoCopier.exe
     - name: Publish GitHub release when version is new
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       shell: pwsh
@@ -47,9 +47,9 @@ jobs:
         }
 
         @"
-        ## Disk Duplicator $tag
+        ## RepartoCopier $tag
 
-        Primera versión pública estable de Disk Duplicator para Windows.
+        RepartoCopier para Windows.
 
         ### Características principales
         - Copia FAN-OUT: un origen hacia múltiples destinos.
@@ -62,10 +62,10 @@ jobs:
 
         ### Plataforma
         - Windows x64
-        - Ejecutable autónomo: `disk-duplicator.exe`
+        - Ejecutable autónomo: `RepartoCopier.exe`
         "@ | Set-Content -Path release-notes.md -Encoding utf8
 
-        gh release create $tag target/release/disk-duplicator.exe `
+        gh release create $tag target/release/RepartoCopier.exe `
           --target "$env:GITHUB_SHA" `
-          --title "Disk Duplicator $tag" `
+          --title "RepartoCopier $tag" `
           --notes-file release-notes.md
