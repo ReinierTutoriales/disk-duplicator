@@ -1,3 +1,61 @@
+fn fast_state_key(info: &FileInfo) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let path = info.rel.to_string_lossy();
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(bytes.len() * 2 + 48);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out.push('|');
+    out.push_str(&info.size.to_string());
+    out.push('|');
+    out.push_str(&info.mtime_ns.to_string());
+    out
+}
+
+fn hash_file_with_buffer(
+    path: &Path,
+    buf: &mut [u8],
+    state: Option<&JobState>,
+) -> Result<blake3::Hash, String> {
+    let mut f = File::open(path).map_err(|e| format!("verificar: {e}"))?;
+    let mut h = blake3::Hasher::new();
+    loop {
+        if let Some(s) = state {
+            if !wait_pause(s) { return Err("Cancelado".into()); }
+        }
+        let n = f.read(buf).map_err(|e| format!("verificar: {e}"))?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize())
+}
+
+fn commit_part_fast(dest_root: &Path, part: &Path, dst: &Path) -> Result<(), String> {
+    if !dst.exists() {
+        return fs::rename(part, dst).map_err(|e| format!("rename {}: {e}", dst.display()));
+    }
+
+    let backup = backup_path(dest_root, dst);
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .map_err(|e| format!("No se pudo limpiar backup {}: {e}", backup.display()))?;
+    }
+    fs::rename(dst, &backup)
+        .map_err(|e| format!("No se pudo preparar reemplazo {}: {e}", dst.display()))?;
+    match fs::rename(part, dst) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::rename(&backup, dst);
+            Err(format!("No se pudo reemplazar {}: {e}", dst.display()))
+        }
+    }
+}
+
 fn fanout_worker(
     dest: PathBuf,
     rx: mpsc::Receiver<FanoutItem>,
@@ -9,6 +67,22 @@ fn fanout_worker(
     let start = Instant::now();
     let mut effective_written = 0u64;
     let mut current: Option<CurrentFile> = None;
+
+    // The destination tree is created once by preflight. Only the private
+    // transient directory needs to be ensured once per worker.
+    let tmp_dir = state_dir_for(&dest).join("tmp");
+    if let Err(e) = fs::create_dir_all(&tmp_dir) {
+        control.alive.store(false, Ordering::Release);
+        set_phase(
+            &state,
+            slot,
+            DestPhase::Failed,
+            Some(format!("tmp mkdir {}: {e}", tmp_dir.display())),
+        );
+        return;
+    }
+
+    let mut verify_buf = vec![0u8; BLOCK];
     let mut journal = match StateJournal::open(&dest) {
         Ok(j) => j,
         Err(e) => {
@@ -34,33 +108,9 @@ fn fanout_worker(
             FanoutItem::Begin(info) => {
                 state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
                 let dst = dest.join(&info.rel);
-                if let Some(parent) = dst.parent() {
-                    if let Err(e) = fs::create_dir_all(parent) {
-                        record_file_error(&state, slot, format!("mkdir {}: {e}", parent.display()));
-                        current = Some(CurrentFile {
-                            info,
-                            file: None,
-                            hasher: blake3::Hasher::new(),
-                            copied: 0,
-                            failed: true,
-                        });
-                        if !opts.keep_going {
-                            control.alive.store(false, Ordering::Release);
-                            break;
-                        }
-                        continue;
-                    }
-                }
                 cleanup_part(&dest, &dst);
                 let tmp = part_path(&dest, &dst);
-                if let Some(parent) = tmp.parent() {
-                    if let Err(e) = fs::create_dir_all(parent) {
-                        record_file_error(&state, slot, format!("tmp mkdir {}: {e}", parent.display()));
-                        current = Some(CurrentFile { info, file: None, hasher: blake3::Hasher::new(), copied: 0, failed: true });
-                        if !opts.keep_going { control.alive.store(false, Ordering::Release); break; }
-                        continue;
-                    }
-                }
+
                 match File::create(&tmp) {
                     Ok(file) => current = Some(CurrentFile {
                         info,
@@ -197,7 +247,7 @@ fn fanout_worker(
 
                 if opts.verify {
                     set_phase(&state, slot, DestPhase::Verifying, None);
-                    match hash_file(&tmp, Some(&state)) {
+                    match hash_file_with_buffer(&tmp, &mut verify_buf, Some(&state)) {
                         Ok(actual) if actual == expected => {}
                         Ok(_) => {
                             cleanup_part(&dest, &dst);
@@ -233,7 +283,7 @@ fn fanout_worker(
                     set_phase(&state, slot, DestPhase::Copying, None);
                 }
 
-                if let Err(e) = retry_io(&state, slot, || commit_part(&dest, &tmp, &dst)) {
+                if let Err(e) = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst)) {
                     cleanup_part(&dest, &dst);
                     rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
                     record_file_error(&state, slot, e);
@@ -262,7 +312,7 @@ fn fanout_worker(
                     }
                 }
 
-                if let Err(e) = journal.append(&state_key(&cur.info)) {
+                if let Err(e) = journal.append(&fast_state_key(&cur.info)) {
                     record_file_error(&state, slot, e);
                     if !opts.keep_going {
                         control.alive.store(false, Ordering::Release);
