@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7.0.1
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
@@ -25,7 +25,7 @@ jobs:
     - name: Build release
       run: cargo build --locked --release --verbose
     - name: Upload executable
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7.0.1
       with:
         name: disk-duplicator
         path: target/release/disk-duplicator.exe
