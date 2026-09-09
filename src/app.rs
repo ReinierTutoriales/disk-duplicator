@@ -15,16 +15,179 @@ const RUNNING_REPAINT: Duration = Duration::from_millis(200);
 const PAUSED_REPAINT: Duration = Duration::from_millis(500);
 const STARTING_REPAINT: Duration = Duration::from_millis(80);
 const ERROR_FLASH: Duration = Duration::from_secs(5);
+const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
+mod system_theme {
+    use std::ffi::c_void;
+
+    type HKey = *mut c_void;
+
+    const HKEY_CURRENT_USER: HKey = 0x8000_0001usize as HKey;
+    const KEY_READ: u32 = 0x0002_0019;
+    const REG_DWORD: u32 = 4;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        #[link_name = "RegOpenKeyExW"]
+        fn reg_open_key_ex_w(
+            hkey: HKey,
+            sub_key: *const u16,
+            options: u32,
+            desired: u32,
+            result: *mut HKey,
+        ) -> i32;
+
+        #[link_name = "RegQueryValueExW"]
+        fn reg_query_value_ex_w(
+            hkey: HKey,
+            value_name: *const u16,
+            reserved: *mut u32,
+            value_type: *mut u32,
+            data: *mut u8,
+            data_len: *mut u32,
+        ) -> i32;
+
+        #[link_name = "RegCloseKey"]
+        fn reg_close_key(hkey: HKey) -> i32;
+    }
+
+    pub fn is_light() -> bool {
+        let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let value_name: Vec<u16> = "AppsUseLightTheme"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut key: HKey = std::ptr::null_mut();
+        let opened = unsafe {
+            reg_open_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                KEY_READ,
+                &mut key,
+            )
+        };
+        if opened != 0 || key.is_null() {
+            return false;
+        }
+
+        let mut value_type = 0u32;
+        let mut value = 0u32;
+        let mut value_len = std::mem::size_of::<u32>() as u32;
+        let queried = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut value_type,
+                (&mut value as *mut u32).cast::<u8>(),
+                &mut value_len,
+            )
+        };
+        unsafe {
+            reg_close_key(key);
+        }
+
+        queried == 0 && value_type == REG_DWORD && value_len == 4 && value == 1
+    }
+}
+
+#[cfg(windows)]
+fn detect_system_theme() -> bool {
+    system_theme::is_light()
+}
+
+#[cfg(not(windows))]
+fn detect_system_theme() -> bool {
+    false
+}
 
 struct Theme;
 
 impl Theme {
-    fn success() -> Color32 { Color32::from_rgb(80, 210, 140) }
-    fn warning() -> Color32 { Color32::from_rgb(235, 175, 70) }
-    fn error() -> Color32 { Color32::from_rgb(255, 95, 95) }
-    fn info() -> Color32 { Color32::from_rgb(90, 170, 255) }
-    fn verify() -> Color32 { Color32::from_rgb(180, 130, 255) }
-    fn muted() -> Color32 { Color32::from_gray(150) }
+    fn success(light: bool) -> Color32 {
+        if light { Color32::from_rgb(0, 115, 80) } else { Color32::from_rgb(80, 210, 140) }
+    }
+
+    fn warning(light: bool) -> Color32 {
+        if light { Color32::from_rgb(130, 85, 0) } else { Color32::from_rgb(235, 175, 70) }
+    }
+
+    fn error(light: bool) -> Color32 {
+        if light { Color32::from_rgb(190, 35, 35) } else { Color32::from_rgb(255, 95, 95) }
+    }
+
+    fn info(light: bool) -> Color32 {
+        if light { Color32::from_rgb(0, 90, 180) } else { Color32::from_rgb(90, 170, 255) }
+    }
+
+    fn verify(light: bool) -> Color32 {
+        if light { Color32::from_rgb(105, 65, 180) } else { Color32::from_rgb(180, 130, 255) }
+    }
+
+    fn muted(light: bool) -> Color32 {
+        if light { Color32::from_gray(90) } else { Color32::from_gray(150) }
+    }
+
+    fn accent(light: bool) -> Color32 {
+        if light { Color32::from_rgb(0, 95, 190) } else { Color32::from_rgb(100, 180, 255) }
+    }
+
+    fn bg_secondary(light: bool) -> Color32 {
+        if light { Color32::from_gray(245) } else { Color32::from_gray(30) }
+    }
+
+    fn text_primary(light: bool) -> Color32 {
+        if light { Color32::from_gray(20) } else { Color32::from_gray(230) }
+    }
+}
+
+fn apply_theme(ctx: &egui::Context, light: bool) {
+    let mut visuals = if light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+
+    visuals.widgets.noninteractive.bg_fill = Theme::bg_secondary(light);
+    visuals.widgets.inactive.bg_fill = Theme::bg_secondary(light);
+    visuals.override_text_color = Some(Theme::text_primary(light));
+    visuals.selection.bg_fill = Theme::accent(light);
+    visuals.selection.stroke.color = Theme::accent(light);
+    ctx.set_visuals(visuals);
+
+    ctx.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(SPACING_SM, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 5.0);
+        style.text_styles = [
+            (
+                egui::TextStyle::Heading,
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Body,
+                egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Monospace,
+                egui::FontId::new(12.0, egui::FontFamily::Monospace),
+            ),
+            (
+                egui::TextStyle::Button,
+                egui::FontId::new(13.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Small,
+                egui::FontId::new(11.0, egui::FontFamily::Proportional),
+            ),
+        ]
+        .into();
+    });
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -58,15 +221,15 @@ fn format_duration(secs: f64) -> String {
     }
 }
 
-fn phase_label(p: DestPhase, files_err: u64) -> (&'static str, Color32) {
+fn phase_label(p: DestPhase, files_err: u64, light: bool) -> (&'static str, Color32) {
     match p {
-        DestPhase::Idle => ("EN ESPERA", Theme::muted()),
-        DestPhase::Copying => ("COPIANDO", Theme::info()),
-        DestPhase::Verifying => ("VERIFICANDO", Theme::verify()),
-        DestPhase::Done if files_err > 0 => ("CON ERRORES", Theme::warning()),
-        DestPhase::Done => ("COMPLETO", Theme::success()),
-        DestPhase::Failed => ("ERROR", Theme::error()),
-        DestPhase::Cancelled => ("CANCELADO", Theme::muted()),
+        DestPhase::Idle => ("EN ESPERA", Theme::muted(light)),
+        DestPhase::Copying => ("COPIANDO", Theme::info(light)),
+        DestPhase::Verifying => ("VERIFICANDO", Theme::verify(light)),
+        DestPhase::Done if files_err > 0 => ("CON ERRORES", Theme::warning(light)),
+        DestPhase::Done => ("COMPLETO", Theme::success(light)),
+        DestPhase::Failed => ("ERROR", Theme::error(light)),
+        DestPhase::Cancelled => ("CANCELADO", Theme::muted(light)),
     }
 }
 
@@ -96,6 +259,9 @@ pub struct CopierApp {
     startup_rx: Option<mpsc::Receiver<StartResult>>,
     show_credits: bool,
     error_flash_until: Option<Instant>,
+    use_light_theme: bool,
+    last_theme_check: Instant,
+    applied_theme: Option<bool>,
 }
 
 impl CopierApp {
@@ -112,6 +278,9 @@ impl CopierApp {
             startup_rx: None,
             show_credits: false,
             error_flash_until: None,
+            use_light_theme: detect_system_theme(),
+            last_theme_check: Instant::now(),
+            applied_theme: None,
         }
     }
 
@@ -236,11 +405,14 @@ impl eframe::App for CopierApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_startup();
 
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx.style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(SPACING_SM, 6.0);
-            s.spacing.button_padding = egui::vec2(10.0, 5.0);
-        });
+        if self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL {
+            self.use_light_theme = detect_system_theme();
+            self.last_theme_check = Instant::now();
+        }
+        if self.applied_theme != Some(self.use_light_theme) {
+            apply_theme(ctx, self.use_light_theme);
+            self.applied_theme = Some(self.use_light_theme);
+        }
 
         let starting = self.starting();
         let running = self.running_job();
@@ -263,6 +435,8 @@ impl eframe::App for CopierApp {
                 .as_ref()
                 .is_some_and(|j| j.pause.load(Ordering::Relaxed));
             ctx.request_repaint_after(if paused { PAUSED_REPAINT } else { RUNNING_REPAINT });
+        } else {
+            ctx.request_repaint_after(THEME_CHECK_INTERVAL);
         }
 
         // Exactly one progress snapshot per UI frame. The same clone is reused by
@@ -297,7 +471,7 @@ impl eframe::App for CopierApp {
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if error_flash_active {
-                    ui.colored_label(Theme::error(), &self.status);
+                    ui.colored_label(Theme::error(self.use_light_theme), &self.status);
                 } else {
                     ui.weak(&self.status);
                 }
@@ -358,7 +532,8 @@ impl eframe::App for CopierApp {
                             ui.weak(format!("{:02}", i + 1));
                             ui.label(compact_path(d, 66)).on_hover_text(d);
                             if let Some(dp) = snaps.get(i) {
-                                let (label, color) = phase_label(dp.phase, dp.files_err);
+                                let (label, color) =
+                                    phase_label(dp.phase, dp.files_err, self.use_light_theme);
                                 ui.colored_label(color, format!("[{label}]"));
                             }
                             if !busy && ui.small_button("×").clicked() {
@@ -373,7 +548,7 @@ impl eframe::App for CopierApp {
 
             if !path_errors.is_empty() {
                 ui.colored_label(
-                    Theme::warning(),
+                    Theme::warning(self.use_light_theme),
                     format!("⚠ {} problema(s) de ruta detectado(s)", path_errors.len()),
                 )
                 .on_hover_text(path_errors.join("\n"));
@@ -499,7 +674,8 @@ impl eframe::App for CopierApp {
                                         } else {
                                             (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
                                         };
-                                        let (label, color) = phase_label(dp.phase, dp.files_err);
+                                        let (label, color) =
+                                            phase_label(dp.phase, dp.files_err, self.use_light_theme);
                                         let path_response = ui.label(
                                             egui::RichText::new(compact_path(&dp.label, 34)).small(),
                                         );
