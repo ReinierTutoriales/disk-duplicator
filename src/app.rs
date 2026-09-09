@@ -451,7 +451,7 @@ impl eframe::App for CopierApp {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("DISK DUPLICATOR").strong());
+                ui.heading(RichText::new("RepartoCopier").strong());
                 ui.weak("1 → N  ·  HDD / SSD");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if starting {
@@ -734,7 +734,7 @@ impl eframe::App for CopierApp {
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.heading(RichText::new("DISK DUPLICATOR").strong());
+                        ui.heading(RichText::new("RepartoCopier").strong());
                         ui.weak(format!("Versión {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(SPACING_MD);
                         ui.label("Desarrollado por ReinierTutoriales");
