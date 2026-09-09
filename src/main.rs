@@ -38,12 +38,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([920.0, 560.0])
             .with_min_inner_size([720.0, 420.0])
-            .with_title("Copiador"),
+            .with_title("RepartoCopier"),
         centered: true,
         ..Default::default()
     };
     eframe::run_native(
-        "Copiador",
+        "RepartoCopier",
         options,
         Box::new(|_cc| Ok(Box::new(CopierApp::new()))),
     )
