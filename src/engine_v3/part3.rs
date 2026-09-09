@@ -1,4 +1,4 @@
-const MAX_PENDING_PER_DEST: usize = 256;
+const MAX_PENDING_PER_DEST: usize = 32;
 
 type PendingQueues = Vec<std::collections::VecDeque<FanoutItem>>;
 
@@ -19,6 +19,26 @@ fn drop_pending_slot(
     }
     state.dests.lock().unwrap()[slot].queue_depth =
         controls[slot].queue_depth.load(Ordering::Acquire);
+}
+
+fn fail_stalled_destination(
+    slot: usize,
+    pending: &mut PendingQueues,
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+) {
+    if !controls[slot].alive.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    drop_pending_slot(slot, pending, controls, state);
+    let mut dests = state.dests.lock().unwrap();
+    let dp = &mut dests[slot];
+    dp.phase = DestPhase::Failed;
+    dp.files_err = dp.files_err.saturating_add(1);
+    dp.error = Some(format!(
+        "Destino atascado: sin progreso de escritura durante {} s.",
+        STALL_THRESHOLD.as_secs()
+    ));
 }
 
 fn flush_pending_once(
@@ -60,10 +80,28 @@ fn make_pending_room(
     state: &JobState,
     pending: &mut PendingQueues,
 ) -> bool {
+    let mut seen_progress = controls[slot].progress_seq();
+    let mut last_progress = Instant::now();
+
     while pending[slot].len() >= MAX_PENDING_PER_DEST {
         if !wait_pause(state) { return false; }
+
         flush_pending_once(slot, senders, controls, state, pending);
         if !controls[slot].alive.load(Ordering::Acquire) { return false; }
+
+        let current_progress = controls[slot].progress_seq();
+        if current_progress != seen_progress {
+            seen_progress = current_progress;
+            last_progress = Instant::now();
+        }
+
+        if pending[slot].len() >= MAX_PENDING_PER_DEST
+            && last_progress.elapsed() >= STALL_THRESHOLD
+        {
+            fail_stalled_destination(slot, pending, controls, state);
+            return false;
+        }
+
         if pending[slot].len() >= MAX_PENDING_PER_DEST {
             thread::sleep(Duration::from_millis(1));
         }
@@ -82,8 +120,6 @@ fn deliver_to_active(
 ) {
     let slots = active.clone();
 
-    // First, give every destination a chance to drain existing backlog.
-    // This is non-blocking and preserves per-destination FIFO order.
     for &slot in &slots {
         flush_pending_once(slot, senders, controls, state, pending);
     }
@@ -106,7 +142,6 @@ fn deliver_to_active(
             controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel);
         }
 
-        // Never bypass older pending items: Begin -> Data -> End ordering is sacred.
         if !pending[slot].is_empty() {
             pending[slot].push_back(item);
         } else {
@@ -139,15 +174,30 @@ fn drain_pending(
     state: &JobState,
     pending: &mut PendingQueues,
 ) {
+    let mut seen_progress: Vec<u64> = controls.iter().map(|c| c.progress_seq()).collect();
+    let mut last_progress: Vec<Instant> = (0..pending.len()).map(|_| Instant::now()).collect();
+
     loop {
         if !wait_pause(state) { break; }
         let mut any = false;
+
         for slot in 0..pending.len() {
-            if !pending[slot].is_empty() {
-                any = true;
-                flush_pending_once(slot, senders, controls, state, pending);
+            if pending[slot].is_empty() { continue; }
+            any = true;
+            flush_pending_once(slot, senders, controls, state, pending);
+
+            if !controls[slot].alive.load(Ordering::Acquire) { continue; }
+            let current = controls[slot].progress_seq();
+            if current != seen_progress[slot] {
+                seen_progress[slot] = current;
+                last_progress[slot] = Instant::now();
+            }
+
+            if !pending[slot].is_empty() && last_progress[slot].elapsed() >= STALL_THRESHOLD {
+                fail_stalled_destination(slot, pending, controls, state);
             }
         }
+
         active.retain(|&slot| controls[slot].alive.load(Ordering::Acquire));
         if !any || pending.iter().all(|q| q.is_empty()) { break; }
         thread::sleep(Duration::from_millis(1));
@@ -321,7 +371,6 @@ fn fanout_job(
                 &mut pending,
             );
 
-            // Cache is only an optimization for this run. Workers persist state only after commit.
             for &slot in &active {
                 state_cache[slot].insert(key.clone());
             }
