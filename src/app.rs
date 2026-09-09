@@ -1,12 +1,31 @@
-use crate::engine::{format_bps, start_job, CopyMode, CopyOpts, DestPhase, JobState};
+use crate::engine::{format_bps, start_job, CopyOpts, DestPhase, JobState};
 use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type StartResult = Result<(Arc<JobState>, Vec<JoinHandle<()>>), String>;
+
+const SPACING_XS: f32 = 4.0;
+const SPACING_SM: f32 = 8.0;
+const SPACING_MD: f32 = 12.0;
+const RUNNING_REPAINT: Duration = Duration::from_millis(200);
+const PAUSED_REPAINT: Duration = Duration::from_millis(500);
+const STARTING_REPAINT: Duration = Duration::from_millis(80);
+const ERROR_FLASH: Duration = Duration::from_secs(5);
+
+struct Theme;
+
+impl Theme {
+    fn success() -> Color32 { Color32::from_rgb(80, 210, 140) }
+    fn warning() -> Color32 { Color32::from_rgb(235, 175, 70) }
+    fn error() -> Color32 { Color32::from_rgb(255, 95, 95) }
+    fn info() -> Color32 { Color32::from_rgb(90, 170, 255) }
+    fn verify() -> Color32 { Color32::from_rgb(180, 130, 255) }
+    fn muted() -> Color32 { Color32::from_gray(150) }
+}
 
 fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -41,19 +60,13 @@ fn format_duration(secs: f64) -> String {
 
 fn phase_label(p: DestPhase, files_err: u64) -> (&'static str, Color32) {
     match p {
-        DestPhase::Idle => ("EN ESPERA", Color32::from_gray(150)),
-        DestPhase::Copying => ("COPIANDO", Color32::from_rgb(90, 170, 255)),
-        DestPhase::Verifying => ("VERIFICANDO", Color32::from_rgb(180, 130, 255)),
-        DestPhase::Done if files_err > 0 => ("CON ERRORES", Color32::from_rgb(235, 175, 70)),
-        DestPhase::Done => ("COMPLETO", Color32::from_rgb(80, 210, 140)),
-        DestPhase::Failed => ("ERROR", Color32::from_rgb(255, 95, 95)),
-        DestPhase::Cancelled => ("CANCELADO", Color32::from_gray(130)),
-    }
-}
-
-fn mode_label(mode: CopyMode) -> &'static str {
-    match mode {
-        CopyMode::Fanout => "FAN-OUT",
+        DestPhase::Idle => ("EN ESPERA", Theme::muted()),
+        DestPhase::Copying => ("COPIANDO", Theme::info()),
+        DestPhase::Verifying => ("VERIFICANDO", Theme::verify()),
+        DestPhase::Done if files_err > 0 => ("CON ERRORES", Theme::warning()),
+        DestPhase::Done => ("COMPLETO", Theme::success()),
+        DestPhase::Failed => ("ERROR", Theme::error()),
+        DestPhase::Cancelled => ("CANCELADO", Theme::muted()),
     }
 }
 
@@ -82,6 +95,7 @@ pub struct CopierApp {
     workers: Vec<JoinHandle<()>>,
     startup_rx: Option<mpsc::Receiver<StartResult>>,
     show_credits: bool,
+    error_flash_until: Option<Instant>,
 }
 
 impl CopierApp {
@@ -97,6 +111,7 @@ impl CopierApp {
             workers: Vec::new(),
             startup_rx: None,
             show_credits: false,
+            error_flash_until: None,
         }
     }
 
@@ -121,7 +136,47 @@ impl CopierApp {
             .map(|p| p.to_string_lossy().into_owned())
     }
 
+    fn validate_paths(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let source = self.source.trim();
+        if !source.is_empty() {
+            let path = PathBuf::from(source);
+            if !path.exists() {
+                errors.push("El origen no existe.".into());
+            } else if !path.is_dir() {
+                errors.push("El origen no es una carpeta.".into());
+            }
+        }
+        for (i, dest) in self.dests.iter().enumerate() {
+            let path = PathBuf::from(dest.trim());
+            if !path.exists() {
+                errors.push(format!("El destino {} no existe o no está disponible.", i + 1));
+            } else if !path.is_dir() {
+                errors.push(format!("El destino {} no es una carpeta.", i + 1));
+            }
+        }
+        errors
+    }
+
+    fn flash_error(&mut self, message: String) {
+        self.status = message;
+        self.error_flash_until = Some(Instant::now() + ERROR_FLASH);
+    }
+
     fn start(&mut self) {
+        if self.source.trim().is_empty() {
+            self.flash_error("Selecciona una carpeta de origen.".into());
+            return;
+        }
+        if self.dests.is_empty() {
+            self.flash_error("Agrega al menos un destino.".into());
+            return;
+        }
+        if let Some(first) = self.validate_paths().into_iter().next() {
+            self.flash_error(first);
+            return;
+        }
+
         let src = PathBuf::from(self.source.trim());
         let dests: Vec<PathBuf> = self
             .dests
@@ -138,6 +193,7 @@ impl CopierApp {
 
         self.job = None;
         self.workers.clear();
+        self.error_flash_until = None;
         self.status = "Analizando origen y destinos…".into();
         self.startup_rx = Some(rx);
 
@@ -161,6 +217,7 @@ impl CopierApp {
         self.startup_rx = None;
         match outcome {
             Ok(Ok((state, handles))) => {
+                self.error_flash_until = None;
                 self.status = format!(
                     "Preflight correcto · {} archivos · {} · {} destinos",
                     state.files_total.load(Ordering::Relaxed),
@@ -170,7 +227,7 @@ impl CopierApp {
                 self.job = Some(state);
                 self.workers = handles;
             }
-            Ok(Err(e)) | Err(e) => self.status = e,
+            Ok(Err(e)) | Err(e) => self.flash_error(e),
         }
     }
 }
@@ -181,19 +238,44 @@ impl eframe::App for CopierApp {
 
         ctx.set_visuals(egui::Visuals::dark());
         ctx.style_mut(|s| {
-            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.item_spacing = egui::vec2(SPACING_SM, 6.0);
             s.spacing.button_padding = egui::vec2(10.0, 5.0);
         });
 
         let starting = self.starting();
         let running = self.running_job();
         let busy = starting || running;
-        if busy {
-            ctx.request_repaint_after(Duration::from_millis(120));
+        let now = Instant::now();
+
+        if let Some(until) = self.error_flash_until {
+            if now >= until {
+                self.error_flash_until = None;
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+            }
         }
 
+        if starting {
+            ctx.request_repaint_after(STARTING_REPAINT);
+        } else if running {
+            let paused = self
+                .job
+                .as_ref()
+                .is_some_and(|j| j.pause.load(Ordering::Relaxed));
+            ctx.request_repaint_after(if paused { PAUSED_REPAINT } else { RUNNING_REPAINT });
+        }
+
+        // Exactly one progress snapshot per UI frame. The same clone is reused by
+        // the destination list, progress grid and completion summary.
+        let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
+        let path_errors = if busy { Vec::new() } else { self.validate_paths() };
+        let ready_to_start = !self.source.trim().is_empty()
+            && !self.dests.is_empty()
+            && path_errors.is_empty();
+        let error_flash_active = self.error_flash_until.is_some();
+
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(5.0);
+            ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("DISK DUPLICATOR").strong());
                 ui.weak("1 → N  ·  HDD / SSD");
@@ -209,12 +291,16 @@ impl eframe::App for CopierApp {
                     }
                 });
             });
-            ui.add_space(5.0);
+            ui.add_space(SPACING_XS);
         });
 
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.weak(&self.status);
+                if error_flash_active {
+                    ui.colored_label(Theme::error(), &self.status);
+                } else {
+                    ui.weak(&self.status);
+                }
                 if starting {
                     ui.separator();
                     ui.weak("analizando");
@@ -231,7 +317,7 @@ impl eframe::App for CopierApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("ORIGEN").strong());
                 ui.add_enabled_ui(!busy, |ui| {
@@ -248,7 +334,7 @@ impl eframe::App for CopierApp {
                 });
             });
 
-            ui.add_space(4.0);
+            ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("DESTINOS  ({})", self.dests.len())).strong());
                 ui.add_enabled_ui(!busy, |ui| {
@@ -270,7 +356,11 @@ impl eframe::App for CopierApp {
                     for (i, d) in self.dests.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.weak(format!("{:02}", i + 1));
-                            ui.label(compact_path(d, 76)).on_hover_text(d);
+                            ui.label(compact_path(d, 66)).on_hover_text(d);
+                            if let Some(dp) = snaps.get(i) {
+                                let (label, color) = phase_label(dp.phase, dp.files_err);
+                                ui.colored_label(color, format!("[{label}]"));
+                            }
                             if !busy && ui.small_button("×").clicked() {
                                 remove = Some(i);
                             }
@@ -280,6 +370,14 @@ impl eframe::App for CopierApp {
                         self.dests.remove(i);
                     }
                 });
+
+            if !path_errors.is_empty() {
+                ui.colored_label(
+                    Theme::warning(),
+                    format!("⚠ {} problema(s) de ruta detectado(s)", path_errors.len()),
+                )
+                .on_hover_text(path_errors.join("\n"));
+            }
 
             ui.separator();
             ui.horizontal(|ui| {
@@ -303,10 +401,11 @@ impl eframe::App for CopierApp {
                                 job.pause.store(false, Ordering::Relaxed);
                             }
                         }
-                    } else if !starting
-                        && ui.button(RichText::new("Iniciar copia").strong()).clicked()
-                    {
-                        self.start();
+                    } else if !starting {
+                        let start_button = egui::Button::new(RichText::new("Iniciar copia").strong());
+                        if ui.add_enabled(ready_to_start, start_button).clicked() {
+                            self.start();
+                        }
                     }
                     if starting {
                         ui.weak("Analizando…");
@@ -315,7 +414,7 @@ impl eframe::App for CopierApp {
             });
 
             if starting {
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         RichText::new("Analizando origen y destinos…")
@@ -324,7 +423,6 @@ impl eframe::App for CopierApp {
                     );
                 });
             } else if let Some(job) = &self.job {
-                let snaps = job.snapshot();
                 if !snaps.is_empty() {
                     let avg_progress = snaps
                         .iter()
@@ -363,9 +461,13 @@ impl eframe::App for CopierApp {
                         "—".into()
                     };
 
-                    ui.add_space(8.0);
+                    ui.add_space(SPACING_SM);
                     ui.label(RichText::new("PROGRESO GLOBAL").strong());
-                    ui.add(egui::ProgressBar::new(avg_progress as f32).desired_height(18.0));
+                    ui.add(
+                        egui::ProgressBar::new(avg_progress as f32)
+                            .desired_height(18.0)
+                            .show_percentage(),
+                    );
                     ui.horizontal(|ui| {
                         ui.heading(format_bps(total_bps));
                         ui.weak(format!(
@@ -375,54 +477,57 @@ impl eframe::App for CopierApp {
                         ));
                     });
 
-                    ui.add_space(6.0);
-                    egui::Grid::new("dest-grid")
-                        .striped(true)
-                        .num_columns(6)
-                        .spacing([12.0, 5.0])
+                    ui.add_space(SPACING_SM);
+                    egui::ScrollArea::vertical()
+                        .id_salt("dest-progress")
+                        .max_height(300.0)
                         .show(ui, |ui| {
-                            ui.strong("DESTINO");
-                            ui.strong("VELOCIDAD");
-                            ui.strong("PROGRESO");
-                            ui.strong("COLA");
-                            ui.strong("ESTADO");
-                            ui.strong("MODO");
-                            ui.end_row();
-                            for dp in &snaps {
-                                let frac = if dp.total == 0 {
-                                    0.0
-                                } else {
-                                    (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
-                                };
-                                let (label, color) = phase_label(dp.phase, dp.files_err);
-                                let path_response = ui.label(
-                                    egui::RichText::new(compact_path(&dp.label, 34)).small(),
-                                );
-                                if dp.last_file.is_empty() {
-                                    path_response.on_hover_text(&dp.label);
-                                } else {
-                                    path_response.on_hover_text(format!(
-                                        "{}\nArchivo: {}",
-                                        dp.label, dp.last_file
-                                    ));
-                                }
-                                ui.label(format_bps(dp.bps));
-                                ui.add(
-                                    egui::ProgressBar::new(frac)
-                                        .desired_width(150.0)
-                                        .show_percentage(),
-                                );
-                                ui.label(dp.queue_depth.to_string());
-                                let response = ui.colored_label(color, label);
-                                if let Some(error) = &dp.error {
-                                    response.on_hover_text(error);
-                                }
-                                ui.weak(mode_label(dp.mode));
-                                ui.end_row();
-                            }
+                            egui::Grid::new("dest-grid")
+                                .striped(true)
+                                .num_columns(5)
+                                .spacing([12.0, 5.0])
+                                .show(ui, |ui| {
+                                    ui.strong("DESTINO");
+                                    ui.strong("VELOCIDAD");
+                                    ui.strong("PROGRESO");
+                                    ui.strong("COLA");
+                                    ui.strong("ESTADO");
+                                    ui.end_row();
+                                    for dp in &snaps {
+                                        let frac = if dp.total == 0 {
+                                            0.0
+                                        } else {
+                                            (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
+                                        };
+                                        let (label, color) = phase_label(dp.phase, dp.files_err);
+                                        let path_response = ui.label(
+                                            egui::RichText::new(compact_path(&dp.label, 34)).small(),
+                                        );
+                                        if dp.last_file.is_empty() {
+                                            path_response.on_hover_text(&dp.label);
+                                        } else {
+                                            path_response.on_hover_text(format!(
+                                                "{}\nArchivo: {}",
+                                                dp.label, dp.last_file
+                                            ));
+                                        }
+                                        ui.label(format_bps(dp.bps));
+                                        ui.add(
+                                            egui::ProgressBar::new(frac)
+                                                .desired_width(150.0)
+                                                .show_percentage(),
+                                        );
+                                        ui.label(dp.queue_depth.to_string());
+                                        let response = ui.colored_label(color, label);
+                                        if let Some(error) = &dp.error {
+                                            response.on_hover_text(error);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
                         });
 
-                    ui.add_space(6.0);
+                    ui.add_space(SPACING_SM);
                     ui.horizontal(|ui| {
                         ui.weak(format!(
                             "Buffers {}/{}",
@@ -437,7 +542,7 @@ impl eframe::App for CopierApp {
                     });
                 }
             } else {
-                ui.add_space(12.0);
+                ui.add_space(SPACING_MD);
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("Preparado para copiar").size(22.0).strong());
                 });
@@ -455,49 +560,45 @@ impl eframe::App for CopierApp {
                     ui.vertical_centered(|ui| {
                         ui.heading(RichText::new("DISK DUPLICATOR").strong());
                         ui.weak(format!("Versión {}", env!("CARGO_PKG_VERSION")));
-                        ui.add_space(10.0);
+                        ui.add_space(SPACING_MD);
                         ui.label("Desarrollado por ReinierTutoriales");
-                        ui.add_space(6.0);
+                        ui.add_space(SPACING_SM);
                         ui.weak("Rust · egui/eframe · BLAKE3");
                         ui.weak("Copiador de archivos 1 origen → N destinos HDD/SSD");
-                        ui.add_space(10.0);
+                        ui.add_space(SPACING_MD);
                         ui.hyperlink_to(
                             "github.com/ReinierTutoriales/disk-duplicator",
                             "https://github.com/ReinierTutoriales/disk-duplicator",
                         );
-                        ui.add_space(6.0);
+                        ui.add_space(SPACING_SM);
                         ui.weak("Licencia MIT");
                     });
                 });
             self.show_credits = open;
         }
 
-        if !busy {
-            if let Some(job) = &self.job {
-                let snaps = job.snapshot();
-                if !snaps.is_empty()
-                    && snaps.iter().all(|d| {
-                        matches!(
-                            d.phase,
-                            DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
-                        )
-                    })
-                {
-                    let ok = snaps
-                        .iter()
-                        .filter(|d| d.phase == DestPhase::Done && d.files_err == 0)
-                        .count();
-                    let with_errors = snaps.iter().filter(|d| d.files_err > 0).count();
-                    self.status = if with_errors == 0 {
-                        format!("Completado · {ok}/{} destinos sin errores", snaps.len())
-                    } else {
-                        format!(
-                            "Completado · {ok}/{} sin errores · {with_errors} con incidencias",
-                            snaps.len()
-                        )
-                    };
-                }
-            }
+        if !busy
+            && !snaps.is_empty()
+            && snaps.iter().all(|d| {
+                matches!(
+                    d.phase,
+                    DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
+                )
+            })
+        {
+            let ok = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Done && d.files_err == 0)
+                .count();
+            let with_errors = snaps.iter().filter(|d| d.files_err > 0).count();
+            self.status = if with_errors == 0 {
+                format!("Completado · {ok}/{} destinos sin errores", snaps.len())
+            } else {
+                format!(
+                    "Completado · {ok}/{} sin errores · {with_errors} con incidencias",
+                    snaps.len()
+                )
+            };
         }
     }
 }
