@@ -45,7 +45,6 @@ fn build_job(
         bytes_total: AtomicU64::new(bytes_total),
         buffers_in_flight: Arc::new(AtomicUsize::new(0)),
         max_buffers,
-        fanout: true,
         dests: Mutex::new(progress),
     });
 
@@ -120,7 +119,7 @@ mod tests {
         let state = JobState {
             running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
             files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, fanout: true, dests: Mutex::new(Vec::new()),
+            max_buffers: 2, dests: Mutex::new(Vec::new()),
         };
         let buf = pool.acquire(&state).unwrap();
         assert_eq!(buf.len(), BLOCK);
