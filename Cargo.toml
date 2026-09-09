@@ -2,8 +2,12 @@
 name = "disk-duplicator"
 version = "1.2.0"
 edition = "2021"
-description = "Copiador de archivos 1 origen → N destinos"
+description = "RepartoCopier · copiador de archivos 1 origen → N destinos"
 license = "MIT"
+
+[[bin]]
+name = "RepartoCopier"
+path = "src/main.rs"
 
 [dependencies]
 eframe = "0.29"
