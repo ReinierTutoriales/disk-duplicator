@@ -7,7 +7,27 @@ mod preflight;
 
 mod engine {
     pub use crate::engine_impl::{format_bps, CopyMode, CopyOpts, DestPhase, JobState};
-    pub use crate::preflight::start_job;
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+
+    pub fn start_job(
+        source: PathBuf,
+        dests: Vec<PathBuf>,
+        opts: CopyOpts,
+    ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+        let folder_name = source.file_name().ok_or_else(|| {
+            "El origen debe ser una carpeta con nombre; no se puede duplicar una raíz completa.".to_owned()
+        })?;
+
+        let effective_dests = dests
+            .into_iter()
+            .map(|base| base.join(folder_name))
+            .collect();
+
+        crate::preflight::start_job(source, effective_dests, opts)
+    }
 }
 
 use app::CopierApp;
