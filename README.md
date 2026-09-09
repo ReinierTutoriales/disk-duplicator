@@ -1,8 +1,8 @@
-# Disk Duplicator
+# RepartoCopier
 
 Copiador de archivos de alto rendimiento **1 origen → N destinos** para HDD y SSD internos o externos.
 
-Disk Duplicator no clona discos, particiones, GPT/MBR ni sistemas operativos. Su objetivo es duplicar el contenido de una carpeta hacia múltiples destinos de almacenamiento de forma concurrente y segura.
+RepartoCopier no clona discos, particiones, GPT/MBR ni sistemas operativos. Su objetivo es duplicar el contenido de una carpeta hacia múltiples destinos de almacenamiento de forma concurrente y segura.
 
 ## Arquitectura
 
@@ -70,7 +70,7 @@ Con dos SSD NVMe conectados vía USB 3.2:
 - **Detección nativa de Windows 11**: FFI directo a `advapi32.dll` (sin dependencias externas)
 - **Detección periódica**: Re-chequeo cada 30 segundos para cambios de tema en caliente
 - **Repaint en idle**: Detecta cambios aunque la app esté inactiva
-- **Paleta adaptativa**: 9 colores optimizados para ambos temas con contraste WCAG AA
+- **Paleta adaptativa**: Colores optimizados para ambos temas
 - **Tipografía jerárquica**: 5 estilos (Heading 18px, Body 13px, Monospace 12px, Button 13px, Small 11px)
 
 ### Feedback visual
@@ -116,7 +116,7 @@ Con dos SSD NVMe conectados vía USB 3.2:
    - Destinos atascados se marcan automáticamente como ERROR
    - Destinos sanos continúan sin interrupción
 
-El ejecutable de Windows se genera como artifact de GitHub Actions: `disk-duplicator.exe`.
+El ejecutable de Windows se genera como artifact de GitHub Actions: `RepartoCopier.exe`.
 
 ## Requisitos
 
@@ -135,7 +135,7 @@ cd disk-duplicator
 # Compilar release
 cargo build --release
 
-# Ejecutable en: target/release/disk-duplicator.exe
+# Ejecutable en: target/release/RepartoCopier.exe
 ```
 
 ## Licencia
