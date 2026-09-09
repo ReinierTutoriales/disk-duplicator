@@ -65,7 +65,6 @@ pub struct JobState {
     pub bytes_total: AtomicU64,
     pub buffers_in_flight: Arc<AtomicUsize>,
     pub max_buffers: usize,
-    pub fanout: bool,
     pub dests: Mutex<Vec<DestProgress>>,
 }
 
