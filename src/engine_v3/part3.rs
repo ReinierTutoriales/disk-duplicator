@@ -1,3 +1,76 @@
+const MAX_PENDING_PER_DEST: usize = 256;
+
+type PendingQueues = Vec<std::collections::VecDeque<FanoutItem>>;
+
+fn item_is_data(item: &FanoutItem) -> bool {
+    matches!(item, FanoutItem::Data(_))
+}
+
+fn drop_pending_slot(
+    slot: usize,
+    pending: &mut PendingQueues,
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+) {
+    while let Some(item) = pending[slot].pop_front() {
+        if item_is_data(&item) {
+            controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    state.dests.lock().unwrap()[slot].queue_depth =
+        controls[slot].queue_depth.load(Ordering::Acquire);
+}
+
+fn flush_pending_once(
+    slot: usize,
+    senders: &[mpsc::Sender<FanoutItem>],
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+    pending: &mut PendingQueues,
+) {
+    if !controls[slot].alive.load(Ordering::Acquire) {
+        drop_pending_slot(slot, pending, controls, state);
+        return;
+    }
+
+    loop {
+        let Some(item) = pending[slot].pop_front() else { break; };
+        match senders[slot].try_send(item) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(returned)) => {
+                pending[slot].push_front(returned);
+                break;
+            }
+            Err(mpsc::TrySendError::Disconnected(returned)) => {
+                if item_is_data(&returned) {
+                    controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel);
+                }
+                controls[slot].alive.store(false, Ordering::Release);
+                drop_pending_slot(slot, pending, controls, state);
+                break;
+            }
+        }
+    }
+}
+
+fn make_pending_room(
+    slot: usize,
+    senders: &[mpsc::Sender<FanoutItem>],
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+    pending: &mut PendingQueues,
+) -> bool {
+    while pending[slot].len() >= MAX_PENDING_PER_DEST {
+        if !wait_pause(state) { return false; }
+        flush_pending_once(slot, senders, controls, state, pending);
+        if !controls[slot].alive.load(Ordering::Acquire) { return false; }
+        if pending[slot].len() >= MAX_PENDING_PER_DEST {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    true
+}
+
 fn deliver_to_active(
     active: &mut Vec<usize>,
     senders: &[mpsc::Sender<FanoutItem>],
@@ -5,49 +78,84 @@ fn deliver_to_active(
     state: &JobState,
     counts_data: bool,
     make_item: impl Fn() -> FanoutItem,
+    pending: &mut PendingQueues,
 ) {
     let slots = active.clone();
+
+    // First, give every destination a chance to drain existing backlog.
+    // This is non-blocking and preserves per-destination FIFO order.
+    for &slot in &slots {
+        flush_pending_once(slot, senders, controls, state, pending);
+    }
+
     for slot in slots {
         if !controls[slot].alive.load(Ordering::Acquire) {
             active.retain(|&s| s != slot);
             continue;
         }
 
-        let mut item = make_item();
-        let mut depth_reserved = false;
-        if counts_data {
-            controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel);
-            depth_reserved = true;
+        if !make_pending_room(slot, senders, controls, state, pending) {
+            if !controls[slot].alive.load(Ordering::Acquire) {
+                active.retain(|&s| s != slot);
+            }
+            continue;
         }
 
-        loop {
-            if !wait_pause(state) {
-                if depth_reserved {
-                    controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel);
+        let item = make_item();
+        if counts_data {
+            controls[slot].queue_depth.fetch_add(1, Ordering::AcqRel);
+        }
+
+        // Never bypass older pending items: Begin -> Data -> End ordering is sacred.
+        if !pending[slot].is_empty() {
+            pending[slot].push_back(item);
+        } else {
+            match senders[slot].try_send(item) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    pending[slot].push_back(returned);
                 }
-                active.clear();
-                return;
-            }
-            match senders[slot].send_timeout(item, SEND_POLL) {
-                Ok(()) => {
-                    if counts_data {
-                        state.dests.lock().unwrap()[slot].queue_depth =
-                            controls[slot].queue_depth.load(Ordering::Acquire);
-                    }
-                    break;
-                }
-                Err(mpsc::SendTimeoutError::Timeout(returned)) => {
-                    item = returned;
-                }
-                Err(mpsc::SendTimeoutError::Disconnected(_)) => {
-                    if depth_reserved {
+                Err(mpsc::TrySendError::Disconnected(returned)) => {
+                    if item_is_data(&returned) {
                         controls[slot].queue_depth.fetch_sub(1, Ordering::AcqRel);
                     }
                     controls[slot].alive.store(false, Ordering::Release);
                     active.retain(|&s| s != slot);
-                    break;
                 }
             }
+        }
+
+        if counts_data {
+            state.dests.lock().unwrap()[slot].queue_depth =
+                controls[slot].queue_depth.load(Ordering::Acquire);
+        }
+    }
+}
+
+fn drain_pending(
+    active: &mut Vec<usize>,
+    senders: &[mpsc::Sender<FanoutItem>],
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+    pending: &mut PendingQueues,
+) {
+    loop {
+        if !wait_pause(state) { break; }
+        let mut any = false;
+        for slot in 0..pending.len() {
+            if !pending[slot].is_empty() {
+                any = true;
+                flush_pending_once(slot, senders, controls, state, pending);
+            }
+        }
+        active.retain(|&slot| controls[slot].alive.load(Ordering::Acquire));
+        if !any || pending.iter().all(|q| q.is_empty()) { break; }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    if state.cancel.load(Ordering::Relaxed) {
+        for slot in 0..pending.len() {
+            drop_pending_slot(slot, pending, controls, state);
         }
     }
 }
@@ -88,10 +196,14 @@ fn fanout_job(
 
     let reader = thread::spawn(move || {
         let mut state_cache: Vec<HashSet<String>> = dests.iter().map(|d| load_state(d)).collect();
+        let mut pending: PendingQueues = (0..dests.len())
+            .map(|_| std::collections::VecDeque::new())
+            .collect();
+        let mut all_active: Vec<usize> = (0..dests.len()).collect();
 
         for info in files.iter() {
             if !wait_pause(&state) { break; }
-            let key = state_key(info);
+            let key = fast_state_key(info);
             let mut skip_mask = vec![false; dests.len()];
 
             for slot in 0..dests.len() {
@@ -115,6 +227,7 @@ fn fanout_job(
                 &state,
                 false,
                 || FanoutItem::Begin(info.clone()),
+                &mut pending,
             );
             if active.is_empty() { continue; }
 
@@ -174,6 +287,7 @@ fn fanout_job(
                     &state,
                     true,
                     || FanoutItem::Data(Arc::clone(&buf)),
+                    &mut pending,
                 );
                 if active.is_empty() { break; }
             }
@@ -204,6 +318,7 @@ fn fanout_job(
                 &state,
                 false,
                 || FanoutItem::End { hash },
+                &mut pending,
             );
 
             // Cache is only an optimization for this run. Workers persist state only after commit.
@@ -212,6 +327,13 @@ fn fanout_job(
             }
         }
 
+        drain_pending(
+            &mut all_active,
+            &senders,
+            &controls,
+            &state,
+            &mut pending,
+        );
         drop(senders);
     });
 
