@@ -6,7 +6,7 @@ mod engine_impl;
 mod preflight;
 
 mod engine {
-    pub use crate::engine_impl::{format_bps, CopyMode, CopyOpts, DestPhase, JobState};
+    pub use crate::engine_impl::{format_bps, CopyOpts, DestPhase, JobState};
 
     use std::path::PathBuf;
     use std::sync::Arc;
