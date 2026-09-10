@@ -1,5 +1,7 @@
 use crate::engine::{format_bps, start_job, CopyOpts, DestPhase, JobState};
 use eframe::egui::{self, Color32, RichText};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
@@ -16,6 +18,7 @@ const PAUSED_REPAINT: Duration = Duration::from_millis(500);
 const STARTING_REPAINT: Duration = Duration::from_millis(80);
 const ERROR_FLASH: Duration = Duration::from_secs(5);
 const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 #[cfg(windows)]
 mod system_theme {
@@ -262,6 +265,9 @@ pub struct CopierApp {
     use_light_theme: bool,
     last_theme_check: Instant,
     applied_theme: Option<bool>,
+    path_errors: Vec<String>,
+    last_path_check: Instant,
+    paths_key: u64,
 }
 
 impl CopierApp {
@@ -281,6 +287,9 @@ impl CopierApp {
             use_light_theme: detect_system_theme(),
             last_theme_check: Instant::now(),
             applied_theme: None,
+            path_errors: Vec::new(),
+            last_path_check: Instant::now(),
+            paths_key: u64::MAX,
         }
     }
 
@@ -292,11 +301,6 @@ impl CopierApp {
         self.job
             .as_ref()
             .is_some_and(|j| j.running.load(Ordering::Relaxed))
-            || self.workers.iter().any(|h| !h.is_finished())
-    }
-
-    fn busy(&self) -> bool {
-        self.starting() || self.running_job()
     }
 
     fn pick_dir() -> Option<String> {
@@ -325,6 +329,13 @@ impl CopierApp {
             }
         }
         errors
+    }
+
+    fn paths_key(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.source.hash(&mut hasher);
+        self.dests.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn flash_error(&mut self, message: String) {
@@ -414,8 +425,18 @@ impl eframe::App for CopierApp {
             self.applied_theme = Some(self.use_light_theme);
         }
 
+        // Exactly one progress snapshot per UI frame. The same clone is reused by
+        // the destination list, progress grid and completion summary.
+        let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
+        let all_terminal = !snaps.is_empty()
+            && snaps.iter().all(|d| {
+                matches!(
+                    d.phase,
+                    DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
+                )
+            });
         let starting = self.starting();
-        let running = self.running_job();
+        let running = self.running_job() && !all_terminal;
         let busy = starting || running;
         let now = Instant::now();
 
@@ -439,10 +460,13 @@ impl eframe::App for CopierApp {
             ctx.request_repaint_after(THEME_CHECK_INTERVAL);
         }
 
-        // Exactly one progress snapshot per UI frame. The same clone is reused by
-        // the destination list, progress grid and completion summary.
-        let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
-        let path_errors = if busy { Vec::new() } else { self.validate_paths() };
+        let key = self.paths_key();
+        if key != self.paths_key || self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL {
+            self.paths_key = key;
+            self.last_path_check = Instant::now();
+            self.path_errors = if busy { Vec::new() } else { self.validate_paths() };
+        }
+        let path_errors = &self.path_errors;
         let ready_to_start = !self.source.trim().is_empty()
             && !self.dests.is_empty()
             && path_errors.is_empty();
@@ -456,12 +480,6 @@ impl eframe::App for CopierApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if starting {
                         ui.weak("preflight");
-                    } else if let Some(job) = &self.job {
-                        ui.weak(format!(
-                            "buffers {}/{}",
-                            job.buffers_in_flight.load(Ordering::Relaxed),
-                            job.max_buffers
-                        ));
                     }
                 });
             });
@@ -753,15 +771,7 @@ impl eframe::App for CopierApp {
             self.show_credits = open;
         }
 
-        if !busy
-            && !snaps.is_empty()
-            && snaps.iter().all(|d| {
-                matches!(
-                    d.phase,
-                    DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
-                )
-            })
-        {
+        if !busy && all_terminal {
             let ok = snaps
                 .iter()
                 .filter(|d| d.phase == DestPhase::Done && d.files_err == 0)
