@@ -231,9 +231,12 @@ fn fanout_worker(
 
                 if let Some(file) = cur.file.as_mut() {
                     let rel = cur.info.rel.display().to_string();
-                    if let Err(e) = retry_io(&state, slot, || {
+                    control.enter_operation(OperationPhase::Sync);
+                    let sync_result = retry_io(&state, slot, || {
                         file.sync_data().map_err(|e| format!("sync {rel}: {e}"))
-                    }) {
+                    });
+                    control.enter_operation(OperationPhase::Write);
+                    if let Err(e) = sync_result {
                         cur.file.take();
                         cleanup_part(&dest, &dst);
                         rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
@@ -270,7 +273,10 @@ fn fanout_worker(
 
                 if let Some(buf) = verify_buf.as_mut() {
                     set_phase(&state, slot, DestPhase::Verifying, None);
-                    match hash_file_with_buffer(&tmp, buf, Some(&state)) {
+                    control.enter_operation(OperationPhase::Verify);
+                    let verify_result = hash_file_with_buffer(&tmp, buf, Some(&state));
+                    control.enter_operation(OperationPhase::Write);
+                    match verify_result {
                         Ok(actual) if actual == expected => {}
                         Ok(_) => {
                             cleanup_part(&dest, &dst);
@@ -311,7 +317,10 @@ fn fanout_worker(
                     continue;
                 }
 
-                if let Err(e) = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst)) {
+                control.enter_operation(OperationPhase::Commit);
+                let commit_result = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
+                control.enter_operation(OperationPhase::Write);
+                if let Err(e) = commit_result {
                     cleanup_part(&dest, &dst);
                     rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
                     record_file_error(&state, slot, e);
