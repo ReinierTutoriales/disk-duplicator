@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
 
     fn temp_dir(name: &str) -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -75,20 +76,48 @@ mod tests {
     }
 
     #[test]
-    fn completed_state_requires_physical_match() {
-        let root = temp_dir("resume");
+    fn completed_state_requires_manifest_proof() {
+        let root = temp_dir("resume-proof");
         let source = root.join("src");
         let dest = root.join("dst");
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&dest).unwrap();
         fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::copy(source.join("a.bin"), dest.join("a.bin")).unwrap();
+        let src_mtime = fs::metadata(source.join("a.bin")).unwrap().modified().unwrap();
+        File::options().write(true).open(dest.join("a.bin")).unwrap().set_modified(src_mtime).unwrap();
+
         let (files, _) = scan_source(&source).unwrap();
         let key = state_key(&files[0]);
         let dir = state_dir_for(&dest);
         fs::create_dir_all(&dir).unwrap();
         fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
+
+        let valid = normalize_completed_state(&source, &dest, &files).unwrap();
+        assert!(valid.is_empty(), "journal sin hash durable no puede conservar estado completado");
+        assert!(load_completed(&dest).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_manifest_entry_invalidates_resume() {
+        let root = temp_dir("resume-malformed-manifest");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::copy(source.join("a.bin"), dest.join("a.bin")).unwrap();
+        let (files, _) = scan_source(&source).unwrap();
+        let key = state_key(&files[0]);
+        let dir = state_dir_for(&dest);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
+        fs::write(manifest_path(&dest), "not-a-hash  a.bin\n").unwrap();
+
         let valid = normalize_completed_state(&source, &dest, &files).unwrap();
         assert!(valid.is_empty());
+        assert!(load_completed(&dest).is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -108,7 +137,7 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
         fs::write(
-            state_dir.join("manifest.b3"),
+            manifest_path(&dest),
             format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
         ).unwrap();
 
@@ -134,7 +163,7 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
         fs::write(
-            state_dir.join("manifest.b3"),
+            manifest_path(&dest),
             format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
         ).unwrap();
 
@@ -143,6 +172,103 @@ mod tests {
         let valid = normalize_completed_state(&source, &dest, &files).unwrap();
         assert!(valid.is_empty(), "el journal no puede aceptar un origen distinto al hash persistido");
         assert!(load_completed(&dest).is_empty(), "el estado inválido debe eliminarse del journal");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backup_is_restored_after_interrupted_commit() {
+        let root = temp_dir("backup-recovery");
+        let dest = root.join("dst");
+        fs::create_dir_all(&dest).unwrap();
+        prepare_state_dir(&dest).unwrap();
+        let info = FileInfo { rel: PathBuf::from("a.bin"), size: 3, mtime_ns: 0 };
+        let dst = dest.join(&info.rel);
+        fs::write(&dst, b"old").unwrap();
+        let backup = backup_path(&dest, &dst);
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::rename(&dst, &backup).unwrap();
+
+        cleanup_owned_stale_files(&dest, std::slice::from_ref(&info)).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"old");
+        assert!(!backup.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_hash_detects_source_change_with_preserved_metadata() {
+        let root = temp_dir("source-content-change");
+        let source = root.join("src");
+        fs::create_dir_all(&source).unwrap();
+        let path = source.join("a.bin");
+        fs::write(&path, b"abc").unwrap();
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let (files, _) = scan_source(&source).unwrap();
+        let mut reader_hashes = std::collections::HashMap::new();
+        reader_hashes.insert(PathBuf::from("a.bin"), *blake3::hash(b"abc").as_bytes());
+
+        fs::write(&path, b"xyz").unwrap();
+        File::options().write(true).open(&path).unwrap().set_modified(original_mtime).unwrap();
+
+        assert!(final_source_hashes(&source, &files, &reader_hashes).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn supervisor_waits_for_worker_termination_after_cancel() {
+        let root = temp_dir("supervisor-cancel");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+
+        let state = Arc::new(JobState {
+            running: std::sync::atomic::AtomicBool::new(true),
+            cancel: std::sync::atomic::AtomicBool::new(true),
+            pause: std::sync::atomic::AtomicBool::new(false),
+            files_total: std::sync::atomic::AtomicU64::new(0),
+            bytes_total: std::sync::atomic::AtomicU64::new(0),
+            buffers_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_buffers: 1,
+            dests: std::sync::Mutex::new(vec![crate::engine_impl::DestProgress {
+                label: dest.display().to_string(),
+                written: 0,
+                total: 0,
+                files_done: 0,
+                files_skip: 0,
+                files_err: 0,
+                bps: 0.0,
+                bps_recent: 0.0,
+                last_tick: std::time::Instant::now(),
+                phase: DestPhase::Copying,
+                error: None,
+                last_file: String::new(),
+                queue_depth: 0,
+                retries: 0,
+            }]),
+            reader_hashes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
+
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = thread::spawn(move || {
+            worker_barrier.wait();
+        });
+        let supervisor = supervise_job(
+            source,
+            vec![dest],
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::clone(&state),
+            vec![worker],
+            opts(false),
+        );
+
+        thread::sleep(Duration::from_millis(60));
+        assert!(state.running.load(Ordering::Acquire), "el supervisor se desacopló del worker cancelado");
+        barrier.wait();
+        supervisor.join().unwrap();
+        assert!(!state.running.load(Ordering::Acquire));
+        assert_eq!(state.snapshot()[0].phase, DestPhase::Cancelled);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -160,7 +286,7 @@ mod tests {
         let state_dir = state_dir_for(&dest);
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(
-            state_dir.join("manifest.b3"),
+            manifest_path(&dest),
             format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
         ).unwrap();
 

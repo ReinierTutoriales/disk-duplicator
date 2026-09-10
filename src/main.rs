@@ -3,6 +3,7 @@
 mod app;
 #[path = "engine.rs"]
 mod engine_impl;
+mod paths;
 mod preflight;
 
 mod engine {

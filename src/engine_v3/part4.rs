@@ -158,6 +158,16 @@ mod tests {
     }
 
     #[test]
+    fn physical_part_size_is_checked_before_commit() {
+        let root = temp_dir("part-size");
+        let part = root.join("file.part");
+        fs::write(&part, b"abc").unwrap();
+        assert!(validate_part_size(&part, 3).is_ok());
+        assert!(validate_part_size(&part, 4).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn failed_worker_does_not_commit_or_record_completion() {
         let root = temp_dir("dead-worker");
         let dest = root.join("dest");

@@ -1,3 +1,4 @@
+use crate::paths::{backup_path, manifest_path, part_path, state_dir_for, state_path};
 use crossbeam_channel as mpsc;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -301,24 +302,6 @@ fn same_enough(src: &Path, dst: &Path) -> bool {
     }
 }
 
-fn state_id(dest: &Path) -> String {
-    let hash = blake3::hash(dest.to_string_lossy().as_bytes()).to_hex().to_string();
-    hash[..16].to_owned()
-}
-
-pub(crate) fn state_dir_for(dest: &Path) -> PathBuf {
-    let parent = dest.parent().unwrap_or(dest);
-    parent.join(".disk-duplicator-state").join(state_id(dest))
-}
-
-fn state_path(dest: &Path) -> PathBuf {
-    state_dir_for(dest).join("completed.jsonl")
-}
-
-fn manifest_path(dest: &Path) -> PathBuf {
-    state_dir_for(dest).join("manifest.b3")
-}
-
 fn load_state(dest: &Path) -> HashSet<String> {
     let Ok(text) = fs::read_to_string(state_path(dest)) else { return HashSet::new(); };
     text.lines().filter_map(|line| {
@@ -351,10 +334,11 @@ impl StateJournal {
         writeln!(self.writer, "{{\"key\":\"{key}\"}}")
             .map_err(|e| format!("state write: {e}"))?;
         self.pending += 1;
-        if self.pending >= STATE_BATCH_FILES || self.last_sync.elapsed() >= STATE_BATCH_INTERVAL {
-            self.checkpoint()?;
-        }
         Ok(())
+    }
+
+    fn needs_checkpoint(&self) -> bool {
+        self.pending >= STATE_BATCH_FILES || self.last_sync.elapsed() >= STATE_BATCH_INTERVAL
     }
 
     fn checkpoint(&mut self) -> Result<(), String> {
@@ -367,10 +351,6 @@ impl StateJournal {
     }
 
     fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
-}
-
-impl Drop for StateJournal {
-    fn drop(&mut self) { let _ = self.checkpoint(); }
 }
 
 struct ManifestWriter {
@@ -408,21 +388,13 @@ impl Drop for ManifestWriter {
     fn drop(&mut self) { let _ = self.finish(); }
 }
 
-fn transient_id(path: &Path) -> String {
-    let hash = blake3::hash(path.to_string_lossy().as_bytes()).to_hex().to_string();
-    hash[..24].to_owned()
-}
-
-fn part_path(dest_root: &Path, dst: &Path) -> PathBuf {
-    state_dir_for(dest_root).join("tmp").join(format!("{}.part", transient_id(dst)))
-}
-
-fn backup_path(dest_root: &Path, dst: &Path) -> PathBuf {
-    state_dir_for(dest_root).join("tmp").join(format!("{}.bak", transient_id(dst)))
-}
-
 fn cleanup_part(dest_root: &Path, dst: &Path) {
-    let _ = fs::remove_file(part_path(dest_root, dst));
+    let path = part_path(dest_root, dst);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("Advertencia: no se pudo eliminar {}: {e}", path.display()),
+    }
 }
 
 fn retry_io<T>(state: &JobState, slot: usize, mut op: impl FnMut() -> Result<T, String>) -> Result<T, String> {
@@ -497,6 +469,14 @@ fn record_done(state: &JobState, slot: usize) {
     state.dests.lock().unwrap()[slot].files_done += 1;
 }
 
+fn checkpoint_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
+    // Durability invariant: a completed journal entry must never become durable
+    // before the corresponding manifest hash is durable.
+    manifest.finish()?;
+    journal.checkpoint()
+}
+
 fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    manifest.finish().and(journal.finish())
+    manifest.finish()?;
+    journal.finish()
 }

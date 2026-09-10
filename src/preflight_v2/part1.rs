@@ -1,4 +1,8 @@
-use crate::engine_impl::{self, state_dir_for, CopyOpts, DestPhase, FileInfo, JobState};
+use crate::engine_impl::{self, CopyOpts, DestPhase, FileInfo, JobState};
+use crate::paths::{
+    backup_path, legacy_backup_path, legacy_part_path, manifest_path, part_path, prepare_state_dir,
+    state_dir_for, state_path, state_rewrite_backup_path, state_rewrite_tmp_path,
+};
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
@@ -67,11 +71,14 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
             ));
         }
 
-        let meta = entry
+        // Open first and read metadata from the exact handle we proved readable. The engine
+        // still re-validates the snapshot around the actual copy, so this narrows the initial
+        // TOCTOU window without pretending the filesystem stays immutable afterwards.
+        let file = File::open(entry.path())
+            .map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
+        let meta = file
             .metadata()
             .map_err(|e| format!("metadata {}: {e}", entry.path().display()))?;
-        File::open(entry.path())
-            .map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
 
         files.push(PlannedFile {
             rel,
@@ -98,8 +105,32 @@ fn state_key(info: &PlannedFile) -> String {
     key
 }
 
-fn state_path(dest: &Path) -> PathBuf {
-    state_dir_for(dest).join("completed.jsonl")
+fn recover_completed_rewrite(dest: &Path) -> Result<(), String> {
+    let path = state_path(dest);
+    let tmp = state_rewrite_tmp_path(dest);
+    let backup = state_rewrite_backup_path(dest);
+
+    if path.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup)
+                .map_err(|e| format!("No se pudo limpiar backup de estado {}: {e}", backup.display()))?;
+        }
+        if tmp.exists() {
+            fs::remove_file(&tmp)
+                .map_err(|e| format!("No se pudo limpiar temporal de estado {}: {e}", tmp.display()))?;
+        }
+        return Ok(());
+    }
+
+    if backup.exists() {
+        fs::rename(&backup, &path)
+            .map_err(|e| format!("No se pudo restaurar el journal {}: {e}", path.display()))?;
+    }
+    if tmp.exists() {
+        fs::remove_file(&tmp)
+            .map_err(|e| format!("No se pudo limpiar temporal de estado {}: {e}", tmp.display()))?;
+    }
+    Ok(())
 }
 
 fn load_completed(dest: &Path) -> HashSet<String> {
@@ -118,32 +149,54 @@ fn load_completed(dest: &Path) -> HashSet<String> {
 fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> {
     let dir = state_dir_for(dest);
     fs::create_dir_all(&dir).map_err(|e| format!("state mkdir {}: {e}", dir.display()))?;
+    recover_completed_rewrite(dest)?;
+
     let path = state_path(dest);
-    let tmp = dir.join("completed.jsonl.preflight");
+    let tmp = state_rewrite_tmp_path(dest);
+    let backup = state_rewrite_backup_path(dest);
 
-    let result = (|| {
-        let mut f = File::create(&tmp)
-            .map_err(|e| format!("state temp {}: {e}", tmp.display()))?;
-        let mut ordered: Vec<&String> = keys.iter().collect();
-        ordered.sort();
-        for key in ordered {
-            writeln!(f, "{{\"key\":\"{key}\"}}")
-                .map_err(|e| format!("state write: {e}"))?;
+    let mut f = File::create(&tmp)
+        .map_err(|e| format!("state temp {}: {e}", tmp.display()))?;
+    let mut ordered: Vec<&String> = keys.iter().collect();
+    ordered.sort();
+    for key in ordered {
+        writeln!(f, "{{\"key\":\"{key}\"}}")
+            .map_err(|e| format!("state write: {e}"))?;
+    }
+    f.sync_data().map_err(|e| format!("state sync: {e}"))?;
+    drop(f);
+
+    if path.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup)
+                .map_err(|e| format!("state backup cleanup {}: {e}", backup.display()))?;
         }
-        f.sync_data().map_err(|e| format!("state sync: {e}"))?;
-        drop(f);
+        fs::rename(&path, &backup)
+            .map_err(|e| format!("state backup {}: {e}", path.display()))?;
+    }
 
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|e| format!("state replace {}: {e}", path.display()))?;
+    match fs::rename(&tmp, &path) {
+        Ok(()) => {
+            if backup.exists() {
+                fs::remove_file(&backup)
+                    .map_err(|e| format!("state backup cleanup {}: {e}", backup.display()))?;
+            }
+            Ok(())
         }
-        fs::rename(&tmp, &path)
-            .map_err(|e| format!("state commit {}: {e}", path.display()))?;
-        Ok::<(), String>(())
-    })();
-
-    if result.is_err() { let _ = fs::remove_file(&tmp); }
-    result
+        Err(commit_err) => {
+            if backup.exists() {
+                match fs::rename(&backup, &path) {
+                    Ok(()) => Err(format!("state commit {}: {commit_err}; journal anterior restaurado", path.display())),
+                    Err(restore_err) => Err(format!(
+                        "CRÍTICO: state commit {}: {commit_err}; tampoco se pudo restaurar {}: {restore_err}",
+                        path.display(), backup.display()
+                    )),
+                }
+            } else {
+                Err(format!("state commit {}: {commit_err}", path.display()))
+            }
+        }
+    }
 }
 
 fn same_enough(src: &Path, dst: &Path) -> bool {
@@ -165,6 +218,7 @@ fn normalize_completed_state(
     dest: &Path,
     files: &[PlannedFile],
 ) -> Result<HashSet<String>, String> {
+    recover_completed_rewrite(dest)?;
     let loaded = load_completed(dest);
     if loaded.is_empty() { return Ok(loaded); }
 
@@ -176,15 +230,20 @@ fn normalize_completed_state(
 
         let src = source.join(&info.rel);
         let dst = dest.join(&info.rel);
-        let physically_valid = if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
-            matches_manifest_hash(&src, info.size, expected)
-                && matches_manifest_hash(&dst, info.size, expected)
-        } else {
-            same_enough(&src, &dst)
-        };
+        let physically_valid = manifest_hashes
+            .get(&manifest_key(&info.rel))
+            .is_some_and(|expected| {
+                matches_manifest_hash(&src, info.size, expected)
+                    && matches_manifest_hash(&dst, info.size, expected)
+            });
 
         if physically_valid {
             valid.insert(key);
+        } else {
+            eprintln!(
+                "Advertencia: estado de reanudación sin prueba BLAKE3 válida para {}; se volverá a copiar.",
+                info.rel.display()
+            );
         }
     }
 
@@ -194,33 +253,24 @@ fn normalize_completed_state(
     Ok(valid)
 }
 
-fn transient_id(path: &Path) -> String {
-    let hash = blake3::hash(path.to_string_lossy().as_bytes()).to_hex().to_string();
-    hash[..24].to_owned()
-}
-
-fn part_path(dest_root: &Path, dst: &Path) -> PathBuf {
-    state_dir_for(dest_root).join("tmp").join(format!("{}.part", transient_id(dst)))
-}
-
-fn backup_path(dest_root: &Path, dst: &Path) -> PathBuf {
-    state_dir_for(dest_root).join("tmp").join(format!("{}.bak", transient_id(dst)))
+fn remove_owned_file(path: &Path, label: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("No se pudo limpiar {label} {}: {e}", path.display())),
+    }
 }
 
 fn cleanup_owned_stale_files(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
     for info in files {
         let dst = dest.join(&info.rel);
-        let tmp = part_path(dest, &dst);
-        if tmp.exists() {
-            fs::remove_file(&tmp)
-                .map_err(|e| format!("No se pudo limpiar {}: {e}", tmp.display()))?;
-        }
+        remove_owned_file(&part_path(dest, &dst), "temporal")?;
+        remove_owned_file(&legacy_part_path(dest, &dst), "temporal heredado")?;
 
-        let backup = backup_path(dest, &dst);
-        if backup.exists() {
+        for backup in [backup_path(dest, &dst), legacy_backup_path(dest, &dst)] {
+            if !backup.exists() { continue; }
             if dst.exists() {
-                fs::remove_file(&backup)
-                    .map_err(|e| format!("No se pudo limpiar backup {}: {e}", backup.display()))?;
+                remove_owned_file(&backup, "backup")?;
             } else {
                 fs::rename(&backup, &dst)
                     .map_err(|e| format!("No se pudo restaurar backup {}: {e}", backup.display()))?;

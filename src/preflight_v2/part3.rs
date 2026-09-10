@@ -8,33 +8,19 @@ fn supervise_job(
     opts: CopyOpts,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut cancel_since: Option<std::time::Instant> = None;
+        // A job remains live until every engine thread has actually terminated. Dropping an
+        // unfinished JoinHandle only detaches the thread; it does not cancel a blocked OS I/O.
         loop {
             state.running.store(true, Ordering::Release);
-            let all_finished = handles.iter().all(JoinHandle::is_finished);
-            let all_terminal = state.dests.lock().unwrap().iter().all(|d| {
-                matches!(d.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
-            });
-
-            if all_finished || all_terminal {
+            if handles.iter().all(JoinHandle::is_finished) {
                 break;
             }
-
-            if state.cancel.load(Ordering::Relaxed) {
-                let since = cancel_since.get_or_insert_with(std::time::Instant::now);
-                if since.elapsed() >= Duration::from_secs(2) {
-                    break;
-                }
-            } else {
-                cancel_since = None;
-            }
-
             thread::sleep(Duration::from_millis(20));
         }
 
         let mut worker_panicked = false;
         for handle in handles {
-            if handle.is_finished() && handle.join().is_err() {
+            if handle.join().is_err() {
                 worker_panicked = true;
             }
         }
@@ -72,6 +58,22 @@ fn supervise_job(
 
         if !state.cancel.load(Ordering::Relaxed) {
             let reader_hashes = state.reader_hashes.lock().unwrap().clone();
+            let expected_hashes = if opts.verify {
+                match final_source_hashes(&source, &files, &reader_hashes) {
+                    Ok(hashes) => hashes,
+                    Err(e) => {
+                        for err in &mut final_errors {
+                            if err.is_none() {
+                                *err = Some(e.clone());
+                            }
+                        }
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                reader_hashes
+            };
+
             for (slot, dest) in dest_paths.iter().enumerate() {
                 if final_errors[slot].is_none() {
                     if let Err(e) = validate_destination_result_with_hashes(
@@ -80,7 +82,7 @@ fn supervise_job(
                         &files,
                         &dirs,
                         opts.verify,
-                        &reader_hashes,
+                        &expected_hashes,
                     ) {
                         final_errors[slot] = Some(e);
                     }

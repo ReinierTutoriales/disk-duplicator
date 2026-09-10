@@ -5,6 +5,7 @@ fn plan_destination(
     dirs: &[PathBuf],
     opts: CopyOpts,
 ) -> Result<(), String> {
+    prepare_state_dir(dest)?;
     cleanup_owned_stale_files(dest, files)?;
     validate_destination_directories(dest, dirs)?;
 
@@ -166,6 +167,28 @@ fn hash_path(path: &Path) -> Result<blake3::Hash, String> {
     Ok(h.finalize())
 }
 
+fn final_source_hashes(
+    source: &Path,
+    files: &[PlannedFile],
+    reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+) -> Result<std::collections::HashMap<PathBuf, [u8; 32]>, String> {
+    let mut final_hashes = std::collections::HashMap::with_capacity(files.len());
+    for info in files {
+        let path = source.join(&info.rel);
+        let actual = hash_path(&path)?;
+        if let Some(read_hash) = reader_hashes.get(&info.rel) {
+            if actual.as_bytes() != read_hash {
+                return Err(format!(
+                    "El archivo de origen cambió durante la copia aunque conservara tamaño y fecha: {}",
+                    path.display()
+                ));
+            }
+        }
+        final_hashes.insert(info.rel.clone(), *actual.as_bytes());
+    }
+    Ok(final_hashes)
+}
+
 fn from_hex32(s: &str) -> Option<[u8; 32]> {
     let bytes = s.as_bytes();
     if bytes.len() != 64 { return None; }
@@ -183,14 +206,29 @@ fn manifest_key(path: &Path) -> String {
 }
 
 fn load_manifest_hashes(dest: &Path) -> std::collections::HashMap<String, [u8; 32]> {
-    let path = state_dir_for(dest).join("manifest.b3");
-    let Ok(text) = fs::read_to_string(path) else { return std::collections::HashMap::new(); };
-    text.lines()
-        .filter_map(|line| {
-            let (hex, name) = line.split_once("  ")?;
-            Some((name.to_owned(), from_hex32(hex)?))
-        })
-        .collect()
+    let path = manifest_path(dest);
+    let Ok(text) = fs::read_to_string(&path) else { return std::collections::HashMap::new(); };
+    let mut hashes = std::collections::HashMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let Some((hex, name)) = line.split_once("  ") else {
+            eprintln!(
+                "Advertencia: línea {} inválida en {}. La entrada no se usará para reanudación.",
+                index + 1,
+                path.display()
+            );
+            continue;
+        };
+        let Some(hash) = from_hex32(hex) else {
+            eprintln!(
+                "Advertencia: hash inválido en la línea {} de {}. La entrada no se usará para reanudación.",
+                index + 1,
+                path.display()
+            );
+            continue;
+        };
+        hashes.insert(name.to_owned(), hash);
+    }
+    hashes
 }
 
 fn validate_destination_result_with_hashes(
@@ -199,7 +237,7 @@ fn validate_destination_result_with_hashes(
     files: &[PlannedFile],
     dirs: &[PathBuf],
     verify: bool,
-    reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+    expected_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
 ) -> Result<(), String> {
     for rel in dirs {
         let path = dest.join(rel);
@@ -234,7 +272,7 @@ fn validate_destination_result_with_hashes(
 
         if verify {
             let dst_hash = hash_path(&dst)?;
-            if let Some(expected) = reader_hashes.get(&info.rel) {
+            if let Some(expected) = expected_hashes.get(&info.rel) {
                 if dst_hash.as_bytes() != expected {
                     return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
                 }
