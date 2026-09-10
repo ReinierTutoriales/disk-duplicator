@@ -5,18 +5,17 @@ on:
   pull_request:
     branches: [ main ]
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
     - uses: actions/checkout@v7.0.1
-    - name: Install Rust
+    - name: Install Rust 1.98.1
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
+        toolchain: 1.98.1
         targets: x86_64-pc-windows-msvc
         components: clippy
     - name: Cache Rust build
@@ -73,3 +72,26 @@ jobs:
           --target "$env:GITHUB_SHA" `
           --title "RepartoCopier $tag" `
           --notes-file release-notes.md
+
+  stable-compat:
+    name: Stable compatibility (non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7.0.1
+    - name: Install latest stable Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+        components: clippy
+    - name: Cache Rust stable build
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: stable-compat
+    - name: Clippy on latest stable
+      run: cargo clippy --locked --all-targets -- -D warnings
+    - name: Test release on latest stable
+      run: cargo test --locked --release --verbose
