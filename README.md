@@ -1,152 +1,199 @@
 # RepartoCopier
 
-RepartoCopier es un copiador de carpetas de alto rendimiento para Windows que distribuye **1 origen → N destinos** mediante FAN-OUT estricto.
+### Una carpeta. Varios destinos. Una sola operación.
 
-No clona discos, particiones, GPT/MBR ni dispositivos a nivel de bloque. Copia el contenido de una carpeta conservando su jerarquía y sus directorios vacíos.
+**RepartoCopier** es una aplicación para Windows creada para copiar una carpeta a varios destinos al mismo tiempo de forma **rápida, segura y confiable**.
 
-## Arquitectura
+Selecciona lo que quieres copiar, agrega los destinos y deja que RepartoCopier se encargue del resto.
 
-El motor usa un único lector del origen. Cada bloque leído se comparte con todos los destinos activos mediante referencias al mismo buffer, evitando releer el origen una vez por destino durante la fase de copia.
+---
 
-- Bloques de **16 MiB** para reducir el número de operaciones de I/O.
+## ✨ Copiar a varios destinos ya no tiene que ser complicado
+
+Cuando necesitas preparar varias unidades, memorias USB o ubicaciones con el mismo contenido, repetir la copia una y otra vez consume tiempo y multiplica el trabajo.
+
+RepartoCopier simplifica todo el proceso: **lee el origen una vez y distribuye el contenido entre todos los destinos activos**, manteniendo la estructura original de carpetas.
+
+### Lo esencial
+
+- **Varios destinos a la vez** — agrega los destinos que necesites y gestiona toda la copia desde una sola ventana.
+- **Protección del contenido** — puede comprobar que los archivos copiados coincidan con el origen.
+- **Reanudación inteligente** — si una copia se interrumpe, aprovecha el trabajo ya completado y validado.
+- **Destinos independientes** — un problema en una unidad no tiene por qué detener las demás.
+- **Pausa y continuación** — conserva el control durante trabajos largos.
+- **Progreso claro** — muestra avance, velocidad, tiempo estimado y estado individual de cada destino.
+- **Carpetas intactas** — mantiene la jerarquía del origen, incluidas las carpetas vacías.
+
+> **RepartoCopier trabaja con carpetas y archivos.** No modifica particiones ni realiza clonación física de discos.
+
+---
+
+## 🚀 Pensado para trabajar, no para complicarte
+
+El flujo de uso es directo:
+
+1. **Selecciona la carpeta de origen.**
+2. **Agrega uno o varios destinos.**
+3. Elige si quieres omitir archivos iguales, continuar si un destino falla o realizar una verificación completa.
+4. **Inicia la copia.**
+
+RepartoCopier comprueba las condiciones necesarias antes de comenzar y mantiene cada destino supervisado durante el proceso.
+
+---
+
+## 🛡️ Confianza de principio a fin
+
+Una copia rápida sirve de poco si no puedes confiar en el resultado. Por eso RepartoCopier está diseñado alrededor de la integridad de los datos.
+
+Con la verificación activada, el contenido se comprueba durante el proceso y vuelve a validarse en el destino. Los archivos no se consideran completados hasta superar las comprobaciones correspondientes.
+
+Si una operación se interrumpe, RepartoCopier conserva fuera de la carpeta copiada la información necesaria para determinar qué archivos fueron terminados correctamente. Al volver a iniciar el trabajo, valida ese estado antes de reutilizarlo.
+
+La reanudación funciona **por archivo completado**: un archivo que quedó a medio escribir puede comenzar nuevamente, mientras que los archivos ya confirmados pueden conservarse sin repetir trabajo innecesario.
+
+---
+
+## ⚡ Un motor moderno para copias múltiples
+
+RepartoCopier no ejecuta una copia independiente completa para cada destino. Su motor comparte de forma eficiente los datos leídos entre los destinos activos y controla cada salida por separado.
+
+Esto permite mantener un flujo de trabajo ordenado incluso cuando las unidades conectadas tienen velocidades diferentes. La memoria y las colas de trabajo están limitadas para evitar un crecimiento descontrolado durante copias grandes.
+
+La velocidad real siempre dependerá del equipo, las unidades utilizadas, la conexión USB/SATA/NVMe y el tipo de archivos. RepartoCopier no presenta cifras artificiales de rendimiento como garantía.
+
+---
+
+## 💡 Ideal para
+
+- Preparar varias memorias USB con el mismo contenido.
+- Distribuir una colección de archivos a varias unidades.
+- Repetir entregas de carpetas sin iniciar cada copia manualmente.
+- Trabajos donde necesitas saber claramente qué destino terminó y cuál presentó un problema.
+- Copias largas que pueden necesitar pausa, cancelación o reanudación posterior.
+
+---
+
+## 🖥️ Información clara mientras trabaja
+
+Durante la copia puedes consultar:
+
+- progreso general y por destino;
+- velocidad actual;
+- tiempo estimado restante;
+- archivo en proceso;
+- reintentos y estado de cada destino;
+- copia completada, error o cancelación.
+
+Al finalizar, RepartoCopier diferencia claramente los destinos correctos de los que terminaron con errores o fueron cancelados.
+
+---
+
+## ⚙️ Opciones principales
+
+**Omitir iguales**  
+Evita volver a escribir archivos que ya cumplen la comparación rápida utilizada por la aplicación.
+
+**Continuar con errores**  
+Permite que los destinos sanos sigan trabajando cuando otro destino presenta un problema.
+
+**Verificar BLAKE3**  
+Activa una comprobación criptográfica del contenido para aumentar la confianza en el resultado final.
+
+---
+
+<details>
+<summary><strong>🔧 Detalles técnicos</strong></summary>
+
+<br>
+
+Esta sección está destinada a desarrolladores, revisores y usuarios que quieran conocer el funcionamiento interno.
+
+### Motor de copia
+
+- Arquitectura de distribución **1 origen → N destinos** con un único lector del origen.
+- Bloques de **16 MiB** compartidos entre los destinos activos.
 - Cola acotada por destino, con capacidad máxima de **16 elementos**.
-- Backlog pendiente acotado para evitar que un destino lento monopolice memoria.
-- Pool reutilizable de buffers con un máximo de **16 buffers libres retenidos**.
-- Presupuesto máximo de buffers en vuelo de **2 GiB**; no significa que 2 GiB sea un requisito mínimo de RAM del sistema.
-- Cada destino tiene su propio worker y puede fallar sin detener automáticamente a los destinos sanos cuando está habilitado "Continuar con errores".
+- Backlog pendiente y pool de buffers limitados para controlar la presión de memoria.
+- Máximo de **16 buffers libres retenidos** en el pool.
+- Presupuesto principal de buffers en vuelo limitado a **2 GiB**; esto no representa un requisito mínimo de RAM del sistema.
+- Worker independiente por destino.
+- El preflight escanea el origen una sola vez y reutiliza la planificación para crear la estructura de directorios.
+- Origen y destinos se canonicalizan para detectar alias, duplicados y solapamientos peligrosos.
 
-El preflight escanea el origen una sola vez para construir la lista de archivos y directorios. Esa misma planificación se reutiliza para crear la estructura de carpetas en los destinos, evitando un segundo recorrido completo del origen antes de copiar.
+### Integridad
 
-Las rutas de origen y destinos se canonicalizan antes de iniciar el trabajo para detectar alias, duplicados y solapamientos peligrosos.
+El lector calcula BLAKE3 mientras transmite cada archivo y conserva los hashes de la ejecución para la validación final.
 
-## Integridad y verificación
+Con la verificación habilitada:
 
-### FAN-OUT estricto
+1. se calcula el hash mientras se lee el origen;
+2. cada destino escribe primero un archivo temporal `.part` fuera del árbol copiado;
+3. el temporal puede releerse y verificarse antes de ser confirmado;
+4. se sincronizan los datos antes del reemplazo final;
+5. la validación final relee el destino y compara su contenido con el hash esperado;
+6. las reanudaciones utilizan `manifest.b3` y vuelven a validar origen y destino antes de aceptar estado previo.
 
-No existe un modo alternativo que vuelva a leer el origen por cada destino. El lector calcula BLAKE3 mientras transmite los datos y guarda los hashes de la corrida para reutilizarlos durante la validación final.
+El reemplazo utiliza un protocolo de **backup + rename + restauración en caso de fallo**. No se presenta como una transacción garantizada por el filesystem.
 
-Con **Verificar BLAKE3** activado:
+### Estado y reanudación
 
-1. El lector calcula el hash del archivo mientras lo lee.
-2. Cada worker escribe primero un archivo temporal `.part` dentro del área de estado externa.
-3. El worker puede releer el `.part` para verificarlo antes del commit.
-4. Tras el commit, la validación final vuelve a leer el destino y lo compara con el hash ya calculado por el lector.
-5. Para archivos reanudados de una corrida anterior, `manifest.b3` sirve como referencia persistente; si no existe un hash utilizable se recurre a una comparación segura con el origen.
-
-Esto elimina relecturas redundantes del origen para los archivos recién leídos en la corrida actual sin eliminar la comprobación física del destino.
-
-## Reanudación
-
-El estado operacional no se escribe dentro del árbol copiado. Se almacena junto al destino bajo:
+El estado operacional se mantiene fuera del árbol copiado:
 
 ```text
 .disk-duplicator-state/<id-del-destino>/
 ```
 
-Los archivos principales son:
+Archivos principales:
 
-- `completed.jsonl`: journal de archivos confirmados.
-- `manifest.b3`: hashes BLAKE3 persistidos.
-- `tmp/`: temporales `.part` y backups controlados por la aplicación.
+- `completed.jsonl` — archivos confirmados;
+- `manifest.b3` — hashes persistidos;
+- `tmp/` — temporales y backups administrados por la aplicación.
 
-La reanudación es **por archivo comprometido**, no por byte dentro de un archivo. Si el proceso se interrumpe en mitad de un archivo, ese archivo incompleto puede tener que escribirse de nuevo; los archivos ya confirmados pueden conservarse si pasan las validaciones de reanudación.
+### Supervisión de I/O
 
-El preflight normaliza el journal y descarta entradas que ya no corresponden a archivos físicamente válidos.
+La detección de operaciones atascadas utiliza umbrales diferentes según la fase:
 
-## Escritura y reemplazo seguro
+- escritura: aproximadamente **6 s** sin progreso;
+- sincronización, verificación y commit: aproximadamente **60 s**.
 
-Para cada archivo:
+Esto evita tratar del mismo modo una escritura detenida y una operación legítimamente lenta de sincronización o verificación.
 
-- se escribe primero en un `.part` externo al árbol copiado;
-- se sincronizan los datos antes del commit;
-- si ya existe un archivo destino, se crea un backup temporal;
-- el `.part` se renombra a la ruta final;
-- si el reemplazo falla, se intenta restaurar el backup y se reporta el error compuesto si también falla la restauración;
-- el journal y el manifest se actualizan únicamente después de completar las comprobaciones correspondientes.
+Un hilo ya bloqueado dentro de una llamada de I/O del sistema operativo no puede terminarse de forma segura desde Rust. El motor utiliza guardas adicionales para impedir que un worker previamente declarado fallido registre después un archivo como completado.
 
-No se describe este proceso como una transacción de filesystem garantizada: es un protocolo de **backup + rename + restauración en fallo** diseñado para minimizar estados incompletos.
+### Telemetría
 
-## Detección de destinos atascados
+- velocidad reciente mediante EWMA con constante temporal de **2 s**;
+- velocidad promedio acumulada para métricas de largo plazo y ETA;
+- unidades IEC: **KiB/s, MiB/s y GiB/s**;
+- buffer de verificación de **8 MiB** creado únicamente cuando la verificación está activa.
 
-La detección de stall es consciente de la fase de I/O:
+### Preflight
 
-- **Write:** umbral corto de aproximadamente **6 s** sin progreso.
-- **Sync / Verify / Commit:** umbral más tolerante de aproximadamente **60 s** para evitar falsos positivos durante operaciones legítimamente lentas.
+Antes de escribir se comprueba que:
 
-Cuando un destino supera el umbral correspondiente se marca como fallido y deja de bloquear el flujo de los demás destinos. Un hilo que ya esté bloqueado dentro de una llamada de I/O del sistema operativo no puede ser terminado de forma segura por Rust; por eso el motor también aplica guardas para impedir que un worker declarado muerto registre posteriormente un archivo como completado.
+- el origen exista y sea una carpeta;
+- cada destino sea escribible;
+- origen y destinos no se solapen;
+- los destinos no apunten a la misma ubicación ni se contengan entre sí;
+- no se escriba a través de enlaces simbólicos;
+- no existan conflictos entre archivos y carpetas;
+- exista espacio suficiente considerando reemplazos temporales y una reserva de seguridad.
 
-## Rendimiento y telemetría
+El origen vuelve a comprobarse durante y al finalizar la operación para detectar cambios incompatibles con la planificación inicial.
 
-Las optimizaciones documentadas describen mecanismos implementados, no porcentajes de rendimiento no medidos:
+</details>
 
-- bloques de 16 MiB;
-- buffers compartidos entre destinos;
-- pool de buffers reutilizable y acotado;
-- colas y backlog acotados;
-- un snapshot de progreso por frame de UI;
-- buffer de verificación de **8 MiB** creado únicamente cuando BLAKE3 está activado;
-- despacho FAN-OUT con colas independientes;
-- velocidad reciente mediante **EWMA con constante temporal de 2 s**;
-- velocidad promedio acumulada conservada para métricas de largo plazo/ETA.
+---
 
-La velocidad se presenta con unidades IEC: **KiB/s, MiB/s y GiB/s**.
+## 🧪 Validación antes de una publicación
 
-El throughput real depende del origen, cada destino, controladores USB/SATA/NVMe, cachés del sistema operativo y del patrón de archivos. No se publican cifras de rendimiento como garantía sin un benchmark reproducible.
+El repositorio incluye `TESTING.md` con las pruebas de campo recomendadas para validar escenarios que requieren hardware real, como desconexiones USB, cancelación y reanudación, o recuperación después de un cierre inesperado.
 
-## Seguridad del preflight
+---
 
-Antes de escribir datos se valida:
+## 🛠️ Compilar desde el código fuente
 
-- que el origen exista y sea una carpeta;
-- que los destinos sean escribibles;
-- que origen y destinos no se solapen;
-- que dos destinos no resuelvan a la misma ubicación ni se contengan entre sí;
-- que no se escriba a través de enlaces simbólicos;
-- que no existan conflictos archivo/carpeta;
-- que haya espacio suficiente considerando el pico temporal de reemplazos y una reserva de seguridad por volumen.
-
-El origen también se vuelve a comprobar durante la copia para detectar cambios de tamaño o modificación y, al finalizar, se valida que la estructura planificada siga siendo coherente.
-
-## Interfaz
-
-La UI muestra:
-
-- progreso global y por destino;
-- velocidad reciente por destino;
-- ETA;
-- profundidad de cola;
-- reintentos de I/O;
-- archivo actual;
-- uso de buffers del pool;
-- estado por destino: espera, copiando, verificando, completo, error o cancelado.
-
-Una fuente formada únicamente por directorios vacíos termina mostrando **100%** cuando el destino alcanza `Done`.
-
-El resumen final distingue explícitamente trabajos completados, destinos con errores, destinos fallidos y cancelaciones.
-
-## Uso
-
-1. Selecciona una carpeta de origen.
-2. Agrega uno o más destinos.
-3. Configura las opciones:
-   - **Omitir iguales**: evita reescribir archivos que cumplen la comparación rápida configurada.
-   - **Continuar con errores**: mantiene activos los destinos sanos cuando otro falla.
-   - **Verificar BLAKE3**: habilita comprobación criptográfica de contenido.
-4. Inicia la copia y espera a que el preflight termine.
-5. Puedes pausar, reanudar o cancelar el trabajo.
-
-## Recuperación y pruebas de campo recomendadas
-
-Antes de publicar una release se recomienda probar con hardware real:
-
-- desconectar un destino USB durante una copia y comprobar que solo ese destino falle dentro del timeout correspondiente a su fase;
-- cancelar una copia parcial, relanzarla y comprobar que los archivos ya comprometidos y válidos se reanuden sin copiarse innecesariamente;
-- terminar el proceso abruptamente, relanzarlo y comprobar que `completed.jsonl`, `manifest.b3` y los archivos físicamente comprometidos permanezcan coherentes;
-- comparar hashes de archivos representativos después de cada escenario.
-
-## Compilación desde código fuente
-
-El workflow de release usa Rust **1.98.1** para obtener builds reproducibles respecto al toolchain. Además existe una comprobación no bloqueante contra el `stable` más reciente para detectar incompatibilidades futuras.
+La compilación principal utiliza **Rust 1.98.1**. El CI también comprueba de forma no bloqueante la compatibilidad con la versión `stable` más reciente.
 
 ```bash
 git clone https://github.com/ReinierTutoriales/disk-duplicator.git
@@ -154,27 +201,25 @@ cd disk-duplicator
 cargo build --locked --release
 ```
 
-Ejecutable:
+Ejecutable generado:
 
 ```text
 target/release/RepartoCopier.exe
 ```
 
-GitHub Actions ejecuta antes del artifact:
+Antes de generar el artifact, GitHub Actions ejecuta Clippy, la batería de tests y la compilación release.
 
-```text
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --release --verbose
-cargo build --locked --release --verbose
-```
+---
 
-## Requisitos
+## 📋 Requisitos
 
 - Windows 10/11 x64.
-- Memoria suficiente para la aplicación, buffers en vuelo y cachés del sistema. El motor limita su presupuesto principal de buffers FAN-OUT a 2 GiB.
+- Permisos de lectura en el origen y escritura en los destinos.
 - Espacio libre suficiente en cada destino.
-- Permisos de lectura sobre el origen y escritura sobre los destinos.
+- Memoria disponible para la aplicación y las operaciones normales del sistema.
 
-## Licencia
+---
 
-MIT.
+## 📄 Licencia
+
+Distribuido bajo licencia **MIT**.
