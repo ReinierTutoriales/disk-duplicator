@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 #[path = "engine.rs"]
 mod engine_impl;
 mod paths;
