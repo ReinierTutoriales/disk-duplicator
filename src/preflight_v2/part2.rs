@@ -167,6 +167,33 @@ fn hash_path(path: &Path) -> Result<blake3::Hash, String> {
     Ok(h.finalize())
 }
 
+fn from_hex32(s: &str) -> Option<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 { return None; }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = (bytes[i * 2] as char).to_digit(16)? as u8;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)? as u8;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn manifest_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn load_manifest_hashes(dest: &Path) -> std::collections::HashMap<String, [u8; 32]> {
+    let path = state_dir_for(dest).join("manifest.b3");
+    let Ok(text) = fs::read_to_string(path) else { return std::collections::HashMap::new(); };
+    text.lines()
+        .filter_map(|line| {
+            let (hex, name) = line.split_once("  ")?;
+            Some((name.to_owned(), from_hex32(hex)?))
+        })
+        .collect()
+}
+
 fn validate_destination_result(
     source: &Path,
     dest: &Path,
@@ -182,6 +209,16 @@ fn validate_destination_result(
             return Err(format!("La carpeta no coincide: {}", path.display()));
         }
     }
+
+    // The worker writes the BLAKE3 computed from the single FAN-OUT source read
+    // to manifest.b3. Reuse it here so freshly copied files do not require a
+    // second source read during final validation. Older/skipped entries without
+    // a manifest hash retain the cryptographic source-vs-destination fallback.
+    let manifest_hashes = if verify {
+        load_manifest_hashes(dest)
+    } else {
+        std::collections::HashMap::new()
+    };
 
     let mut total_bytes = 0u64;
     for info in files {
@@ -200,9 +237,16 @@ fn validate_destination_result(
         total_bytes = total_bytes.saturating_add(meta.len());
 
         if verify {
-            let src = source.join(&info.rel);
-            if hash_path(&src)? != hash_path(&dst)? {
-                return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+            let dst_hash = hash_path(&dst)?;
+            if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
+                if dst_hash.as_bytes() != expected {
+                    return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                }
+            } else {
+                let src = source.join(&info.rel);
+                if hash_path(&src)? != dst_hash {
+                    return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                }
             }
         }
     }
