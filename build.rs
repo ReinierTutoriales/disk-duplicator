@@ -91,7 +91,8 @@ fn version_parts() -> (String, String) {
     let major = parts.next().unwrap_or("0");
     let minor = parts.next().unwrap_or("0");
     let patch = parts.next().unwrap_or("0");
-    (package_version, format!("{major},{minor},{patch},0"))
+    let tuple = format!("{major},{minor},{patch},0");
+    (package_version, tuple)
 }
 
 fn generated_rc(manifest: &Path, icon: &Path) -> String {
