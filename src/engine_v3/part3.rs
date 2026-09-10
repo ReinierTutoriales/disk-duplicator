@@ -361,6 +361,7 @@ fn fanout_job(
             }
 
             let hash = *hasher.finalize().as_bytes();
+            state.reader_hashes.lock().unwrap().insert(info.rel.clone(), hash);
             deliver_to_active(
                 &mut active,
                 &senders,

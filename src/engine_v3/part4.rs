@@ -14,9 +14,10 @@ fn build_job(
     source: PathBuf,
     dests: Vec<PathBuf>,
     files: Arc<Vec<FileInfo>>,
+    dirs: Arc<Vec<PathBuf>>,
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-    create_directory_layout(&source, &dests)?;
+    create_directory_layout(&dests, &dirs)?;
 
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
     let files_total = files.len() as u64;
@@ -28,14 +29,14 @@ fn build_job(
         files_skip: 0,
         files_err: 0,
         bps: 0.0,
+        bps_recent: 0.0,
+        last_tick: Instant::now(),
         phase: DestPhase::Idle,
         error: None,
         last_file: String::new(),
-        mode: CopyMode::Fanout,
         queue_depth: 0,
         retries: 0,
     }).collect();
-    debug_assert!(progress.iter().all(|d| matches!(d.mode, CopyMode::Fanout)));
 
     let max_buffers = (RESERVED_RAM / BLOCK).max(8);
     let state = Arc::new(JobState {
@@ -47,6 +48,7 @@ fn build_job(
         buffers_in_flight: Arc::new(AtomicUsize::new(0)),
         max_buffers,
         dests: Mutex::new(progress),
+        reader_hashes: Mutex::new(HashMap::new()),
     });
 
     let handles = fanout_job(source, dests, files, Arc::clone(&state), opts);
@@ -57,10 +59,11 @@ pub(crate) fn start_job_with_files(
     source: PathBuf,
     dests: Vec<PathBuf>,
     files: Arc<Vec<FileInfo>>,
+    dirs: Arc<Vec<PathBuf>>,
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     validate_job_paths(&source, &dests)?;
-    build_job(source, dests, files, opts)
+    build_job(source, dests, files, dirs, opts)
 }
 
 pub fn format_bps(bps: f64) -> String {
@@ -98,13 +101,15 @@ mod tests {
                 files_skip: 0,
                 files_err: 0,
                 bps: 0.0,
+                bps_recent: 0.0,
+                last_tick: Instant::now(),
                 phase: DestPhase::Idle,
                 error: None,
                 last_file: String::new(),
-                mode: CopyMode::Fanout,
                 queue_depth: 0,
                 retries: 0,
             }]),
+            reader_hashes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -119,10 +124,9 @@ mod tests {
     #[test]
     fn directory_layout_preserves_empty_folders() {
         let root = temp_dir("dirs");
-        let source = root.join("source");
         let dest = root.join("dest");
-        fs::create_dir_all(source.join("a/b/empty")).unwrap();
-        create_directory_layout(&source, std::slice::from_ref(&dest)).unwrap();
+        let dirs = vec![PathBuf::from("a/b/empty")];
+        create_directory_layout(std::slice::from_ref(&dest), &dirs).unwrap();
         assert!(dest.join("a/b/empty").is_dir());
         let _ = fs::remove_dir_all(root);
     }
@@ -139,23 +143,13 @@ mod tests {
     }
 
     #[test]
-    fn only_fanout_is_assigned() {
-        let d = DestProgress {
-            label: "x".into(), written: 0, total: 0, files_done: 0, files_skip: 0,
-            files_err: 0, bps: 0.0, phase: DestPhase::Idle, error: None,
-            last_file: String::new(), mode: CopyMode::Fanout, queue_depth: 0, retries: 0,
-        };
-        assert!(matches!(d.mode, CopyMode::Fanout));
-    }
-
-    #[test]
     fn buffer_pool_reuses_capacity() {
         let gauge = Arc::new(AtomicUsize::new(0));
         let pool = BufferPool::new(2, Arc::clone(&gauge));
         let state = JobState {
             running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
             files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, dests: Mutex::new(Vec::new()),
+            max_buffers: 2, dests: Mutex::new(Vec::new()), reader_hashes: Mutex::new(HashMap::new()),
         };
         let buf = pool.acquire(&state).unwrap();
         assert_eq!(buf.len(), BLOCK);

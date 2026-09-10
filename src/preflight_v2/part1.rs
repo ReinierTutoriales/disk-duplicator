@@ -29,6 +29,8 @@ struct DestinationPlan {
 
 #[derive(Clone, Debug)]
 struct PreflightResult {
+    source: PathBuf,
+    dests: Vec<PathBuf>,
     files: Arc<Vec<PlannedFile>>,
     dirs: Arc<Vec<PathBuf>>,
     plans: Vec<DestinationPlan>,
@@ -82,7 +84,6 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
         File::open(entry.path())
             .map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
 
-        // No filename/extension filters: every regular file is part of the copy plan.
         files.push(PlannedFile {
             rel,
             size: meta.len(),

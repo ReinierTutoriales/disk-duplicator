@@ -1,5 +1,5 @@
 use crossbeam_channel as mpsc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use walkdir::WalkDir;
 
 const BLOCK: usize = 16 * 1024 * 1024;
 const RESERVED_RAM: usize = 2048 * 1024 * 1024;
@@ -19,6 +18,7 @@ const STALL_THRESHOLD: Duration = Duration::from_secs(6);
 const LONG_OP_THRESHOLD: Duration = Duration::from_secs(60);
 const STATE_BATCH_FILES: usize = 128;
 const STATE_BATCH_INTERVAL: Duration = Duration::from_secs(1);
+const SPEED_TAU_SECS: f64 = 2.0;
 
 #[derive(Clone, Copy)]
 pub struct CopyOpts {
@@ -37,11 +37,6 @@ pub enum DestPhase {
     Cancelled,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CopyMode {
-    Fanout,
-}
-
 #[derive(Clone)]
 pub struct DestProgress {
     pub label: String,
@@ -51,10 +46,11 @@ pub struct DestProgress {
     pub files_skip: u64,
     pub files_err: u64,
     pub bps: f64,
+    pub bps_recent: f64,
+    pub last_tick: Instant,
     pub phase: DestPhase,
     pub error: Option<String>,
     pub last_file: String,
-    pub mode: CopyMode,
     pub queue_depth: usize,
     pub retries: u64,
 }
@@ -68,6 +64,7 @@ pub struct JobState {
     pub buffers_in_flight: Arc<AtomicUsize>,
     pub max_buffers: usize,
     pub dests: Mutex<Vec<DestProgress>>,
+    pub(crate) reader_hashes: Mutex<HashMap<PathBuf, [u8; 32]>>,
 }
 
 impl JobState {
@@ -252,28 +249,10 @@ fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> 
     Ok(())
 }
 
-fn list_directories(root: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut dirs = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false) {
-        let entry = entry.map_err(|e| format!("origen: {e}"))?;
-        if entry.depth() == 0 { continue; }
-        let ft = entry.file_type();
-        if ft.is_symlink() {
-            return Err(format!("No se puede copiar con seguridad el enlace simbólico {}.", entry.path().display()));
-        }
-        if ft.is_dir() {
-            dirs.push(entry.path().strip_prefix(root).map_err(|e| e.to_string())?.to_path_buf());
-        }
-    }
-    dirs.sort();
-    Ok(dirs)
-}
-
-fn create_directory_layout(source: &Path, dests: &[PathBuf]) -> Result<(), String> {
-    let dirs = list_directories(source)?;
+fn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {
     for dest in dests {
         fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
-        for rel in &dirs {
+        for rel in dirs {
             let path = dest.join(rel);
             fs::create_dir_all(&path)
                 .map_err(|e| format!("No se pudo crear la carpeta {}: {e}", path.display()))?;
@@ -478,9 +457,26 @@ fn record_write_progress(
 ) {
     *effective_written = effective_written.saturating_add(size);
     let mut g = state.dests.lock().unwrap();
-    g[slot].written = g[slot].written.saturating_add(size);
-    let secs = start.elapsed().as_secs_f64();
-    if secs > 0.0 { g[slot].bps = *effective_written as f64 / secs; }
+    let dp = &mut g[slot];
+    dp.written = dp.written.saturating_add(size);
+
+    let elapsed = start.elapsed().as_secs_f64();
+    if elapsed > 0.0 {
+        dp.bps = *effective_written as f64 / elapsed;
+    }
+
+    let now = Instant::now();
+    let dt = now.duration_since(dp.last_tick).as_secs_f64();
+    if dt > 0.0 {
+        let instant_bps = size as f64 / dt;
+        let alpha = if dt >= SPEED_TAU_SECS {
+            1.0
+        } else {
+            1.0 - (-dt / SPEED_TAU_SECS).exp()
+        };
+        dp.bps_recent += alpha * (instant_bps - dp.bps_recent);
+        dp.last_tick = now;
+    }
 }
 
 fn rollback_write_progress(
