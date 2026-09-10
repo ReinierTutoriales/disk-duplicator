@@ -17,24 +17,12 @@ const VERIFY_BUF: usize = 4 * 1024 * 1024;
 
 type PlannedFile = FileInfo;
 
-#[derive(Clone, Debug, Default)]
-struct DestinationPlan {
-    new_files: u64,
-    replace_files: u64,
-    skipped_files: u64,
-    bytes_to_write: u64,
-    peak_extra_space: u64,
-    available_space: u64,
-    reserve_space: u64,
-}
-
 #[derive(Clone, Debug)]
 struct PreflightResult {
     source: PathBuf,
     dests: Vec<PathBuf>,
     files: Arc<Vec<PlannedFile>>,
     dirs: Arc<Vec<PathBuf>>,
-    plans: Vec<DestinationPlan>,
 }
 
 fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {
