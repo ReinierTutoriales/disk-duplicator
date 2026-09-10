@@ -64,9 +64,9 @@ pub(crate) fn start_job_with_files(
 }
 
 pub fn format_bps(bps: f64) -> String {
-    if bps >= 1_073_741_824.0 { format!("{:.2} GB/s", bps / 1_073_741_824.0) }
-    else if bps >= 1_048_576.0 { format!("{:.1} MB/s", bps / 1_048_576.0) }
-    else if bps >= 1024.0 { format!("{:.0} KB/s", bps / 1024.0) }
+    if bps >= 1_073_741_824.0 { format!("{:.2} GiB/s", bps / 1_073_741_824.0) }
+    else if bps >= 1_048_576.0 { format!("{:.1} MiB/s", bps / 1_048_576.0) }
+    else if bps >= 1024.0 { format!("{:.0} KiB/s", bps / 1024.0) }
     else { format!("{:.0} B/s", bps) }
 }
 
@@ -255,6 +255,6 @@ mod tests {
     #[test]
     fn format_is_sane() {
         assert_eq!(format_bps(0.0), "0 B/s");
-        assert!(format_bps(1024.0).contains("KB/s"));
+        assert!(format_bps(1024.0).contains("KiB/s"));
     }
 }
