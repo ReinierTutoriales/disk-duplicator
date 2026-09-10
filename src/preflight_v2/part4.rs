@@ -23,8 +23,8 @@ mod tests {
         fs::write(root.join(".disk-duplicator/completed.jsonl"), b"4").unwrap();
         let (files, dirs) = scan_source(&root).unwrap();
         assert_eq!(files.len(), 4);
-        assert!(files.iter().any(|f| f.rel == PathBuf::from("legit.part")));
-        assert!(files.iter().any(|f| f.rel == PathBuf::from("paquetecopies.b3")));
+        assert!(files.iter().any(|f| f.rel == Path::new("legit.part")));
+        assert!(files.iter().any(|f| f.rel == Path::new("paquetecopies.b3")));
         assert!(dirs.contains(&PathBuf::from(".disk-duplicator")));
         let _ = fs::remove_dir_all(root);
     }
