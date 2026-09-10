@@ -122,7 +122,7 @@ fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "segoe_ui".to_owned(),
-        egui::FontData::from_owned(bytes).into(),
+        egui::FontData::from_owned(bytes),
     );
     if let Some(family) = fonts
         .families
@@ -268,6 +268,14 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", b / KIB)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+fn count_label(n: u64, singular: &str, plural: &str) -> String {
+    if n == 1 {
+        format!("{n} {singular}")
+    } else {
+        format!("{n} {plural}")
     }
 }
 
@@ -462,11 +470,13 @@ impl CopierApp {
         match outcome {
             Ok(Ok((state, handles))) => {
                 self.error_flash_until = None;
+                let n_files = state.files_total.load(Ordering::Relaxed);
+                let n_dests = state.dests.lock().map(|d| d.len()).unwrap_or(0) as u64;
                 self.status = format!(
-                    "Comprobación correcta · {} archivos · {} · {} destinos",
-                    state.files_total.load(Ordering::Relaxed),
+                    "Comprobación correcta · {} · {} · {}",
+                    count_label(n_files, "archivo", "archivos"),
                     format_bytes(state.bytes_total.load(Ordering::Relaxed)),
-                    state.dests.lock().map(|d| d.len()).unwrap_or(0)
+                    count_label(n_dests, "destino", "destinos")
                 );
                 self.job = Some(state);
                 self.workers = handles;
@@ -602,7 +612,10 @@ impl eframe::App for CopierApp {
 
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("DESTINOS  ({})", self.dests.len())).strong());
+                let destinations_label = if self.dests.len() == 1 { "DESTINO" } else { "DESTINOS" };
+                ui.label(
+                    RichText::new(format!("{destinations_label}  ({})", self.dests.len())).strong(),
+                );
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui.button("+ Agregar").clicked() {
                         if let Some(p) = Self::pick_dir() {
@@ -805,10 +818,10 @@ impl eframe::App for CopierApp {
                             job.max_buffers
                         ));
                         ui.separator();
-                        ui.weak(format!("{} destinos", snaps.len()));
+                        ui.weak(count_label(snaps.len() as u64, "destino", "destinos"));
                         ui.separator();
                         let retries: u64 = snaps.iter().map(|d| d.retries).sum();
-                        ui.weak(format!("{} reintentos", retries));
+                        ui.weak(count_label(retries, "reintento", "reintentos"));
                     });
                 }
             } else {
@@ -872,11 +885,15 @@ impl eframe::App for CopierApp {
                 .count();
             let with_errors = snaps.iter().filter(|d| d.files_err > 0).count();
             self.status = if with_errors == 0 {
-                format!("Completado · {ok}/{} destinos sin errores", snaps.len())
+                format!(
+                    "Completado · {ok}/{} sin errores",
+                    count_label(snaps.len() as u64, "destino", "destinos")
+                )
             } else {
                 format!(
-                    "Completado · {ok}/{} sin errores · {with_errors} con incidencias",
-                    snaps.len()
+                    "Completado · {ok}/{} sin errores · {}",
+                    count_label(snaps.len() as u64, "destino", "destinos"),
+                    count_label(with_errors as u64, "incidencia", "incidencias")
                 )
             };
         }
