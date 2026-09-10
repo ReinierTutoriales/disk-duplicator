@@ -74,6 +74,8 @@ fn fanout_worker(
     slot: usize,
     opts: CopyOpts,
 ) {
+    const VERIFY_BUFFER: usize = 8 * 1024 * 1024;
+
     let start = Instant::now();
     let mut effective_written = 0u64;
     let mut current: Option<CurrentFile> = None;
@@ -90,7 +92,7 @@ fn fanout_worker(
         return;
     }
 
-    let mut verify_buf = vec![0u8; BLOCK];
+    let mut verify_buf = opts.verify.then(|| vec![0u8; VERIFY_BUFFER]);
     let mut journal = match StateJournal::open(&dest) {
         Ok(j) => j,
         Err(e) => {
@@ -266,9 +268,9 @@ fn fanout_worker(
                     continue;
                 }
 
-                if opts.verify {
+                if let Some(buf) = verify_buf.as_mut() {
                     set_phase(&state, slot, DestPhase::Verifying, None);
-                    match hash_file_with_buffer(&tmp, &mut verify_buf, Some(&state)) {
+                    match hash_file_with_buffer(&tmp, buf, Some(&state)) {
                         Ok(actual) if actual == expected => {}
                         Ok(_) => {
                             cleanup_part(&dest, &dst);
