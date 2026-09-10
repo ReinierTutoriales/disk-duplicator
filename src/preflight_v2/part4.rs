@@ -93,6 +93,55 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_same_size_corruption_from_resume_state() {
+        let root = temp_dir("resume-hash");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::write(dest.join("a.bin"), b"xyz").unwrap();
+
+        let (files, _) = scan_source(&source).unwrap();
+        let key = state_key(&files[0]);
+        let state_dir = state_dir_for(&dest);
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
+        fs::write(
+            state_dir.join("manifest.b3"),
+            format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
+        ).unwrap();
+
+        let valid = normalize_completed_state(&source, &dest, &files).unwrap();
+        assert!(valid.is_empty(), "un archivo corrupto no puede conservar estado completado");
+        assert!(load_completed(&dest).is_empty(), "el journal debe limpiarse tras detectar corrupción");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_verify_uses_manifest_hash_and_rejects_corruption() {
+        let root = temp_dir("final-hash");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::write(dest.join("a.bin"), b"xyz").unwrap();
+
+        let (files, dirs) = scan_source(&source).unwrap();
+        let state_dir = state_dir_for(&dest);
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join("manifest.b3"),
+            format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
+        ).unwrap();
+
+        let err = validate_destination_result(&source, &dest, &files, &dirs, true).unwrap_err();
+        assert!(err.contains("BLAKE3 final no coincide"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn opts_helper_compiles() {
         assert!(opts(true).skip_same);
     }
