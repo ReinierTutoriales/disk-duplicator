@@ -14,6 +14,7 @@ type StartResult = Result<(Arc<JobState>, Vec<JoinHandle<()>>), String>;
 const SPACING_XS: f32 = 4.0;
 const SPACING_SM: f32 = 8.0;
 const SPACING_MD: f32 = 12.0;
+const SPACING_LG: f32 = 18.0;
 const RUNNING_REPAINT: Duration = Duration::from_millis(200);
 const PAUSED_REPAINT: Duration = Duration::from_millis(500);
 const STARTING_REPAINT: Duration = Duration::from_millis(80);
@@ -28,7 +29,6 @@ mod system_theme {
     use std::ffi::c_void;
 
     type HKey = *mut c_void;
-
     const HKEY_CURRENT_USER: HKey = 0x8000_0001usize as HKey;
     const KEY_READ: u32 = 0x0002_0019;
     const REG_DWORD: u32 = 4;
@@ -43,7 +43,6 @@ mod system_theme {
             desired: u32,
             result: *mut HKey,
         ) -> i32;
-
         #[link_name = "RegQueryValueExW"]
         fn reg_query_value_ex_w(
             hkey: HKey,
@@ -53,7 +52,6 @@ mod system_theme {
             data: *mut u8,
             data_len: *mut u32,
         ) -> i32;
-
         #[link_name = "RegCloseKey"]
         fn reg_close_key(hkey: HKey) -> i32;
     }
@@ -70,13 +68,7 @@ mod system_theme {
 
         let mut key: HKey = std::ptr::null_mut();
         let opened = unsafe {
-            reg_open_key_ex_w(
-                HKEY_CURRENT_USER,
-                path.as_ptr(),
-                0,
-                KEY_READ,
-                &mut key,
-            )
+            reg_open_key_ex_w(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key)
         };
         if opened != 0 || key.is_null() {
             return false;
@@ -125,7 +117,6 @@ fn resolve_theme(preference: ThemePreference) -> bool {
 fn setup_fonts(ctx: &egui::Context) {
     let windows_dir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let segoe_path = PathBuf::from(windows_dir).join("Fonts").join("segoeui.ttf");
-
     let Ok(bytes) = std::fs::read(segoe_path) else {
         return;
     };
@@ -135,10 +126,7 @@ fn setup_fonts(ctx: &egui::Context) {
         "segoe_ui".to_owned(),
         egui::FontData::from_owned(bytes),
     );
-    if let Some(family) = fonts
-        .families
-        .get_mut(&egui::FontFamily::Proportional)
-    {
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
         family.insert(0, "segoe_ui".to_owned());
     }
     ctx.set_fonts(fonts);
@@ -151,43 +139,108 @@ struct Theme;
 
 impl Theme {
     fn success(light: bool) -> Color32 {
-        if light { Color32::from_rgb(16, 124, 16) } else { Color32::from_rgb(108, 203, 95) }
+        if light {
+            Color32::from_rgb(16, 124, 16)
+        } else {
+            Color32::from_rgb(108, 203, 95)
+        }
     }
 
     fn warning(light: bool) -> Color32 {
-        if light { Color32::from_rgb(157, 93, 0) } else { Color32::from_rgb(255, 185, 0) }
+        if light {
+            Color32::from_rgb(157, 93, 0)
+        } else {
+            Color32::from_rgb(255, 185, 0)
+        }
     }
 
     fn error(light: bool) -> Color32 {
-        if light { Color32::from_rgb(196, 43, 28) } else { Color32::from_rgb(255, 153, 164) }
+        if light {
+            Color32::from_rgb(196, 43, 28)
+        } else {
+            Color32::from_rgb(255, 153, 164)
+        }
     }
 
     fn info(light: bool) -> Color32 {
-        if light { Color32::from_rgb(0, 120, 212) } else { Color32::from_rgb(96, 205, 255) }
+        if light {
+            Color32::from_rgb(0, 120, 212)
+        } else {
+            Color32::from_rgb(96, 205, 255)
+        }
     }
 
     fn verify(light: bool) -> Color32 {
-        if light { Color32::from_rgb(135, 100, 195) } else { Color32::from_rgb(175, 150, 220) }
+        if light {
+            Color32::from_rgb(112, 72, 190)
+        } else {
+            Color32::from_rgb(190, 155, 255)
+        }
     }
 
     fn muted(light: bool) -> Color32 {
-        if light { Color32::from_gray(117) } else { Color32::from_gray(166) }
+        if light {
+            Color32::from_gray(110)
+        } else {
+            Color32::from_gray(166)
+        }
     }
 
-    fn accent(light: bool) -> Color32 { Self::info(light) }
-    fn progress_bar(light: bool) -> Color32 { Self::info(light) }
+    fn accent(light: bool) -> Color32 {
+        Self::info(light)
+    }
+
+    fn progress_bar(light: bool) -> Color32 {
+        Self::info(light)
+    }
 
     fn bg_secondary(light: bool) -> Color32 {
-        if light { Color32::from_rgb(243, 243, 243) } else { Color32::from_rgb(32, 32, 32) }
+        if light {
+            Color32::from_rgb(246, 247, 249)
+        } else {
+            Color32::from_rgb(30, 31, 34)
+        }
+    }
+
+    fn card(light: bool) -> Color32 {
+        if light {
+            Color32::from_rgb(250, 251, 252)
+        } else {
+            Color32::from_rgb(36, 37, 41)
+        }
+    }
+
+    fn card_selected(light: bool) -> Color32 {
+        if light {
+            Color32::from_rgb(229, 243, 255)
+        } else {
+            Color32::from_rgb(26, 54, 73)
+        }
+    }
+
+    fn border(light: bool) -> Color32 {
+        if light {
+            Color32::from_rgb(218, 221, 226)
+        } else {
+            Color32::from_rgb(62, 64, 70)
+        }
     }
 
     fn text_primary(light: bool) -> Color32 {
-        if light { Color32::from_gray(0) } else { Color32::from_gray(255) }
+        if light {
+            Color32::from_gray(20)
+        } else {
+            Color32::from_gray(245)
+        }
     }
 }
 
 fn apply_theme(ctx: &egui::Context, light: bool) {
-    let mut visuals = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    let mut visuals = if light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
     visuals.widgets.noninteractive.bg_fill = Theme::bg_secondary(light);
     visuals.widgets.inactive.bg_fill = Theme::bg_secondary(light);
     visuals.override_text_color = Some(Theme::text_primary(light));
@@ -198,13 +251,37 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
         style.spacing.item_spacing = egui::vec2(SPACING_SM, 7.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.text_styles = [
-            (egui::TextStyle::Heading, egui::FontId::new(20.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Body, egui::FontId::new(14.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Monospace, egui::FontId::new(12.5, egui::FontFamily::Monospace)),
-            (egui::TextStyle::Button, egui::FontId::new(14.0, egui::FontFamily::Proportional)),
-            (egui::TextStyle::Small, egui::FontId::new(12.0, egui::FontFamily::Proportional)),
-        ].into();
+            (
+                egui::TextStyle::Heading,
+                egui::FontId::new(20.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Body,
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Monospace,
+                egui::FontId::new(12.5, egui::FontFamily::Monospace),
+            ),
+            (
+                egui::TextStyle::Button,
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            ),
+            (
+                egui::TextStyle::Small,
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            ),
+        ]
+        .into();
     });
+}
+
+fn panel_frame(light: bool) -> egui::Frame {
+    egui::Frame::none()
+        .fill(Theme::card(light))
+        .stroke(egui::Stroke::new(1.0, Theme::border(light)))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -212,23 +289,38 @@ fn format_bytes(bytes: u64) -> String {
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
     let b = bytes as f64;
-    if b >= GIB { format!("{:.2} GiB", b / GIB) }
-    else if b >= MIB { format!("{:.1} MiB", b / MIB) }
-    else if b >= KIB { format!("{:.1} KiB", b / KIB) }
-    else { format!("{} B", bytes) }
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 fn count_label(n: u64, singular: &str, plural: &str) -> String {
-    if n == 1 { format!("{n} {singular}") } else { format!("{n} {plural}") }
+    if n == 1 {
+        format!("{n} {singular}")
+    } else {
+        format!("{n} {plural}")
+    }
 }
 
 fn format_duration(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 { return "—".into(); }
+    if !secs.is_finite() || secs <= 0.0 {
+        return "—".into();
+    }
     let total = secs.round() as u64;
     let h = total / 3600;
     let m = (total % 3600) / 60;
     let s = total % 60;
-    if h > 0 { format!("{:02}:{:02}:{:02}", h, m, s) } else { format!("{:02}:{:02}", m, s) }
+    if h > 0 {
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    } else {
+        format!("{:02}:{:02}", m, s)
+    }
 }
 
 fn shown_bps(bps_recent: f64, last_tick: Instant) -> f64 {
@@ -241,15 +333,15 @@ fn shown_bps(bps_recent: f64, last_tick: Instant) -> f64 {
 }
 
 fn phase_label(
-    p: DestPhase,
+    phase: DestPhase,
     files_err: u64,
     light: bool,
     paused: bool,
 ) -> (&'static str, Color32) {
-    if paused && matches!(p, DestPhase::Copying | DestPhase::Verifying) {
+    if paused && matches!(phase, DestPhase::Copying | DestPhase::Verifying) {
         return ("PAUSADO", Theme::warning(light));
     }
-    match p {
+    match phase {
         DestPhase::Idle => ("EN ESPERA", Theme::muted(light)),
         DestPhase::Copying => ("COPIANDO", Theme::info(light)),
         DestPhase::Verifying => ("VERIFICANDO INTEGRIDAD", Theme::verify(light)),
@@ -262,7 +354,9 @@ fn phase_label(
 
 fn compact_path(path: &str, max_chars: usize) -> String {
     let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= max_chars || max_chars < 12 { return path.to_owned(); }
+    if chars.len() <= max_chars || max_chars < 12 {
+        return path.to_owned();
+    }
     let head = (max_chars * 2) / 5;
     let tail = max_chars.saturating_sub(head + 1);
     format!(
@@ -270,6 +364,22 @@ fn compact_path(path: &str, max_chars: usize) -> String {
         chars[..head].iter().collect::<String>(),
         chars[chars.len() - tail..].iter().collect::<String>()
     )
+}
+
+fn theme_description(theme: ThemePreference) -> &'static str {
+    match theme {
+        ThemePreference::System => "Sigue automáticamente la apariencia de Windows.",
+        ThemePreference::Light => "Interfaz clara y luminosa para ambientes con mucha luz.",
+        ThemePreference::Dark => "Interfaz oscura para reducir brillo y fatiga visual.",
+    }
+}
+
+fn theme_glyph(theme: ThemePreference) -> &'static str {
+    match theme {
+        ThemePreference::System => "◐",
+        ThemePreference::Light => "☀",
+        ThemePreference::Dark => "●",
+    }
 }
 
 pub struct CopierApp {
@@ -321,14 +431,20 @@ impl CopierApp {
         }
     }
 
-    fn starting(&self) -> bool { self.startup_rx.is_some() }
+    fn starting(&self) -> bool {
+        self.startup_rx.is_some()
+    }
 
     fn running_job(&self) -> bool {
-        self.job.as_ref().is_some_and(|j| j.running.load(Ordering::Relaxed))
+        self.job
+            .as_ref()
+            .is_some_and(|job| job.running.load(Ordering::Relaxed))
     }
 
     fn pick_dir() -> Option<String> {
-        rfd::FileDialog::new().pick_folder().map(|p| p.to_string_lossy().into_owned())
+        rfd::FileDialog::new()
+            .pick_folder()
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     fn validate_paths(&self) -> Vec<String> {
@@ -336,15 +452,21 @@ impl CopierApp {
         let source = self.source.trim();
         if !source.is_empty() {
             let path = PathBuf::from(source);
-            if !path.exists() { errors.push("El origen no existe.".into()); }
-            else if !path.is_dir() { errors.push("El origen no es una carpeta.".into()); }
+            if !path.exists() {
+                errors.push("El origen no existe.".into());
+            } else if !path.is_dir() {
+                errors.push("El origen no es una carpeta.".into());
+            }
         }
-        for (i, dest) in self.dests.iter().enumerate() {
+        for (index, dest) in self.dests.iter().enumerate() {
             let path = PathBuf::from(dest.trim());
             if !path.exists() {
-                errors.push(format!("El destino {} no existe o no está disponible.", i + 1));
+                errors.push(format!(
+                    "El destino {} no existe o no está disponible.",
+                    index + 1
+                ));
             } else if !path.is_dir() {
-                errors.push(format!("El destino {} no es una carpeta.", i + 1));
+                errors.push(format!("El destino {} no es una carpeta.", index + 1));
             }
         }
         errors
@@ -366,8 +488,10 @@ impl CopierApp {
         self.use_light_theme = resolve_theme(self.theme_preference);
         self.applied_theme = None;
         self.last_theme_check = Instant::now();
-        if let Err(e) = save_settings(AppSettings { theme: self.theme_preference }) {
-            self.flash_error(e);
+        if let Err(error) = save_settings(AppSettings {
+            theme: self.theme_preference,
+        }) {
+            self.flash_error(error);
         }
     }
 
@@ -384,9 +508,14 @@ impl CopierApp {
             self.flash_error(first);
             return;
         }
-        let src = PathBuf::from(self.source.trim());
-        let dests: Vec<PathBuf> = self.dests.iter().map(|s| PathBuf::from(s.trim()))
-            .filter(|p| !p.as_os_str().is_empty()).collect();
+
+        let source = PathBuf::from(self.source.trim());
+        let dests: Vec<PathBuf> = self
+            .dests
+            .iter()
+            .map(|path| PathBuf::from(path.trim()))
+            .filter(|path| !path.as_os_str().is_empty())
+            .collect();
         let opts = CopyOpts {
             verify: true,
             skip_same: self.skip_same,
@@ -399,17 +528,21 @@ impl CopierApp {
         self.status = "Analizando origen y destinos…".into();
         self.startup_rx = Some(rx);
         thread::spawn(move || {
-            let _ = tx.send(start_job(src, dests, opts));
+            let _ = tx.send(start_job(source, dests, opts));
         });
     }
 
     fn poll_startup(&mut self) {
         let outcome = self.startup_rx.as_ref().and_then(|rx| match rx.try_recv() {
             Ok(result) => Some(Ok(result)),
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err("El análisis previo terminó inesperadamente.".to_owned())),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("El análisis previo terminó inesperadamente.".to_owned()))
+            }
             Err(mpsc::TryRecvError::Empty) => None,
         });
-        let Some(outcome) = outcome else { return; };
+        let Some(outcome) = outcome else {
+            return;
+        };
         self.startup_rx = None;
         match outcome {
             Ok(Ok((state, handles))) => {
@@ -425,8 +558,55 @@ impl CopierApp {
                 self.job = Some(state);
                 self.workers = handles;
             }
-            Ok(Err(e)) | Err(e) => self.flash_error(e),
+            Ok(Err(error)) | Err(error) => self.flash_error(error),
         }
+    }
+
+    fn draw_theme_choice(
+        ui: &mut egui::Ui,
+        current: ThemePreference,
+        choice: ThemePreference,
+        light: bool,
+    ) -> bool {
+        let selected = current == choice;
+        let fill = if selected {
+            Theme::card_selected(light)
+        } else {
+            Theme::card(light)
+        };
+        let stroke = egui::Stroke::new(
+            if selected { 1.5 } else { 1.0 },
+            if selected {
+                Theme::accent(light)
+            } else {
+                Theme::border(light)
+            },
+        );
+
+        let response = egui::Frame::none()
+            .fill(fill)
+            .stroke(stroke)
+            .rounding(egui::Rounding::same(7.0))
+            .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+            .show(ui, |ui| {
+                ui.set_min_width(92.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(theme_glyph(choice))
+                            .size(19.0)
+                            .color(if selected {
+                                Theme::accent(light)
+                            } else {
+                                Theme::muted(light)
+                            }),
+                    );
+                    ui.label(RichText::new(choice.label()).strong());
+                });
+            })
+            .response
+            .interact(egui::Sense::click());
+
+        response.clicked()
     }
 }
 
@@ -449,24 +629,40 @@ impl eframe::App for CopierApp {
             self.applied_theme = Some(self.use_light_theme);
         }
 
-        let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
-        let all_terminal = !snaps.is_empty() && snaps.iter().all(|d| {
-            matches!(d.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
-        });
+        let snaps = self
+            .job
+            .as_ref()
+            .map(|job| job.snapshot())
+            .unwrap_or_default();
+        let all_terminal = !snaps.is_empty()
+            && snaps.iter().all(|d| {
+                matches!(
+                    d.phase,
+                    DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
+                )
+            });
         let starting = self.starting();
         let running = self.running_job() && !all_terminal;
-        let paused = running && self.job.as_ref().is_some_and(|j| j.is_paused());
+        let paused = running && self.job.as_ref().is_some_and(|job| job.is_paused());
+        let verifying = running && snaps.iter().any(|d| d.phase == DestPhase::Verifying);
         let busy = starting || running;
         let now = Instant::now();
 
         if let Some(until) = self.error_flash_until {
-            if now >= until { self.error_flash_until = None; }
-            else { ctx.request_repaint_after(until.saturating_duration_since(now)); }
+            if now >= until {
+                self.error_flash_until = None;
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+            }
         }
         if starting {
             ctx.request_repaint_after(STARTING_REPAINT);
         } else if running {
-            ctx.request_repaint_after(if paused { PAUSED_REPAINT } else { RUNNING_REPAINT });
+            ctx.request_repaint_after(if paused {
+                PAUSED_REPAINT
+            } else {
+                RUNNING_REPAINT
+            });
         } else {
             ctx.request_repaint_after(THEME_CHECK_INTERVAL);
         }
@@ -475,23 +671,44 @@ impl eframe::App for CopierApp {
         if key != self.paths_key || self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL {
             self.paths_key = key;
             self.last_path_check = Instant::now();
-            self.path_errors = if busy { Vec::new() } else { self.validate_paths() };
+            self.path_errors = if busy {
+                Vec::new()
+            } else {
+                self.validate_paths()
+            };
         }
         let path_error_count = self.path_errors.len();
-        let path_error_hover = if path_error_count == 0 { String::new() } else { self.path_errors.join("\n") };
-        let ready_to_start = !self.source.trim().is_empty() && !self.dests.is_empty() && path_error_count == 0;
+        let path_error_hover = if path_error_count == 0 {
+            String::new()
+        } else {
+            self.path_errors.join("\n")
+        };
+        let ready_to_start = !self.source.trim().is_empty()
+            && !self.dests.is_empty()
+            && path_error_count == 0;
         let error_flash_active = self.error_flash_until.is_some();
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("RepartoCopier").strong());
-                ui.weak("Una carpeta · múltiples destinos");
+                ui.label(
+                    RichText::new("Una carpeta · múltiples destinos")
+                        .color(Theme::muted(self.use_light_theme)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("⚙").on_hover_text("Ajustes").clicked() {
+                    let settings_button = egui::Button::new(RichText::new("⚙").size(16.0))
+                        .frame(false);
+                    if ui
+                        .add(settings_button)
+                        .on_hover_text("Ajustes")
+                        .clicked()
+                    {
                         self.show_settings = true;
                     }
-                    if starting { ui.weak("Validando…"); }
+                    if starting {
+                        ui.weak("Validando…");
+                    }
                 });
             });
             ui.add_space(SPACING_XS);
@@ -509,10 +726,21 @@ impl eframe::App for CopierApp {
                     ui.weak("Analizando archivos…");
                 } else if running {
                     ui.separator();
-                    ui.weak(if paused { "Copia en pausa" } else { "Copia en curso" });
+                    if paused {
+                        ui.colored_label(Theme::warning(self.use_light_theme), "Copia en pausa");
+                    } else if verifying {
+                        ui.colored_label(
+                            Theme::verify(self.use_light_theme),
+                            "Verificando integridad…",
+                        );
+                    } else {
+                        ui.weak("Copia en curso");
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Acerca de").clicked() { self.show_credits = true; }
+                    if ui.small_button("Acerca de").clicked() {
+                        self.show_credits = true;
+                    }
                 });
             });
         });
@@ -528,45 +756,69 @@ impl eframe::App for CopierApp {
                             .hint_text("Selecciona la carpeta que quieres copiar"),
                     );
                     if ui.button("Examinar").clicked() {
-                        if let Some(p) = Self::pick_dir() { self.source = p; }
+                        if let Some(path) = Self::pick_dir() {
+                            self.source = path;
+                        }
                     }
                 });
             });
 
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
-                let destinations_label = if self.dests.len() == 1 { "DESTINO" } else { "DESTINOS" };
-                ui.label(RichText::new(format!("{destinations_label}  ({})", self.dests.len())).strong());
+                let destinations_label = if self.dests.len() == 1 {
+                    "DESTINO"
+                } else {
+                    "DESTINOS"
+                };
+                ui.label(
+                    RichText::new(format!("{destinations_label}  ({})", self.dests.len()))
+                        .strong(),
+                );
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui.button("+ Agregar").clicked() {
-                        if let Some(p) = Self::pick_dir() {
-                            if !self.dests.contains(&p) { self.dests.push(p); }
+                        if let Some(path) = Self::pick_dir() {
+                            if !self.dests.contains(&path) {
+                                self.dests.push(path);
+                            }
                         }
                     }
                 });
             });
 
-            egui::ScrollArea::vertical().id_salt("destinations").max_height(150.0).show(ui, |ui| {
-                let mut remove = None;
-                for (i, d) in self.dests.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.weak(format!("{:02}", i + 1));
-                        ui.label(compact_path(d, 66)).on_hover_text(d);
-                        if let Some(dp) = snaps.get(i) {
-                            let (label, color) = phase_label(dp.phase, dp.files_err, self.use_light_theme, paused);
-                            ui.colored_label(color, format!("[{label}]"));
-                        }
-                        if !busy && ui.small_button("×").clicked() { remove = Some(i); }
-                    });
-                }
-                if let Some(i) = remove { self.dests.remove(i); }
-            });
+            egui::ScrollArea::vertical()
+                .id_salt("destinations")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    let mut remove = None;
+                    for (index, dest) in self.dests.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.weak(format!("{:02}", index + 1));
+                            ui.label(compact_path(dest, 66)).on_hover_text(dest);
+                            if let Some(progress) = snaps.get(index) {
+                                let (label, color) = phase_label(
+                                    progress.phase,
+                                    progress.files_err,
+                                    self.use_light_theme,
+                                    paused,
+                                );
+                                ui.colored_label(color, format!("[{label}]"));
+                            }
+                            if !busy && ui.small_button("×").clicked() {
+                                remove = Some(index);
+                            }
+                        });
+                    }
+                    if let Some(index) = remove {
+                        self.dests.remove(index);
+                    }
+                });
 
             if path_error_count > 0 {
                 ui.colored_label(
                     Theme::warning(self.use_light_theme),
                     format!("⚠ {} problema(s) de ruta detectado(s)", path_error_count),
-                ).on_hover_text(&path_error_hover);
+                )
+                .on_hover_text(&path_error_hover);
             }
 
             ui.separator();
@@ -577,16 +829,14 @@ impl eframe::App for CopierApp {
                     ui.checkbox(&mut self.keep_going, "Continuar con errores")
                         .on_hover_text("Mantiene activos los demás destinos si uno falla.");
                 });
-                ui.label(
-                    RichText::new("✓ Integridad BLAKE3 activada")
-                        .small()
-                        .color(Theme::success(self.use_light_theme)),
-                ).on_hover_text("Todas las copias se verifican antes del commit final.");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if running {
                         if let Some(job) = &self.job {
-                            if ui.button(if paused { "Continuar" } else { "Pausar" }).clicked() {
+                            if ui
+                                .button(if paused { "Continuar" } else { "Pausar" })
+                                .clicked()
+                            {
                                 job.set_paused(!paused);
                             }
                             if ui.button("Cancelar").clicked() {
@@ -594,10 +844,15 @@ impl eframe::App for CopierApp {
                             }
                         }
                     } else if !starting {
-                        let start_button = egui::Button::new(RichText::new("Iniciar copia").strong());
-                        if ui.add_enabled(ready_to_start, start_button).clicked() { self.start(); }
+                        let start_button =
+                            egui::Button::new(RichText::new("Iniciar copia").strong());
+                        if ui.add_enabled(ready_to_start, start_button).clicked() {
+                            self.start();
+                        }
                     }
-                    if starting { ui.weak("Analizando…"); }
+                    if starting {
+                        ui.weak("Analizando…");
+                    }
                 });
             });
 
@@ -608,18 +863,31 @@ impl eframe::App for CopierApp {
                 });
             } else if let Some(job) = &self.job {
                 if !snaps.is_empty() {
-                    let avg_progress = snaps.iter().map(|d| {
-                        if d.total == 0 {
-                            if d.phase == DestPhase::Done { 1.0 } else { 0.0 }
-                        } else {
-                            d.written as f64 / d.total as f64
-                        }
-                    }).sum::<f64>() / snaps.len() as f64;
+                    let avg_progress = snaps
+                        .iter()
+                        .map(|progress| {
+                            if progress.total == 0 {
+                                if progress.phase == DestPhase::Done {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            } else {
+                                progress.written as f64 / progress.total as f64
+                            }
+                        })
+                        .sum::<f64>()
+                        / snaps.len() as f64;
 
                     let total_bps: f64 = if paused {
                         0.0
                     } else {
-                        snaps.iter().map(|d| shown_bps(d.bps_recent, d.last_tick)).sum()
+                        snaps
+                            .iter()
+                            .map(|progress| {
+                                shown_bps(progress.bps_recent, progress.last_tick)
+                            })
+                            .sum()
                     };
 
                     let eta_text = if paused {
@@ -627,18 +895,29 @@ impl eframe::App for CopierApp {
                     } else {
                         let mut eta_known = true;
                         let mut eta = 0.0f64;
-                        for dp in &snaps {
-                            let remaining = dp.total.saturating_sub(dp.written);
-                            if remaining == 0 || matches!(dp.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled) {
+                        for progress in &snaps {
+                            let remaining = progress.total.saturating_sub(progress.written);
+                            if remaining == 0
+                                || matches!(
+                                    progress.phase,
+                                    DestPhase::Done
+                                        | DestPhase::Failed
+                                        | DestPhase::Cancelled
+                                )
+                            {
                                 continue;
                             }
-                            if dp.bps <= 0.0 {
+                            if progress.bps <= 0.0 {
                                 eta_known = false;
                                 break;
                             }
-                            eta = eta.max(remaining as f64 / dp.bps);
+                            eta = eta.max(remaining as f64 / progress.bps);
                         }
-                        if eta_known { format_duration(eta) } else { "—".into() }
+                        if eta_known {
+                            format_duration(eta)
+                        } else {
+                            "—".into()
+                        }
                     };
 
                     ui.add_space(SPACING_SM);
@@ -659,55 +938,75 @@ impl eframe::App for CopierApp {
                     });
                     ui.add_space(SPACING_SM);
 
-                    egui::ScrollArea::vertical().id_salt("dest-progress").max_height(300.0).show(ui, |ui| {
-                        egui::Grid::new("dest-grid")
-                            .striped(true)
-                            .num_columns(4)
-                            .spacing([20.0, 9.0])
-                            .show(ui, |ui| {
-                                ui.strong("Destino");
-                                ui.strong("Velocidad");
-                                ui.strong("Progreso");
-                                ui.strong("Estado");
-                                ui.end_row();
-                                for dp in &snaps {
-                                    let frac = if dp.total == 0 {
-                                        if dp.phase == DestPhase::Done { 1.0 } else { 0.0 }
-                                    } else {
-                                        (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
-                                    };
-                                    let (label, color) = phase_label(dp.phase, dp.files_err, self.use_light_theme, paused);
-                                    let path_response = ui.label(egui::RichText::new(compact_path(&dp.label, 36)).small());
-                                    if dp.last_file.is_empty() {
-                                        path_response.on_hover_text(&dp.label);
-                                    } else {
-                                        path_response.on_hover_text(format!("{}\nArchivo: {}", dp.label, dp.last_file));
-                                    }
-                                    let speed = if paused { 0.0 } else { shown_bps(dp.bps_recent, dp.last_tick) };
-                                    ui.label(format_bps(speed));
-                                    ui.add(
-                                        egui::ProgressBar::new(frac)
-                                            .desired_width(175.0)
-                                            .fill(Theme::progress_bar(self.use_light_theme))
-                                            .show_percentage(),
-                                    );
-                                    let response = ui.colored_label(color, label);
-                                    if let Some(error) = &dp.error { response.on_hover_text(error); }
+                    egui::ScrollArea::vertical()
+                        .id_salt("dest-progress")
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("dest-grid")
+                                .striped(true)
+                                .num_columns(4)
+                                .spacing([20.0, 9.0])
+                                .show(ui, |ui| {
+                                    ui.strong("Destino");
+                                    ui.strong("Velocidad");
+                                    ui.strong("Progreso");
+                                    ui.strong("Estado");
                                     ui.end_row();
-                                }
-                            });
-                    });
+                                    for progress in &snaps {
+                                        let fraction = if progress.total == 0 {
+                                            if progress.phase == DestPhase::Done {
+                                                1.0
+                                            } else {
+                                                0.0
+                                            }
+                                        } else {
+                                            (progress.written as f32 / progress.total as f32)
+                                                .clamp(0.0, 1.0)
+                                        };
+                                        let (label, color) = phase_label(
+                                            progress.phase,
+                                            progress.files_err,
+                                            self.use_light_theme,
+                                            paused,
+                                        );
+                                        let path_response = ui.label(
+                                            RichText::new(compact_path(&progress.label, 36)).small(),
+                                        );
+                                        if progress.last_file.is_empty() {
+                                            path_response.on_hover_text(&progress.label);
+                                        } else {
+                                            path_response.on_hover_text(format!(
+                                                "{}\nArchivo: {}",
+                                                progress.label, progress.last_file
+                                            ));
+                                        }
+                                        let speed = if paused {
+                                            0.0
+                                        } else {
+                                            shown_bps(progress.bps_recent, progress.last_tick)
+                                        };
+                                        ui.label(format_bps(speed));
+                                        ui.add(
+                                            egui::ProgressBar::new(fraction)
+                                                .desired_width(175.0)
+                                                .fill(Theme::progress_bar(self.use_light_theme))
+                                                .show_percentage(),
+                                        );
+                                        let response = ui.colored_label(color, label);
+                                        if let Some(error) = &progress.error {
+                                            response.on_hover_text(error);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
 
                     ui.add_space(SPACING_SM);
-                    ui.horizontal(|ui| {
-                        ui.weak(count_label(
-                            snaps.len() as u64,
-                            "destino seleccionado",
-                            "destinos seleccionados",
-                        ));
-                        ui.separator();
-                        ui.weak("Integridad BLAKE3 activa");
-                    });
+                    ui.weak(count_label(
+                        snaps.len() as u64,
+                        "destino seleccionado",
+                        "destinos seleccionados",
+                    ));
                 }
             } else {
                 ui.add_space(SPACING_MD);
@@ -719,43 +1018,77 @@ impl eframe::App for CopierApp {
 
         if self.show_settings {
             let mut open = true;
-            let mut changed = false;
+            let mut requested_theme = None;
             egui::Window::new("Ajustes")
                 .collapsible(false)
                 .resizable(false)
-                .default_width(320.0)
+                .default_width(380.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.heading("Apariencia");
-                    ui.add_space(SPACING_SM);
+                    ui.label(
+                        RichText::new("Apariencia")
+                            .size(18.0)
+                            .strong()
+                            .color(Theme::accent(self.use_light_theme)),
+                    );
+                    ui.label(
+                        RichText::new("Elige cómo quieres ver RepartoCopier.")
+                            .small()
+                            .color(Theme::muted(self.use_light_theme)),
+                    );
+                    ui.add_space(SPACING_MD);
+
                     ui.horizontal(|ui| {
-                        ui.label("Tema:");
-                        egui::ComboBox::from_id_salt("theme-preference")
-                            .selected_text(self.theme_preference.label())
-                            .width(140.0)
-                            .show_ui(ui, |ui| {
-                                changed |= ui.selectable_value(
-                                    &mut self.theme_preference,
-                                    ThemePreference::System,
-                                    "Sistema",
-                                ).changed();
-                                changed |= ui.selectable_value(
-                                    &mut self.theme_preference,
-                                    ThemePreference::Light,
-                                    "Claro",
-                                ).changed();
-                                changed |= ui.selectable_value(
-                                    &mut self.theme_preference,
-                                    ThemePreference::Dark,
-                                    "Oscuro",
-                                ).changed();
-                            });
+                        for choice in [
+                            ThemePreference::System,
+                            ThemePreference::Light,
+                            ThemePreference::Dark,
+                        ] {
+                            if Self::draw_theme_choice(
+                                ui,
+                                self.theme_preference,
+                                choice,
+                                self.use_light_theme,
+                            ) {
+                                requested_theme = Some(choice);
+                            }
+                        }
                     });
-                    ui.add_space(SPACING_XS);
-                    ui.weak("Sistema sigue automáticamente el tema configurado en Windows.");
+
+                    ui.add_space(SPACING_MD);
+                    panel_frame(self.use_light_theme).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                Theme::accent(self.use_light_theme),
+                                theme_glyph(self.theme_preference),
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(self.theme_preference.label()).strong(),
+                                );
+                                ui.label(
+                                    RichText::new(theme_description(self.theme_preference))
+                                        .small()
+                                        .color(Theme::muted(self.use_light_theme)),
+                                );
+                            });
+                        });
+                    });
+
+                    ui.add_space(SPACING_SM);
+                    ui.label(
+                        RichText::new("Los cambios se guardan automáticamente.")
+                            .small()
+                            .color(Theme::muted(self.use_light_theme)),
+                    );
                 });
             self.show_settings = open;
-            if changed { self.save_theme_preference(); }
+            if let Some(theme) = requested_theme {
+                if theme != self.theme_preference {
+                    self.theme_preference = theme;
+                    self.save_theme_preference();
+                }
+            }
         }
 
         if self.show_credits {
@@ -763,52 +1096,137 @@ impl eframe::App for CopierApp {
             egui::Window::new("Acerca de RepartoCopier")
                 .collapsible(false)
                 .resizable(false)
-                .default_width(440.0)
+                .default_width(470.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(SPACING_SM);
-                        ui.heading(RichText::new("RepartoCopier").strong().size(24.0));
-                        ui.label(RichText::new("Una carpeta · múltiples destinos").color(Theme::muted(self.use_light_theme)));
-                        ui.add_space(SPACING_XS);
-                        ui.label(RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION"))).small());
-                        ui.add_space(SPACING_MD);
-                        ui.separator();
-                        ui.add_space(SPACING_MD);
-                        ui.label(RichText::new("Simple por fuera. Potente por dentro.").strong());
-                        ui.add_space(SPACING_XS);
-                        ui.label("Creado para realizar copias múltiples de forma rápida, segura y confiable.");
-                        ui.add_space(SPACING_MD);
-                        ui.label(RichText::new("Desarrollado por").small());
-                        ui.label(RichText::new("ReinierTutoriales").strong().size(17.0));
-                        ui.label(RichText::new("© 2026").small());
-                        ui.add_space(SPACING_MD);
-                        ui.separator();
-                        ui.add_space(SPACING_MD);
-                        ui.label(RichText::new("¿Te resulta útil RepartoCopier?").strong());
-                        ui.label("Apoya el proyecto dejando una ⭐ en GitHub. ❤️");
-                        ui.add_space(SPACING_SM);
-                        ui.hyperlink_to("Abrir repositorio en GitHub ↗", "https://github.com/ReinierTutoriales/disk-duplicator");
-                        ui.add_space(SPACING_MD);
-                        ui.separator();
-                        ui.add_space(SPACING_SM);
-                        ui.label(RichText::new("Código abierto · Licencia MIT").small());
-                        ui.add_space(SPACING_XS);
+                    ui.add_space(SPACING_XS);
+                    panel_frame(self.use_light_theme).show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new("RepartoCopier")
+                                    .strong()
+                                    .size(26.0)
+                                    .color(Theme::accent(self.use_light_theme)),
+                            );
+                            ui.label(
+                                RichText::new("Una carpeta · múltiples destinos")
+                                    .color(Theme::muted(self.use_light_theme)),
+                            );
+                            ui.add_space(SPACING_SM);
+                            ui.label(
+                                RichText::new(format!(
+                                    "VERSIÓN {}",
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .small()
+                                .strong()
+                                .color(Theme::verify(self.use_light_theme)),
+                            );
+                        });
                     });
+
+                    ui.add_space(SPACING_MD);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Simple por fuera. Potente por dentro.")
+                                .strong()
+                                .size(17.0),
+                        );
+                        ui.add_space(SPACING_XS);
+                        ui.label(
+                            RichText::new(
+                                "Copias múltiples con reanudación, verificación BLAKE3 y recuperación segura.",
+                            )
+                            .color(Theme::muted(self.use_light_theme)),
+                        );
+                    });
+
+                    ui.add_space(SPACING_LG);
+                    ui.columns(2, |columns| {
+                        panel_frame(self.use_light_theme).show(&mut columns[0], |ui| {
+                            ui.label(
+                                RichText::new("DESARROLLADO POR")
+                                    .small()
+                                    .color(Theme::muted(self.use_light_theme)),
+                            );
+                            ui.add_space(SPACING_XS);
+                            ui.label(
+                                RichText::new("ReinierTutoriales")
+                                    .strong()
+                                    .size(16.0)
+                                    .color(Theme::accent(self.use_light_theme)),
+                            );
+                            ui.label(RichText::new("© 2026").small());
+                        });
+                        panel_frame(self.use_light_theme).show(&mut columns[1], |ui| {
+                            ui.label(
+                                RichText::new("PROYECTO")
+                                    .small()
+                                    .color(Theme::muted(self.use_light_theme)),
+                            );
+                            ui.add_space(SPACING_XS);
+                            ui.label(
+                                RichText::new("Código abierto")
+                                    .strong()
+                                    .size(16.0)
+                                    .color(Theme::success(self.use_light_theme)),
+                            );
+                            ui.label(RichText::new("Licencia MIT").small());
+                        });
+                    });
+
+                    ui.add_space(SPACING_LG);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("¿Te resulta útil RepartoCopier?")
+                                .strong()
+                                .size(16.0),
+                        );
+                        ui.label(
+                            RichText::new("Apoya el proyecto con una ★ en GitHub.")
+                                .color(Theme::muted(self.use_light_theme)),
+                        );
+                        ui.add_space(SPACING_SM);
+                        ui.hyperlink_to(
+                            RichText::new("Abrir repositorio en GitHub ↗")
+                                .strong()
+                                .color(Theme::accent(self.use_light_theme)),
+                            "https://github.com/ReinierTutoriales/disk-duplicator",
+                        );
+                    });
+                    ui.add_space(SPACING_SM);
                 });
             self.show_credits = open;
         }
 
         if !busy && all_terminal {
-            let done_ok = snaps.iter().filter(|d| d.phase == DestPhase::Done && d.files_err == 0).count();
-            let done_err = snaps.iter().filter(|d| d.phase == DestPhase::Done && d.files_err > 0).count();
-            let failed = snaps.iter().filter(|d| d.phase == DestPhase::Failed).count();
-            let cancelled = snaps.iter().filter(|d| d.phase == DestPhase::Cancelled).count();
+            let done_ok = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Done && d.files_err == 0)
+                .count();
+            let done_err = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Done && d.files_err > 0)
+                .count();
+            let failed = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Failed)
+                .count();
+            let cancelled = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Cancelled)
+                .count();
             self.status = match (failed, cancelled) {
-                (0, 0) if done_err == 0 => format!("Completado · {done_ok}/{} sin errores", snaps.len()),
+                (0, 0) if done_err == 0 => {
+                    format!("Completado · {done_ok}/{} sin errores", snaps.len())
+                }
                 (0, 0) => format!(
                     "Finalizado con errores · {} · {}",
-                    count_label(done_err as u64, "destino con errores", "destinos con errores"),
+                    count_label(
+                        done_err as u64,
+                        "destino con errores",
+                        "destinos con errores"
+                    ),
                     count_label(done_ok as u64, "destino correcto", "destinos correctos")
                 ),
                 (f, 0) => format!(
@@ -840,5 +1258,12 @@ mod tests {
     fn theme_overrides_are_not_inverted() {
         assert!(resolve_theme(ThemePreference::Light));
         assert!(!resolve_theme(ThemePreference::Dark));
+    }
+
+    #[test]
+    fn theme_copy_explains_each_choice() {
+        assert!(!theme_description(ThemePreference::System).is_empty());
+        assert!(!theme_description(ThemePreference::Light).is_empty());
+        assert!(!theme_description(ThemePreference::Dark).is_empty());
     }
 }
