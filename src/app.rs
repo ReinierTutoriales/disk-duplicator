@@ -110,43 +110,105 @@ fn detect_system_theme() -> bool {
     false
 }
 
+#[cfg(windows)]
+fn setup_fonts(ctx: &egui::Context) {
+    let windows_dir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+    let segoe_path = PathBuf::from(windows_dir).join("Fonts").join("segoeui.ttf");
+
+    let Ok(bytes) = std::fs::read(segoe_path) else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "segoe_ui".to_owned(),
+        egui::FontData::from_owned(bytes).into(),
+    );
+    if let Some(family) = fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+    {
+        family.insert(0, "segoe_ui".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+#[cfg(not(windows))]
+fn setup_fonts(_ctx: &egui::Context) {}
+
 struct Theme;
 
 impl Theme {
     fn success(light: bool) -> Color32 {
-        if light { Color32::from_rgb(0, 115, 80) } else { Color32::from_rgb(80, 210, 140) }
+        if light {
+            Color32::from_rgb(16, 124, 16)
+        } else {
+            Color32::from_rgb(108, 203, 95)
+        }
     }
 
     fn warning(light: bool) -> Color32 {
-        if light { Color32::from_rgb(130, 85, 0) } else { Color32::from_rgb(235, 175, 70) }
+        if light {
+            Color32::from_rgb(157, 93, 0)
+        } else {
+            Color32::from_rgb(255, 185, 0)
+        }
     }
 
     fn error(light: bool) -> Color32 {
-        if light { Color32::from_rgb(190, 35, 35) } else { Color32::from_rgb(255, 95, 95) }
+        if light {
+            Color32::from_rgb(196, 43, 28)
+        } else {
+            Color32::from_rgb(255, 153, 164)
+        }
     }
 
     fn info(light: bool) -> Color32 {
-        if light { Color32::from_rgb(0, 90, 180) } else { Color32::from_rgb(90, 170, 255) }
+        if light {
+            Color32::from_rgb(0, 120, 212)
+        } else {
+            Color32::from_rgb(96, 205, 255)
+        }
     }
 
     fn verify(light: bool) -> Color32 {
-        if light { Color32::from_rgb(105, 65, 180) } else { Color32::from_rgb(180, 130, 255) }
+        if light {
+            Color32::from_rgb(135, 100, 195)
+        } else {
+            Color32::from_rgb(175, 150, 220)
+        }
     }
 
     fn muted(light: bool) -> Color32 {
-        if light { Color32::from_gray(90) } else { Color32::from_gray(150) }
+        if light {
+            Color32::from_gray(117)
+        } else {
+            Color32::from_gray(166)
+        }
     }
 
     fn accent(light: bool) -> Color32 {
-        if light { Color32::from_rgb(0, 95, 190) } else { Color32::from_rgb(100, 180, 255) }
+        Self::info(light)
+    }
+
+    fn progress_bar(light: bool) -> Color32 {
+        Self::info(light)
     }
 
     fn bg_secondary(light: bool) -> Color32 {
-        if light { Color32::from_gray(245) } else { Color32::from_gray(30) }
+        if light {
+            Color32::from_rgb(243, 243, 243)
+        } else {
+            Color32::from_rgb(32, 32, 32)
+        }
     }
 
     fn text_primary(light: bool) -> Color32 {
-        if light { Color32::from_gray(20) } else { Color32::from_gray(230) }
+        if light {
+            Color32::from_gray(0)
+        } else {
+            Color32::from_gray(255)
+        }
     }
 }
 
@@ -265,6 +327,7 @@ pub struct CopierApp {
     use_light_theme: bool,
     last_theme_check: Instant,
     applied_theme: Option<bool>,
+    fonts_initialized: bool,
     path_errors: Vec<String>,
     last_path_check: Instant,
     paths_key: u64,
@@ -287,6 +350,7 @@ impl CopierApp {
             use_light_theme: detect_system_theme(),
             last_theme_check: Instant::now(),
             applied_theme: None,
+            fonts_initialized: false,
             path_errors: Vec::new(),
             last_path_check: Instant::now(),
             paths_key: u64::MAX,
@@ -414,6 +478,11 @@ impl CopierApp {
 
 impl eframe::App for CopierApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.fonts_initialized {
+            setup_fonts(ctx);
+            self.fonts_initialized = true;
+        }
+
         self.poll_startup();
 
         if self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL {
@@ -658,7 +727,8 @@ impl eframe::App for CopierApp {
                     ui.label(RichText::new("PROGRESO GLOBAL").strong());
                     ui.add(
                         egui::ProgressBar::new(avg_progress as f32)
-                            .desired_height(18.0)
+                            .desired_height(20.0)
+                            .fill(Theme::progress_bar(self.use_light_theme))
                             .show_percentage(),
                     );
                     ui.horizontal(|ui| {
@@ -678,7 +748,7 @@ impl eframe::App for CopierApp {
                             egui::Grid::new("dest-grid")
                                 .striped(true)
                                 .num_columns(5)
-                                .spacing([12.0, 5.0])
+                                .spacing([16.0, 8.0])
                                 .show(ui, |ui| {
                                     ui.strong("DESTINO");
                                     ui.strong("VELOCIDAD");
@@ -709,6 +779,7 @@ impl eframe::App for CopierApp {
                                         ui.add(
                                             egui::ProgressBar::new(frac)
                                                 .desired_width(150.0)
+                                                .fill(Theme::progress_bar(self.use_light_theme))
                                                 .show_percentage(),
                                         );
                                         ui.label(dp.queue_depth.to_string());
@@ -748,24 +819,42 @@ impl eframe::App for CopierApp {
             egui::Window::new("Créditos")
                 .collapsible(false)
                 .resizable(false)
-                .default_width(360.0)
+                .default_width(400.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.heading(RichText::new("RepartoCopier").strong());
-                        ui.weak(format!("Versión {}", env!("CARGO_PKG_VERSION")));
+                        ui.label(format!("Versión {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(SPACING_MD);
-                        ui.label("Desarrollado por ReinierTutoriales");
+                        ui.label(RichText::new("Desarrollado por").small());
+                        ui.heading(RichText::new("ReinierTutoriales").strong().size(16.0));
+                        ui.label(RichText::new("© 2026").small());
+                        ui.add_space(SPACING_MD);
+                        ui.separator();
                         ui.add_space(SPACING_SM);
-                        ui.weak("Rust · egui/eframe · BLAKE3");
-                        ui.weak("Copiador de archivos 1 origen → N destinos HDD/SSD");
+                        ui.label("Tecnologías");
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Rust");
+                            ui.separator();
+                            ui.label("egui / eframe");
+                            ui.separator();
+                            ui.label("BLAKE3");
+                        });
+                        ui.add_space(SPACING_SM);
+                        ui.label(
+                            RichText::new("Copiador de archivos 1 origen → N destinos HDD/SSD")
+                                .small(),
+                        );
                         ui.add_space(SPACING_MD);
+                        ui.separator();
+                        ui.add_space(SPACING_SM);
+                        ui.label("Web principal");
                         ui.hyperlink_to(
                             "github.com/ReinierTutoriales/disk-duplicator",
                             "https://github.com/ReinierTutoriales/disk-duplicator",
                         );
                         ui.add_space(SPACING_SM);
-                        ui.weak("Licencia MIT");
+                        ui.label(RichText::new("Licencia MIT").small());
                     });
                 });
             self.show_credits = open;
