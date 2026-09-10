@@ -16,6 +16,7 @@ const MAX_QUEUE: usize = 16;
 const MAX_FREE_BUFFERS: usize = 16;
 const RETRIES: usize = 2;
 const STALL_THRESHOLD: Duration = Duration::from_secs(6);
+const LONG_OP_THRESHOLD: Duration = Duration::from_secs(60);
 const STATE_BATCH_FILES: usize = 128;
 const STATE_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -153,10 +154,19 @@ enum FanoutItem {
     End { hash: [u8; 32] },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperationPhase {
+    Write,
+    Sync,
+    Verify,
+    Commit,
+}
+
 struct DestControl {
     alive: AtomicBool,
     queue_depth: AtomicUsize,
     progress_seq: AtomicU64,
+    operation: Mutex<(OperationPhase, Instant)>,
 }
 
 impl DestControl {
@@ -165,6 +175,7 @@ impl DestControl {
             alive: AtomicBool::new(true),
             queue_depth: AtomicUsize::new(0),
             progress_seq: AtomicU64::new(0),
+            operation: Mutex::new((OperationPhase::Write, Instant::now())),
         }
     }
 
@@ -174,6 +185,33 @@ impl DestControl {
 
     fn progress_seq(&self) -> u64 {
         self.progress_seq.load(Ordering::Acquire)
+    }
+
+    fn enter_operation(&self, phase: OperationPhase) {
+        *self.operation.lock().unwrap() = (phase, Instant::now());
+        if phase == OperationPhase::Write {
+            self.note_progress();
+        }
+    }
+
+    fn stall_timed_out(&self, last_write_progress: Instant) -> bool {
+        let (phase, started) = *self.operation.lock().unwrap();
+        match phase {
+            OperationPhase::Write => last_write_progress.elapsed() >= STALL_THRESHOLD,
+            OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
+                started.elapsed() >= LONG_OP_THRESHOLD
+            }
+        }
+    }
+
+    fn stall_limit_secs(&self) -> u64 {
+        let (phase, _) = *self.operation.lock().unwrap();
+        match phase {
+            OperationPhase::Write => STALL_THRESHOLD.as_secs(),
+            OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
+                LONG_OP_THRESHOLD.as_secs()
+            }
+        }
     }
 }
 

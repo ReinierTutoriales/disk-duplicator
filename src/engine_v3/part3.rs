@@ -31,13 +31,13 @@ fn fail_stalled_destination(
         return;
     }
     drop_pending_slot(slot, pending, controls, state);
+    let limit = controls[slot].stall_limit_secs();
     let mut dests = state.dests.lock().unwrap();
     let dp = &mut dests[slot];
     dp.phase = DestPhase::Failed;
     dp.files_err = dp.files_err.saturating_add(1);
     dp.error = Some(format!(
-        "Destino atascado: sin progreso de escritura durante {} s.",
-        STALL_THRESHOLD.as_secs()
+        "Destino atascado: sin progreso durante {limit} s en la operación actual."
     ));
 }
 
@@ -96,7 +96,7 @@ fn make_pending_room(
         }
 
         if pending[slot].len() >= MAX_PENDING_PER_DEST
-            && last_progress.elapsed() >= STALL_THRESHOLD
+            && controls[slot].stall_timed_out(last_progress)
         {
             fail_stalled_destination(slot, pending, controls, state);
             return false;
@@ -193,7 +193,7 @@ fn drain_pending(
                 last_progress[slot] = Instant::now();
             }
 
-            if !pending[slot].is_empty() && last_progress[slot].elapsed() >= STALL_THRESHOLD {
+            if !pending[slot].is_empty() && controls[slot].stall_timed_out(last_progress[slot]) {
                 fail_stalled_destination(slot, pending, controls, state);
             }
         }
