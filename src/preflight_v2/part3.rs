@@ -128,7 +128,6 @@ pub fn start_job(
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     let preflight = run_preflight(&source, &dests, opts)?;
-    let _planned_bytes: u64 = preflight.plans.iter().map(|p| p.bytes_to_write).sum();
     let (state, handles) = engine_impl::start_job_with_files(
         preflight.source.clone(),
         preflight.dests.clone(),
