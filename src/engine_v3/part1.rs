@@ -60,6 +60,8 @@ pub struct JobState {
     pub running: AtomicBool,
     pub cancel: AtomicBool,
     pub pause: AtomicBool,
+    pub(crate) pause_mutex: Mutex<()>,
+    pub(crate) pause_cv: Condvar,
     pub files_total: AtomicU64,
     pub bytes_total: AtomicU64,
     pub buffers_in_flight: Arc<AtomicUsize>,
@@ -71,6 +73,29 @@ pub struct JobState {
 impl JobState {
     pub fn snapshot(&self) -> Vec<DestProgress> {
         self.dests.lock().unwrap().clone()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.pause.load(Ordering::Acquire)
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        {
+            let _guard = self.pause_mutex.lock().unwrap();
+            self.pause.store(paused, Ordering::Release);
+        }
+        if !paused {
+            self.pause_cv.notify_all();
+        }
+    }
+
+    pub fn request_cancel(&self) {
+        {
+            let _guard = self.pause_mutex.lock().unwrap();
+            self.cancel.store(true, Ordering::Release);
+            self.pause.store(false, Ordering::Release);
+        }
+        self.pause_cv.notify_all();
     }
 }
 
@@ -271,10 +296,11 @@ fn dest_inside_source(src: &Path, dst: &Path) -> bool {
 }
 
 fn wait_pause(state: &JobState) -> bool {
-    while state.pause.load(Ordering::Relaxed) && !state.cancel.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(40));
+    let mut guard = state.pause_mutex.lock().unwrap();
+    while state.pause.load(Ordering::Acquire) && !state.cancel.load(Ordering::Acquire) {
+        guard = state.pause_cv.wait(guard).unwrap();
     }
-    !state.cancel.load(Ordering::Relaxed)
+    !state.cancel.load(Ordering::Acquire)
 }
 
 fn set_phase(state: &JobState, slot: usize, phase: DestPhase, err: Option<String>) {
