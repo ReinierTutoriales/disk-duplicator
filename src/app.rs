@@ -19,6 +19,8 @@ const STARTING_REPAINT: Duration = Duration::from_millis(80);
 const ERROR_FLASH: Duration = Duration::from_secs(5);
 const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const SPEED_DECAY_GRACE_SECS: f64 = 0.5;
+const SPEED_DECAY_TAU_SECS: f64 = 2.0;
 
 #[cfg(windows)]
 mod system_theme {
@@ -210,6 +212,15 @@ fn format_duration(secs: f64) -> String {
     let m = (total % 3600) / 60;
     let s = total % 60;
     if h > 0 { format!("{:02}:{:02}:{:02}", h, m, s) } else { format!("{:02}:{:02}", m, s) }
+}
+
+fn shown_bps(bps_recent: f64, last_tick: Instant) -> f64 {
+    let idle = last_tick.elapsed().as_secs_f64();
+    if idle <= SPEED_DECAY_GRACE_SECS {
+        bps_recent
+    } else {
+        bps_recent * (-(idle - SPEED_DECAY_GRACE_SECS) / SPEED_DECAY_TAU_SECS).exp()
+    }
 }
 
 fn phase_label(p: DestPhase, files_err: u64, light: bool) -> (&'static str, Color32) {
@@ -413,7 +424,7 @@ impl eframe::App for CopierApp {
             } else if let Some(job) = &self.job {
                 if !snaps.is_empty() {
                     let avg_progress = snaps.iter().map(|d| if d.total == 0 { if d.phase == DestPhase::Done { 1.0 } else { 0.0 } } else { d.written as f64 / d.total as f64 }).sum::<f64>() / snaps.len() as f64;
-                    let total_bps: f64 = snaps.iter().map(|d| d.bps).sum();
+                    let total_bps: f64 = snaps.iter().map(|d| shown_bps(d.bps_recent, d.last_tick)).sum();
                     let mut eta_known = true;
                     let mut eta = 0.0f64;
                     for dp in &snaps {
@@ -439,7 +450,7 @@ impl eframe::App for CopierApp {
                                 let (label, color) = phase_label(dp.phase, dp.files_err, self.use_light_theme);
                                 let path_response = ui.label(egui::RichText::new(compact_path(&dp.label, 34)).small());
                                 if dp.last_file.is_empty() { path_response.on_hover_text(&dp.label); } else { path_response.on_hover_text(format!("{}\nArchivo: {}", dp.label, dp.last_file)); }
-                                ui.label(format_bps(dp.bps));
+                                ui.label(format_bps(shown_bps(dp.bps_recent, dp.last_tick)));
                                 ui.add(egui::ProgressBar::new(frac).desired_width(150.0).fill(Theme::progress_bar(self.use_light_theme)).show_percentage());
                                 ui.label(dp.queue_depth.to_string());
                                 let response = ui.colored_label(color, label);

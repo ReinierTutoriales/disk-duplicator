@@ -114,17 +114,24 @@ fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Pre
     if !source.is_dir() { return Err("El origen debe ser una carpeta.".into()); }
     if dests.is_empty() { return Err("Agrega al menos un destino.".into()); }
 
-    let canonical_dests = validate_destinations(source, dests)?;
-    let (files, dirs) = scan_source(source)?;
+    let canonical_source = canonical_existing(source, "origen")?;
+    let canonical_dests = validate_destinations(&canonical_source, dests)?;
+    let (files, dirs) = scan_source(&canonical_source)?;
     let files = Arc::new(files);
     let dirs = Arc::new(dirs);
 
     let plans = canonical_dests
         .iter()
-        .map(|dest| plan_destination(source, dest, &files, &dirs, opts))
+        .map(|dest| plan_destination(&canonical_source, dest, &files, &dirs, opts))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(PreflightResult { files, dirs, plans })
+    Ok(PreflightResult {
+        source: canonical_source,
+        dests: canonical_dests,
+        files,
+        dirs,
+        plans,
+    })
 }
 
 fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Option<String> {
@@ -194,12 +201,13 @@ fn load_manifest_hashes(dest: &Path) -> std::collections::HashMap<String, [u8; 3
         .collect()
 }
 
-fn validate_destination_result(
+fn validate_destination_result_with_hashes(
     source: &Path,
     dest: &Path,
     files: &[PlannedFile],
     dirs: &[PathBuf],
     verify: bool,
+    reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
 ) -> Result<(), String> {
     for rel in dirs {
         let path = dest.join(rel);
@@ -210,10 +218,6 @@ fn validate_destination_result(
         }
     }
 
-    // The worker writes the BLAKE3 computed from the single FAN-OUT source read
-    // to manifest.b3. Reuse it here so freshly copied files do not require a
-    // second source read during final validation. Older/skipped entries without
-    // a manifest hash retain the cryptographic source-vs-destination fallback.
     let manifest_hashes = if verify {
         load_manifest_hashes(dest)
     } else {
@@ -238,7 +242,11 @@ fn validate_destination_result(
 
         if verify {
             let dst_hash = hash_path(&dst)?;
-            if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
+            if let Some(expected) = reader_hashes.get(&info.rel) {
+                if dst_hash.as_bytes() != expected {
+                    return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                }
+            } else if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
                 if dst_hash.as_bytes() != expected {
                     return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
                 }
@@ -260,4 +268,21 @@ fn validate_destination_result(
     }
 
     Ok(())
+}
+
+fn validate_destination_result(
+    source: &Path,
+    dest: &Path,
+    files: &[PlannedFile],
+    dirs: &[PathBuf],
+    verify: bool,
+) -> Result<(), String> {
+    validate_destination_result_with_hashes(
+        source,
+        dest,
+        files,
+        dirs,
+        verify,
+        &std::collections::HashMap::new(),
+    )
 }

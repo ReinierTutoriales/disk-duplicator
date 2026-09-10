@@ -35,7 +35,7 @@ use eframe::egui;
 use std::sync::Arc;
 
 fn app_icon() -> Option<Arc<egui::IconData>> {
-    let bytes = include_bytes!("../assets/RepartoCopier-runtime.png");
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/RepartoCopier-runtime.png"));
     eframe::icon_data::from_png_bytes(bytes).ok().map(Arc::new)
 }
 

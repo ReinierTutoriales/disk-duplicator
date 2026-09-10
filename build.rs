@@ -1,4 +1,4 @@
-use std::{env, fs, path::Path};
+use std::{env, fs, path::{Path, PathBuf}};
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
@@ -80,52 +80,80 @@ fn largest_png_from_ico(ico: &[u8]) -> Result<&[u8], String> {
         .ok_or_else(|| "ICO does not contain a PNG frame".into())
 }
 
-fn validate_windows_version_metadata(app_rc: &str) {
+fn rc_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "\\\\")
+}
+
+fn version_parts() -> (String, String) {
     let package_version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
     let numeric = package_version.split('-').next().unwrap_or(&package_version);
     let mut parts = numeric.split('.');
     let major = parts.next().unwrap_or("0");
     let minor = parts.next().unwrap_or("0");
     let patch = parts.next().unwrap_or("0");
-    let tuple = format!("{major},{minor},{patch},0");
+    (package_version, format!("{major},{minor},{patch},0"))
+}
 
-    let required = [
-        format!("FILEVERSION {tuple}"),
-        format!("PRODUCTVERSION {tuple}"),
-        format!("VALUE \"FileVersion\", \"{package_version}\\0\""),
-        format!("VALUE \"ProductVersion\", \"{package_version}\\0\""),
-    ];
-
-    for expected in required {
-        assert!(
-            app_rc.contains(&expected),
-            "app.rc version metadata is out of sync with Cargo.toml: missing {expected}"
-        );
-    }
+fn generated_rc(manifest: &Path, icon: &Path) -> String {
+    let (package_version, tuple) = version_parts();
+    format!(
+        "#define RT_MANIFEST 24\n\
+1 RT_MANIFEST \"{}\"\n\
+1 ICON \"{}\"\n\n\
+1 VERSIONINFO\n\
+FILEVERSION {tuple}\n\
+PRODUCTVERSION {tuple}\n\
+FILEFLAGSMASK 0x3fL\n\
+FILEFLAGS 0x0L\n\
+FILEOS 0x40004L\n\
+FILETYPE 0x1L\n\
+FILESUBTYPE 0x0L\n\
+BEGIN\n\
+    BLOCK \"StringFileInfo\"\n\
+    BEGIN\n\
+        BLOCK \"040904B0\"\n\
+        BEGIN\n\
+            VALUE \"CompanyName\", \"ReinierTutoriales\\0\"\n\
+            VALUE \"FileDescription\", \"RepartoCopier\\0\"\n\
+            VALUE \"FileVersion\", \"{package_version}\\0\"\n\
+            VALUE \"InternalName\", \"RepartoCopier\\0\"\n\
+            VALUE \"LegalCopyright\", \"MIT License\\0\"\n\
+            VALUE \"OriginalFilename\", \"RepartoCopier.exe\\0\"\n\
+            VALUE \"ProductName\", \"RepartoCopier\\0\"\n\
+            VALUE \"ProductVersion\", \"{package_version}\\0\"\n\
+        END\n\
+    END\n\
+    BLOCK \"VarFileInfo\"\n\
+    BEGIN\n\
+        VALUE \"Translation\", 0x0409, 1200\n\
+    END\n\
+END\n",
+        rc_path(manifest),
+        rc_path(icon),
+    )
 }
 
 fn main() {
     const ICON_B64: &str = "assets/RepartoCopier.ico.b64";
-    const ICON: &str = "assets/RepartoCopier.ico";
-    const RUNTIME_ICON: &str = "assets/RepartoCopier-runtime.png";
 
     println!("cargo:rerun-if-changed=app.manifest");
-    println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed={ICON_B64}");
     println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
 
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let icon_path = out_dir.join("RepartoCopier.ico");
+    let runtime_icon_path = out_dir.join("RepartoCopier-runtime.png");
+    let rc_path_out = out_dir.join("RepartoCopier.rc");
+    let manifest_path = env::current_dir().expect("current dir").join("app.manifest");
+
     let encoded = fs::read_to_string(ICON_B64).expect("read RepartoCopier icon source");
     let decoded = decode_base64(&encoded).expect("decode RepartoCopier icon source");
-    if let Some(parent) = Path::new(ICON).parent() {
-        fs::create_dir_all(parent).expect("create icon directory");
-    }
-    fs::write(ICON, &decoded).expect("write RepartoCopier.ico");
+    fs::write(&icon_path, &decoded).expect("write RepartoCopier.ico to OUT_DIR");
 
     let runtime_png = largest_png_from_ico(&decoded).expect("extract runtime icon PNG from ICO");
-    fs::write(RUNTIME_ICON, runtime_png).expect("write RepartoCopier runtime PNG");
+    fs::write(&runtime_icon_path, runtime_png).expect("write runtime icon PNG to OUT_DIR");
 
-    let app_rc = fs::read_to_string("app.rc").expect("read app.rc");
-    validate_windows_version_metadata(&app_rc);
-
-    embed_resource::compile("app.rc", embed_resource::NONE);
+    fs::write(&rc_path_out, generated_rc(&manifest_path, &icon_path))
+        .expect("write generated RepartoCopier.rc");
+    embed_resource::compile(&rc_path_out, embed_resource::NONE);
 }

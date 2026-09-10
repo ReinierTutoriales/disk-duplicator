@@ -37,9 +37,6 @@ fn supervise_job(
             if handle.is_finished() && handle.join().is_err() {
                 worker_panicked = true;
             }
-            // Dropping an unfinished JoinHandle detaches a worker that is stuck
-            // inside blocking OS I/O. It may return later, but it cannot keep the
-            // healthy destinations or the UI job state blocked forever.
         }
 
         let source_problem = source_change(&source, &files, &dirs);
@@ -74,9 +71,17 @@ fn supervise_job(
         }
 
         if !state.cancel.load(Ordering::Relaxed) {
+            let reader_hashes = state.reader_hashes.lock().unwrap().clone();
             for (slot, dest) in dest_paths.iter().enumerate() {
                 if final_errors[slot].is_none() {
-                    if let Err(e) = validate_destination_result(&source, dest, &files, &dirs, opts.verify) {
+                    if let Err(e) = validate_destination_result_with_hashes(
+                        &source,
+                        dest,
+                        &files,
+                        &dirs,
+                        opts.verify,
+                        &reader_hashes,
+                    ) {
                         final_errors[slot] = Some(e);
                     }
                 }
@@ -125,14 +130,15 @@ pub fn start_job(
     let preflight = run_preflight(&source, &dests, opts)?;
     let _planned_bytes: u64 = preflight.plans.iter().map(|p| p.bytes_to_write).sum();
     let (state, handles) = engine_impl::start_job_with_files(
-        source.clone(),
-        dests.clone(),
+        preflight.source.clone(),
+        preflight.dests.clone(),
         Arc::clone(&preflight.files),
+        Arc::clone(&preflight.dirs),
         opts,
     )?;
     let supervisor = supervise_job(
-        source,
-        dests,
+        preflight.source,
+        preflight.dests,
         preflight.files,
         preflight.dirs,
         Arc::clone(&state),
