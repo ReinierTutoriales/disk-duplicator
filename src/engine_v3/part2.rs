@@ -46,13 +46,23 @@ fn commit_part_fast(dest_root: &Path, part: &Path, dst: &Path) -> Result<(), Str
         .map_err(|e| format!("No se pudo preparar reemplazo {}: {e}", dst.display()))?;
     match fs::rename(part, dst) {
         Ok(()) => {
-            let _ = fs::remove_file(&backup);
+            if let Err(e) = fs::remove_file(&backup) {
+                eprintln!("Advertencia: no se pudo eliminar backup {} después del commit: {e}", backup.display());
+            }
             Ok(())
         }
-        Err(e) => {
-            let _ = fs::rename(&backup, dst);
-            Err(format!("No se pudo reemplazar {}: {e}", dst.display()))
-        }
+        Err(commit_err) => match fs::rename(&backup, dst) {
+            Ok(()) => Err(format!(
+                "No se pudo reemplazar {}: {commit_err}. El archivo original fue restaurado correctamente.",
+                dst.display()
+            )),
+            Err(restore_err) => Err(format!(
+                "CRÍTICO: falló el reemplazo de {} ({commit_err}) y también falló restaurar el archivo original desde {} ({restore_err}). El backup original permanece en {}.",
+                dst.display(),
+                backup.display(),
+                backup.display()
+            )),
+        },
     }
 }
 
