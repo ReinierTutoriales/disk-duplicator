@@ -32,13 +32,25 @@ mod engine {
 
 use app::CopierApp;
 use eframe::egui;
+use std::sync::Arc;
+
+fn app_icon() -> Option<Arc<egui::IconData>> {
+    let bytes = include_bytes!("../assets/RepartoCopier-runtime.png");
+    eframe::icon_data::from_png_bytes(bytes).ok().map(Arc::new)
+}
 
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([920.0, 560.0])
+        .with_min_inner_size([720.0, 420.0])
+        .with_title("RepartoCopier");
+
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([920.0, 560.0])
-            .with_min_inner_size([720.0, 420.0])
-            .with_title("RepartoCopier"),
+        viewport,
         centered: true,
         ..Default::default()
     };
