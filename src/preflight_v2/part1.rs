@@ -168,10 +168,21 @@ fn normalize_completed_state(
     let loaded = load_completed(dest);
     if loaded.is_empty() { return Ok(loaded); }
 
+    let manifest_hashes = load_manifest_hashes(dest);
     let mut valid = HashSet::new();
     for info in files {
         let key = state_key(info);
-        if loaded.contains(&key) && same_enough(&source.join(&info.rel), &dest.join(&info.rel)) {
+        if !loaded.contains(&key) { continue; }
+
+        let dst = dest.join(&info.rel);
+        let physically_valid = if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
+            fs::metadata(&dst).is_ok_and(|meta| meta.is_file() && meta.len() == info.size)
+                && hash_path(&dst).is_ok_and(|actual| actual.as_bytes() == expected)
+        } else {
+            same_enough(&source.join(&info.rel), &dst)
+        };
+
+        if physically_valid {
             valid.insert(key);
         }
     }
