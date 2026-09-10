@@ -553,7 +553,7 @@ impl eframe::App for CopierApp {
                 ui.weak("Copiador múltiple de archivos");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if starting {
-                        ui.weak("Comprobando");
+                        ui.weak("Validando...");
                     }
                 });
             });
@@ -729,7 +729,7 @@ impl eframe::App for CopierApp {
                     };
 
                     ui.add_space(SPACING_SM);
-                    ui.label(RichText::new("PROGRESO GLOBAL").strong());
+                    ui.label(RichText::new("Progreso general").strong());
                     ui.add(
                         egui::ProgressBar::new(avg_progress as f32)
                             .desired_height(20.0)
@@ -755,11 +755,11 @@ impl eframe::App for CopierApp {
                                 .num_columns(5)
                                 .spacing([16.0, 8.0])
                                 .show(ui, |ui| {
-                                    ui.strong("DESTINO");
-                                    ui.strong("VELOCIDAD");
-                                    ui.strong("PROGRESO");
-                                    ui.strong("COLA");
-                                    ui.strong("ESTADO");
+                                    ui.strong("Destino");
+                                    ui.strong("Velocidad");
+                                    ui.strong("Progreso");
+                                    ui.strong("Cola");
+                                    ui.strong("Estado");
                                     ui.end_row();
                                     for dp in &snaps {
                                         let frac = if dp.total == 0 {
@@ -800,7 +800,7 @@ impl eframe::App for CopierApp {
                     ui.add_space(SPACING_SM);
                     ui.horizontal(|ui| {
                         ui.weak(format!(
-                            "Bloques en memoria {}/{}",
+                            "Memoria {}/{}",
                             job.buffers_in_flight.load(Ordering::Relaxed),
                             job.max_buffers
                         ));
@@ -814,7 +814,7 @@ impl eframe::App for CopierApp {
             } else {
                 ui.add_space(SPACING_MD);
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Preparado para copiar").size(22.0).strong());
+                    ui.label(RichText::new("Listo para copiar").size(22.0).strong());
                 });
             }
         });
