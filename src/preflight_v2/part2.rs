@@ -4,7 +4,7 @@ fn plan_destination(
     files: &[PlannedFile],
     dirs: &[PathBuf],
     opts: CopyOpts,
-) -> Result<DestinationPlan, String> {
+) -> Result<(), String> {
     cleanup_owned_stale_files(dest, files)?;
     validate_destination_directories(dest, dirs)?;
 
@@ -15,10 +15,7 @@ fn plan_destination(
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
     let completed = normalize_completed_state(source, dest, files)?;
 
-    let mut plan = DestinationPlan {
-        available_space: available,
-        ..DestinationPlan::default()
-    };
+    let mut bytes_to_write = 0u64;
     let mut committed_delta: i128 = 0;
     let mut peak_extra: i128 = 0;
 
@@ -29,15 +26,12 @@ fn plan_destination(
         let key = state_key(info);
         let physically_valid = same_enough(&src, &dst);
         if (completed.contains(&key) && physically_valid) || (opts.skip_same && physically_valid) {
-            plan.skipped_files += 1;
             continue;
         }
 
         let old_alloc = destination_file_allocation(&dst, granularity)?;
         let new_alloc = round_up(info.size, granularity);
-        if old_alloc.is_some() { plan.replace_files += 1; }
-        else { plan.new_files += 1; }
-        plan.bytes_to_write = plan.bytes_to_write.saturating_add(info.size);
+        bytes_to_write = bytes_to_write.saturating_add(info.size);
 
         let during_temp = committed_delta.saturating_add(new_alloc as i128);
         peak_extra = peak_extra.max(during_temp);
@@ -46,22 +40,22 @@ fn plan_destination(
             .saturating_sub(old_alloc.unwrap_or(0) as i128);
     }
 
-    plan.peak_extra_space = peak_extra.max(0).min(u64::MAX as i128) as u64;
-    plan.reserve_space = if plan.bytes_to_write == 0 { 0 } else { reserve_for_volume(total) };
-    let required_with_reserve = plan.peak_extra_space.saturating_add(plan.reserve_space);
+    let peak_extra_space = peak_extra.max(0).min(u64::MAX as i128) as u64;
+    let reserve_space = if bytes_to_write == 0 { 0 } else { reserve_for_volume(total) };
+    let required_with_reserve = peak_extra_space.saturating_add(reserve_space);
     if available < required_with_reserve {
         let missing = required_with_reserve - available;
         return Err(format!(
             "Espacio insuficiente en {}. Pico requerido: {} bytes + reserva: {} bytes; disponible: {} bytes; faltan: {} bytes.",
             dest.display(),
-            plan.peak_extra_space,
-            plan.reserve_space,
-            plan.available_space,
+            peak_extra_space,
+            reserve_space,
+            available,
             missing
         ));
     }
 
-    Ok(plan)
+    Ok(())
 }
 
 fn canonical_existing(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -120,17 +114,15 @@ fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Pre
     let files = Arc::new(files);
     let dirs = Arc::new(dirs);
 
-    let plans = canonical_dests
-        .iter()
-        .map(|dest| plan_destination(&canonical_source, dest, &files, &dirs, opts))
-        .collect::<Result<Vec<_>, _>>()?;
+    for dest in &canonical_dests {
+        plan_destination(&canonical_source, dest, &files, &dirs, opts)?;
+    }
 
     Ok(PreflightResult {
         source: canonical_source,
         dests: canonical_dests,
         files,
         dirs,
-        plans,
     })
 }
 
