@@ -341,7 +341,7 @@ impl CopierApp {
             verify: false,
             skip_same: true,
             keep_going: true,
-            status: "1 origen → N destinos · almacenamiento HDD/SSD".into(),
+            status: "Copiador de archivos desde una carpeta de origen a múltiples destinos".into(),
             job: None,
             workers: Vec::new(),
             startup_rx: None,
@@ -463,7 +463,7 @@ impl CopierApp {
             Ok(Ok((state, handles))) => {
                 self.error_flash_until = None;
                 self.status = format!(
-                    "Preflight correcto · {} archivos · {} · {} destinos",
+                    "Comprobación correcta · {} archivos · {} · {} destinos",
                     state.files_total.load(Ordering::Relaxed),
                     format_bytes(state.bytes_total.load(Ordering::Relaxed)),
                     state.dests.lock().map(|d| d.len()).unwrap_or(0)
@@ -535,20 +535,25 @@ impl eframe::App for CopierApp {
             self.last_path_check = Instant::now();
             self.path_errors = if busy { Vec::new() } else { self.validate_paths() };
         }
-        let path_errors = self.path_errors.clone();
+        let path_error_count = self.path_errors.len();
+        let path_error_hover = if path_error_count == 0 {
+            String::new()
+        } else {
+            self.path_errors.join("\n")
+        };
         let ready_to_start = !self.source.trim().is_empty()
             && !self.dests.is_empty()
-            && path_errors.is_empty();
+            && path_error_count == 0;
         let error_flash_active = self.error_flash_until.is_some();
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("RepartoCopier").strong());
-                ui.weak("1 → N  ·  HDD / SSD");
+                ui.weak("Copiador múltiple de archivos");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if starting {
-                        ui.weak("preflight");
+                        ui.weak("Comprobando");
                     }
                 });
             });
@@ -564,10 +569,10 @@ impl eframe::App for CopierApp {
                 }
                 if starting {
                     ui.separator();
-                    ui.weak("analizando");
+                    ui.weak("Analizando archivos...");
                 } else if running {
                     ui.separator();
-                    ui.weak("fan-out activo");
+                    ui.weak("Copiando en paralelo");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Créditos").clicked() {
@@ -633,12 +638,12 @@ impl eframe::App for CopierApp {
                     }
                 });
 
-            if !path_errors.is_empty() {
+            if path_error_count > 0 {
                 ui.colored_label(
                     Theme::warning(self.use_light_theme),
-                    format!("⚠ {} problema(s) de ruta detectado(s)", path_errors.len()),
+                    format!("⚠ {} problema(s) de ruta detectado(s)", path_error_count),
                 )
-                .on_hover_text(path_errors.join("\n"));
+                .on_hover_text(&path_error_hover);
             }
 
             ui.separator();
@@ -734,7 +739,7 @@ impl eframe::App for CopierApp {
                     ui.horizontal(|ui| {
                         ui.heading(format_bps(total_bps));
                         ui.weak(format!(
-                            "{} · ETA {}",
+                            "{} · Tiempo restante {}",
                             format_bytes(job.bytes_total.load(Ordering::Relaxed)),
                             eta_text
                         ));
@@ -795,7 +800,7 @@ impl eframe::App for CopierApp {
                     ui.add_space(SPACING_SM);
                     ui.horizontal(|ui| {
                         ui.weak(format!(
-                            "Buffers {}/{}",
+                            "Bloques en memoria {}/{}",
                             job.buffers_in_flight.load(Ordering::Relaxed),
                             job.max_buffers
                         ));
@@ -842,7 +847,7 @@ impl eframe::App for CopierApp {
                         });
                         ui.add_space(SPACING_SM);
                         ui.label(
-                            RichText::new("Copiador de archivos 1 origen → N destinos HDD/SSD")
+                            RichText::new("Copiador de archivos desde una carpeta a múltiples discos")
                                 .small(),
                         );
                         ui.add_space(SPACING_MD);
