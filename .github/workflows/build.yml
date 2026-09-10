@@ -18,10 +18,13 @@ jobs:
       with:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
+        components: clippy
     - name: Cache Rust build
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-    - name: Test
-      run: cargo test --locked --verbose
+    - name: Clippy
+      run: cargo clippy --locked --all-targets -- -D warnings
+    - name: Test release
+      run: cargo test --locked --release --verbose
     - name: Build release
       run: cargo build --locked --release --verbose
     - name: Upload executable
