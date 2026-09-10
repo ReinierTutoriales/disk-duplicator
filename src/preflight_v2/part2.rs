@@ -270,6 +270,7 @@ fn validate_destination_result_with_hashes(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_destination_result(
     source: &Path,
     dest: &Path,
