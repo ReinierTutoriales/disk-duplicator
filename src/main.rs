@@ -30,6 +30,10 @@ mod engine {
     }
 }
 
+// Keep the engine's configured buffer-capacity telemetry part of the live JobState contract
+// even when the end-user interface intentionally does not expose that implementation detail.
+const _: usize = std::mem::offset_of!(engine::JobState, max_buffers);
+
 use app::CopierApp;
 use eframe::egui;
 use std::sync::Arc;
