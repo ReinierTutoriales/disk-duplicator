@@ -245,7 +245,7 @@ fn fanout_job(
     }
 
     let reader = thread::spawn(move || {
-        let mut state_cache: Vec<HashSet<String>> = dests.iter().map(|d| load_state(d)).collect();
+        let state_cache: Vec<HashSet<String>> = dests.iter().map(|d| load_state(d)).collect();
         let mut pending: PendingQueues = (0..dests.len())
             .map(|_| std::collections::VecDeque::new())
             .collect();
@@ -370,10 +370,6 @@ fn fanout_job(
                 || FanoutItem::End { hash },
                 &mut pending,
             );
-
-            for &slot in &active {
-                state_cache[slot].insert(key.clone());
-            }
         }
 
         drain_pending(
