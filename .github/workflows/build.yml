@@ -18,19 +18,6 @@ jobs:
         toolchain: 1.98.1
         targets: x86_64-pc-windows-msvc
         components: clippy
-    - name: Sync release lockfile
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      shell: pwsh
-      run: |
-        cargo update -w
-        git diff --quiet -- Cargo.lock
-        if ($LASTEXITCODE -ne 0) {
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock
-          git commit -m "chore: sync Cargo.lock"
-          git push origin HEAD:main
-        }
     - name: Cache Rust build
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
     - name: Clippy
@@ -81,9 +68,8 @@ jobs:
         - Ejecutable autónomo: `RepartoCopier.exe`
         "@ | Set-Content -Path release-notes.md -Encoding utf8
 
-        $releaseTarget = (git rev-parse HEAD).Trim()
         gh release create $tag target/release/RepartoCopier.exe `
-          --target $releaseTarget `
+          --target "$env:GITHUB_SHA" `
           --title "RepartoCopier $tag" `
           --notes-file release-notes.md
 
@@ -101,8 +87,6 @@ jobs:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
         components: clippy
-    - name: Sync workspace lockfile
-      run: cargo update -w
     - name: Cache Rust stable build
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
