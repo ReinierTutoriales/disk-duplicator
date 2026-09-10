@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Barrier;
+    use std::sync::{Barrier, Condvar};
 
     fn temp_dir(name: &str) -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -11,7 +11,7 @@ mod tests {
     }
 
     fn opts(skip_same: bool) -> CopyOpts {
-        CopyOpts { verify: false, skip_same, keep_going: true }
+        CopyOpts { verify: true, skip_same, keep_going: true }
     }
 
     #[test]
@@ -225,6 +225,8 @@ mod tests {
             running: std::sync::atomic::AtomicBool::new(true),
             cancel: std::sync::atomic::AtomicBool::new(true),
             pause: std::sync::atomic::AtomicBool::new(false),
+            pause_mutex: std::sync::Mutex::new(()),
+            pause_cv: Condvar::new(),
             files_total: std::sync::atomic::AtomicU64::new(0),
             bytes_total: std::sync::atomic::AtomicU64::new(0),
             buffers_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -298,5 +300,6 @@ mod tests {
     #[test]
     fn opts_helper_compiles() {
         assert!(opts(true).skip_same);
+        assert!(opts(false).verify);
     }
 }
