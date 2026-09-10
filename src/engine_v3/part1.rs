@@ -12,7 +12,8 @@ use walkdir::WalkDir;
 const BLOCK: usize = 16 * 1024 * 1024;
 const RESERVED_RAM: usize = 2048 * 1024 * 1024;
 const MIN_QUEUE: usize = 2;
-const MAX_QUEUE: usize = 64;
+const MAX_QUEUE: usize = 16;
+const MAX_FREE_BUFFERS: usize = 16;
 const RETRIES: usize = 2;
 const STALL_THRESHOLD: Duration = Duration::from_secs(6);
 const STATE_BATCH_FILES: usize = 128;
@@ -119,8 +120,11 @@ impl BufferPool {
 
     fn release(&self, mut data: Vec<u8>) {
         data.clear();
-        if data.capacity() >= BLOCK {
-            self.free.lock().unwrap().push(data);
+        {
+            let mut free = self.free.lock().unwrap();
+            if free.len() < MAX_FREE_BUFFERS && data.capacity() >= BLOCK {
+                free.push(data);
+            }
         }
         let mut count = self.in_flight.lock().unwrap();
         *count = count.saturating_sub(1);
