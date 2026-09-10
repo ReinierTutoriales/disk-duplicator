@@ -126,7 +126,9 @@ fn fanout_worker(
     set_phase(&state, slot, DestPhase::Copying, None);
 
     while let Ok(item) = rx.recv() {
-        if state.cancel.load(Ordering::Relaxed) { break; }
+        // Do not drain queued work while paused. A pause takes effect at the next safe point,
+        // never by interrupting a filesystem operation already in progress.
+        if !wait_pause(&state) { break; }
         if !control.alive.load(Ordering::Acquire) { break; }
         match item {
             FanoutItem::Begin(info) => {
@@ -242,6 +244,13 @@ fn fanout_worker(
                     continue;
                 }
 
+                if !wait_pause(&state) {
+                    cur.file.take();
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    break;
+                }
+
                 if let Some(file) = cur.file.as_mut() {
                     let rel = cur.info.rel.display().to_string();
                     control.enter_operation(OperationPhase::Sync);
@@ -253,8 +262,10 @@ fn fanout_worker(
                         cur.file.take();
                         cleanup_part(&dest, &dst);
                         rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
-                        record_file_error(&state, slot, e);
-                        if !opts.keep_going {
+                        if e != "Cancelado" {
+                            record_file_error(&state, slot, e);
+                        }
+                        if !opts.keep_going || state.cancel.load(Ordering::Acquire) {
                             control.alive.store(false, Ordering::Release);
                             break;
                         }
@@ -293,6 +304,12 @@ fn fanout_worker(
                         break;
                     }
                     continue;
+                }
+
+                if !wait_pause(&state) {
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    break;
                 }
 
                 if let Some(buf) = verify_buf.as_mut() {
@@ -341,14 +358,22 @@ fn fanout_worker(
                     continue;
                 }
 
+                if !wait_pause(&state) {
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    break;
+                }
+
                 control.enter_operation(OperationPhase::Commit);
                 let commit_result = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
                 control.enter_operation(OperationPhase::Write);
                 if let Err(e) = commit_result {
                     cleanup_part(&dest, &dst);
                     rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
-                    record_file_error(&state, slot, e);
-                    if !opts.keep_going {
+                    if e != "Cancelado" {
+                        record_file_error(&state, slot, e);
+                    }
+                    if !opts.keep_going || state.cancel.load(Ordering::Acquire) {
                         control.alive.store(false, Ordering::Release);
                         break;
                     }
@@ -359,9 +384,8 @@ fn fanout_worker(
                     continue;
                 }
 
-                // A successful commit is a point of no ambiguity: the destination now contains
-                // the new file. Even if cancellation arrives here, finish its metadata and durable
-                // completion record before observing cancellation at the next work boundary.
+                // Once commit succeeds, finish metadata and durable state as one logical unit.
+                // Pause/cancel is observed again only before the next work item.
                 if let Some(m) = expected_mtime(&cur.info) {
                     if let Err(e) = set_mtime(&dst, m) {
                         record_file_error(&state, slot, e);
