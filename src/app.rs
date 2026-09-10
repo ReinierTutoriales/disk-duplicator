@@ -279,7 +279,7 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
 fn panel_frame(light: bool) -> egui::Frame {
     egui::Frame::none()
         .fill(Theme::card(light))
-        .stroke(egui::Stroke::new(1.0, Theme::border(light)))
+        .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
 }
@@ -575,7 +575,7 @@ impl CopierApp {
             Theme::card(light)
         };
         let stroke = egui::Stroke::new(
-            if selected { 1.5 } else { 1.0 },
+            if selected { 1.5_f32 } else { 1.0_f32 },
             if selected {
                 Theme::accent(light)
             } else {
@@ -1063,9 +1063,7 @@ impl eframe::App for CopierApp {
                                 theme_glyph(self.theme_preference),
                             );
                             ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(self.theme_preference.label()).strong(),
-                                );
+                                ui.label(RichText::new(self.theme_preference.label()).strong());
                                 ui.label(
                                     RichText::new(theme_description(self.theme_preference))
                                         .small()
