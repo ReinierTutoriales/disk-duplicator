@@ -119,6 +119,34 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_resume_when_source_diverges_from_recorded_hash() {
+        let root = temp_dir("resume-source-change");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::write(dest.join("a.bin"), b"abc").unwrap();
+
+        let (files, _) = scan_source(&source).unwrap();
+        let key = state_key(&files[0]);
+        let state_dir = state_dir_for(&dest);
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_path(&dest), format!("{{\"key\":\"{key}\"}}\n")).unwrap();
+        fs::write(
+            state_dir.join("manifest.b3"),
+            format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
+        ).unwrap();
+
+        fs::write(source.join("a.bin"), b"xyz").unwrap();
+
+        let valid = normalize_completed_state(&source, &dest, &files).unwrap();
+        assert!(valid.is_empty(), "el journal no puede aceptar un origen distinto al hash persistido");
+        assert!(load_completed(&dest).is_empty(), "el estado inválido debe eliminarse del journal");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn final_verify_uses_manifest_hash_and_rejects_corruption() {
         let root = temp_dir("final-hash");
         let source = root.join("src");
