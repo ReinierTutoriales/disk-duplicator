@@ -466,7 +466,7 @@ impl eframe::App for CopierApp {
             self.last_path_check = Instant::now();
             self.path_errors = if busy { Vec::new() } else { self.validate_paths() };
         }
-        let path_errors = &self.path_errors;
+        let path_errors = self.path_errors.clone();
         let ready_to_start = !self.source.trim().is_empty()
             && !self.dests.is_empty()
             && path_errors.is_empty();
