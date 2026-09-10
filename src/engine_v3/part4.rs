@@ -20,7 +20,7 @@ fn build_job(
 
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
     let files_total = files.len() as u64;
-    let progress = dests.iter().map(|d| DestProgress {
+    let progress: Vec<DestProgress> = dests.iter().map(|d| DestProgress {
         label: d.display().to_string(),
         written: 0,
         total: bytes_total,
@@ -35,6 +35,7 @@ fn build_job(
         queue_depth: 0,
         retries: 0,
     }).collect();
+    debug_assert!(progress.iter().all(|d| matches!(d.mode, CopyMode::Fanout)));
 
     let max_buffers = (RESERVED_RAM / BLOCK).max(8);
     let state = Arc::new(JobState {
