@@ -504,8 +504,6 @@ impl eframe::App for CopierApp {
             self.applied_theme = Some(self.use_light_theme);
         }
 
-        // Exactly one progress snapshot per UI frame. The same clone is reused by
-        // the destination list, progress grid and completion summary.
         let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
         let all_terminal = !snaps.is_empty()
             && snaps.iter().all(|d| {
@@ -708,7 +706,7 @@ impl eframe::App for CopierApp {
                         .iter()
                         .map(|d| {
                             if d.total == 0 {
-                                0.0
+                                if d.phase == DestPhase::Done { 1.0 } else { 0.0 }
                             } else {
                                 d.written as f64 / d.total as f64
                             }
@@ -776,7 +774,7 @@ impl eframe::App for CopierApp {
                                     ui.end_row();
                                     for dp in &snaps {
                                         let frac = if dp.total == 0 {
-                                            0.0
+                                            if dp.phase == DestPhase::Done { 1.0 } else { 0.0 }
                                         } else {
                                             (dp.written as f32 / dp.total as f32).clamp(0.0, 1.0)
                                         };
@@ -879,22 +877,48 @@ impl eframe::App for CopierApp {
         }
 
         if !busy && all_terminal {
-            let ok = snaps
+            let done_ok = snaps
                 .iter()
                 .filter(|d| d.phase == DestPhase::Done && d.files_err == 0)
                 .count();
-            let with_errors = snaps.iter().filter(|d| d.files_err > 0).count();
-            self.status = if with_errors == 0 {
-                format!(
-                    "Completado · {ok}/{} sin errores",
-                    count_label(snaps.len() as u64, "destino", "destinos")
-                )
-            } else {
-                format!(
-                    "Completado · {ok}/{} sin errores · {}",
-                    count_label(snaps.len() as u64, "destino", "destinos"),
-                    count_label(with_errors as u64, "incidencia", "incidencias")
-                )
+            let done_err = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Done && d.files_err > 0)
+                .count();
+            let failed = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Failed)
+                .count();
+            let cancelled = snaps
+                .iter()
+                .filter(|d| d.phase == DestPhase::Cancelled)
+                .count();
+
+            self.status = match (failed, cancelled) {
+                (0, 0) if done_err == 0 => {
+                    format!("Completado · {done_ok}/{} sin errores", snaps.len())
+                }
+                (0, 0) => format!(
+                    "Finalizado con errores · {} · {} correctos",
+                    count_label(done_err as u64, "destino con errores", "destinos con errores"),
+                    done_ok
+                ),
+                (f, 0) => format!(
+                    "Finalizado con errores · {} · {} correctos",
+                    count_label(f as u64, "destino fallido", "destinos fallidos"),
+                    done_ok
+                ),
+                (0, c) => format!(
+                    "Cancelado · {}/{} destinos alcanzados · {}",
+                    done_ok + done_err,
+                    snaps.len(),
+                    count_label(c as u64, "cancelado", "cancelados")
+                ),
+                (f, c) => format!(
+                    "Cancelado con errores · {} · {}",
+                    count_label(f as u64, "fallido", "fallidos"),
+                    count_label(c as u64, "cancelado", "cancelados")
+                ),
             };
         }
     }
