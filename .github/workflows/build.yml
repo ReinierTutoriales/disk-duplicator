@@ -18,6 +18,19 @@ jobs:
         toolchain: 1.98.1
         targets: x86_64-pc-windows-msvc
         components: clippy
+    - name: Sync release lockfile
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      shell: pwsh
+      run: |
+        cargo update -w
+        git diff --quiet -- Cargo.lock
+        if ($LASTEXITCODE -ne 0) {
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock"
+          git push origin HEAD:main
+        }
     - name: Cache Rust build
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
     - name: Clippy
@@ -51,25 +64,26 @@ jobs:
         @"
         ## RepartoCopier $tag
 
-        RepartoCopier para Windows.
+        Una carpeta. Varios destinos. Una sola operación.
 
-        ### Características principales
-        - Copia FAN-OUT: un origen hacia múltiples destinos.
-        - Conserva estructura de carpetas y directorios vacíos.
-        - Verificación opcional BLAKE3.
-        - Reanudación segura con estado fuera del árbol copiado.
-        - Detección y aislamiento de destinos atascados.
-        - Interfaz con tema claro/oscuro automático de Windows.
-        - Progreso, velocidad, tiempo restante, colas y estado por destino.
-        - Pluralización correcta y textos de interfaz refinados en español.
+        ### Novedades principales
+        - Copia una carpeta a múltiples destinos al mismo tiempo.
+        - Interfaz más limpia, moderna y fácil de entender.
+        - Verificación opcional de integridad del contenido copiado.
+        - Reanudación inteligente de trabajos interrumpidos.
+        - Los destinos continúan trabajando de forma independiente si uno presenta un problema.
+        - Conserva la estructura de carpetas, incluidas las carpetas vacías.
+        - Progreso, velocidad, tiempo restante y estado de cada destino en una sola vista.
+        - Mejoras de estabilidad, seguridad de datos y recuperación ante errores.
 
         ### Plataforma
-        - Windows x64
+        - Windows 10/11 x64
         - Ejecutable autónomo: `RepartoCopier.exe`
         "@ | Set-Content -Path release-notes.md -Encoding utf8
 
+        $releaseTarget = (git rev-parse HEAD).Trim()
         gh release create $tag target/release/RepartoCopier.exe `
-          --target "$env:GITHUB_SHA" `
+          --target $releaseTarget `
           --title "RepartoCopier $tag" `
           --notes-file release-notes.md
 
@@ -87,6 +101,8 @@ jobs:
         toolchain: stable
         targets: x86_64-pc-windows-msvc
         components: clippy
+    - name: Sync workspace lockfile
+      run: cargo update -w
     - name: Cache Rust stable build
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
