@@ -102,6 +102,7 @@ fn fanout_worker(
 
     while let Ok(item) = rx.recv() {
         if state.cancel.load(Ordering::Relaxed) { break; }
+        if !control.alive.load(Ordering::Acquire) { break; }
         match item {
             FanoutItem::Begin(info) => {
                 state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
@@ -185,6 +186,12 @@ fn fanout_worker(
                 let dst = dest.join(&cur.info.rel);
                 let tmp = part_path(&dest, &dst);
 
+                if !control.alive.load(Ordering::Acquire) {
+                    cur.file.take();
+                    cleanup_part(&dest, &dst);
+                    continue;
+                }
+
                 if cur.failed {
                     cleanup_part(&dest, &dst);
                     if !opts.keep_going {
@@ -227,6 +234,11 @@ fn fanout_worker(
                     }
                 }
                 cur.file.take();
+
+                if !control.alive.load(Ordering::Acquire) {
+                    cleanup_part(&dest, &dst);
+                    continue;
+                }
 
                 let expected = cur.hasher.finalize();
                 if expected.as_bytes() != &hash {
@@ -282,6 +294,11 @@ fn fanout_worker(
                     set_phase(&state, slot, DestPhase::Copying, None);
                 }
 
+                if !control.alive.load(Ordering::Acquire) {
+                    cleanup_part(&dest, &dst);
+                    continue;
+                }
+
                 if let Err(e) = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst)) {
                     cleanup_part(&dest, &dst);
                     rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
@@ -290,6 +307,10 @@ fn fanout_worker(
                         control.alive.store(false, Ordering::Release);
                         break;
                     }
+                    continue;
+                }
+
+                if !control.alive.load(Ordering::Acquire) {
                     continue;
                 }
 
@@ -303,12 +324,20 @@ fn fanout_worker(
                     }
                 }
 
+                if !control.alive.load(Ordering::Acquire) {
+                    continue;
+                }
+
                 if let Err(e) = manifest.append(&cur.info.rel, &expected) {
                     record_file_error(&state, slot, e);
                     if !opts.keep_going {
                         control.alive.store(false, Ordering::Release);
                         break;
                     }
+                }
+
+                if !control.alive.load(Ordering::Acquire) {
+                    continue;
                 }
 
                 if let Err(e) = journal.append(&fast_state_key(&cur.info)) {
