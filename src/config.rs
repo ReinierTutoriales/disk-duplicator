@@ -89,20 +89,20 @@ pub fn save_settings(settings: AppSettings) -> Result<(), String> {
     let tmp = path.with_extension("conf.tmp");
     fs::write(&tmp, render_settings(settings))
         .map_err(|e| format!("No se pudieron guardar los ajustes: {e}"))?;
-    fs::rename(&tmp, &path).or_else(|rename_err| {
-        if path.exists() {
+
+    match fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(rename_err) if path.exists() => {
             fs::remove_file(&path).map_err(|remove_err| {
                 format!(
                     "No se pudo reemplazar la configuración ({rename_err}); tampoco se pudo retirar la anterior ({remove_err})."
                 )
             })?;
             fs::rename(&tmp, &path)
-        } else {
-            Err(rename_err)
+                .map_err(|e| format!("No se pudo finalizar el guardado de ajustes: {e}"))
         }
-    })
-    .map_err(|e| format!("No se pudo finalizar el guardado de ajustes: {e}"))?;
-    Ok(())
+        Err(e) => Err(format!("No se pudo finalizar el guardado de ajustes: {e}")),
+    }
 }
 
 #[cfg(test)]
