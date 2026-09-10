@@ -32,6 +32,19 @@ fn hash_file_with_buffer(
     Ok(h.finalize())
 }
 
+fn validate_part_size(part: &Path, expected: u64) -> Result<(), String> {
+    let actual = fs::metadata(part)
+        .map_err(|e| format!("No se pudo inspeccionar {} antes del commit: {e}", part.display()))?
+        .len();
+    if actual != expected {
+        return Err(format!(
+            "Tamaño físico incorrecto en {}: esperado {}, obtenido {}.",
+            part.display(), expected, actual
+        ));
+    }
+    Ok(())
+}
+
 fn commit_part_fast(dest_root: &Path, part: &Path, dst: &Path) -> Result<(), String> {
     if !dst.exists() {
         return fs::rename(part, dst).map_err(|e| format!("rename {}: {e}", dst.display()));
@@ -255,6 +268,17 @@ fn fanout_worker(
                     continue;
                 }
 
+                if let Err(e) = validate_part_size(&tmp, cur.info.size) {
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    record_file_error(&state, slot, e);
+                    if !opts.keep_going {
+                        control.alive.store(false, Ordering::Release);
+                        break;
+                    }
+                    continue;
+                }
+
                 let expected = cur.hasher.finalize();
                 if expected.as_bytes() != &hash {
                     cleanup_part(&dest, &dst);
@@ -335,6 +359,9 @@ fn fanout_worker(
                     continue;
                 }
 
+                // A successful commit is a point of no ambiguity: the destination now contains
+                // the new file. Even if cancellation arrives here, finish its metadata and durable
+                // completion record before observing cancellation at the next work boundary.
                 if let Some(m) = expected_mtime(&cur.info) {
                     if let Err(e) = set_mtime(&dst, m) {
                         record_file_error(&state, slot, e);
@@ -355,9 +382,6 @@ fn fanout_worker(
                         control.alive.store(false, Ordering::Release);
                         break;
                     }
-                }
-
-                if !control.alive.load(Ordering::Acquire) {
                     continue;
                 }
 
@@ -366,6 +390,18 @@ fn fanout_worker(
                     if !opts.keep_going {
                         control.alive.store(false, Ordering::Release);
                         break;
+                    }
+                    continue;
+                }
+
+                if journal.needs_checkpoint() {
+                    if let Err(e) = checkpoint_logs(&mut manifest, &mut journal) {
+                        record_file_error(&state, slot, e);
+                        if !opts.keep_going {
+                            control.alive.store(false, Ordering::Release);
+                            break;
+                        }
+                        continue;
                     }
                 }
 
