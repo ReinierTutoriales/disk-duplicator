@@ -1,5 +1,6 @@
 use crate::engine_impl::{self, state_dir_for, CopyOpts, DestPhase, FileInfo, JobState};
 use std::collections::HashSet;
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -97,11 +98,16 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
 }
 
 fn state_key(info: &PlannedFile) -> String {
-    let mut hex = String::new();
-    for b in info.rel.to_string_lossy().as_bytes() {
-        hex.push_str(&format!("{b:02x}"));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let rel = info.rel.to_string_lossy();
+    let mut key = String::with_capacity(rel.len() * 2 + 48);
+    for &byte in rel.as_bytes() {
+        key.push(HEX[(byte >> 4) as usize] as char);
+        key.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    format!("{hex}|{}|{}", info.size, info.mtime_ns)
+    write!(&mut key, "|{}|{}", info.size, info.mtime_ns)
+        .expect("writing to String cannot fail");
+    key
 }
 
 fn state_path(dest: &Path) -> PathBuf {
@@ -161,6 +167,11 @@ fn same_enough(src: &Path, dst: &Path) -> bool {
     }
 }
 
+fn matches_manifest_hash(path: &Path, size: u64, expected: &[u8; 32]) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == size)
+        && hash_path(path).is_ok_and(|actual| actual.as_bytes() == expected)
+}
+
 fn normalize_completed_state(
     source: &Path,
     dest: &Path,
@@ -175,12 +186,13 @@ fn normalize_completed_state(
         let key = state_key(info);
         if !loaded.contains(&key) { continue; }
 
+        let src = source.join(&info.rel);
         let dst = dest.join(&info.rel);
         let physically_valid = if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
-            fs::metadata(&dst).is_ok_and(|meta| meta.is_file() && meta.len() == info.size)
-                && hash_path(&dst).is_ok_and(|actual| actual.as_bytes() == expected)
+            matches_manifest_hash(&src, info.size, expected)
+                && matches_manifest_hash(&dst, info.size, expected)
         } else {
-            same_enough(&source.join(&info.rel), &dst)
+            same_enough(&src, &dst)
         };
 
         if physically_valid {
