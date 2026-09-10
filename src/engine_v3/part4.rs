@@ -43,6 +43,8 @@ fn build_job(
         running: AtomicBool::new(true),
         cancel: AtomicBool::new(false),
         pause: AtomicBool::new(false),
+        pause_mutex: Mutex::new(()),
+        pause_cv: Condvar::new(),
         files_total: AtomicU64::new(files_total),
         bytes_total: AtomicU64::new(bytes_total),
         buffers_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -89,6 +91,8 @@ mod tests {
             running: AtomicBool::new(true),
             cancel: AtomicBool::new(false),
             pause: AtomicBool::new(false),
+            pause_mutex: Mutex::new(()),
+            pause_cv: Condvar::new(),
             files_total: AtomicU64::new(1),
             bytes_total: AtomicU64::new(size),
             buffers_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -148,6 +152,7 @@ mod tests {
         let pool = BufferPool::new(2, Arc::clone(&gauge));
         let state = JobState {
             running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
+            pause_mutex: Mutex::new(()), pause_cv: Condvar::new(),
             files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
             max_buffers: 2, dests: Mutex::new(Vec::new()), reader_hashes: Mutex::new(HashMap::new()),
         };
@@ -155,6 +160,21 @@ mod tests {
         assert_eq!(buf.len(), BLOCK);
         pool.release(buf);
         assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn paused_waiter_resumes_and_cancel_wakes_it() {
+        let root = temp_dir("pause-control");
+        let state = worker_state(&root, 0);
+        state.set_paused(true);
+        let waiter_state = Arc::clone(&state);
+        let waiter = thread::spawn(move || wait_pause(&waiter_state));
+        thread::sleep(Duration::from_millis(20));
+        assert!(!waiter.is_finished());
+        state.request_cancel();
+        assert!(!waiter.join().unwrap());
+        assert!(!state.is_paused());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -176,7 +196,7 @@ mod tests {
         let state = worker_state(&dest, data.len() as u64);
         let control = Arc::new(DestControl::new());
         let (tx, rx) = mpsc::bounded(4);
-        let opts = CopyOpts { verify: false, skip_same: false, keep_going: true };
+        let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
         let worker = {
             let dest = dest.clone();
             let control = Arc::clone(&control);
@@ -227,7 +247,7 @@ mod tests {
         let state = worker_state(&dest, data.len() as u64);
         let control = Arc::new(DestControl::new());
         let (tx, rx) = mpsc::bounded(4);
-        let opts = CopyOpts { verify: false, skip_same: false, keep_going: true };
+        let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
         let worker = {
             let dest = dest.clone();
             let control = Arc::clone(&control);
