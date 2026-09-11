@@ -668,7 +668,7 @@ pub(crate) fn hash_file_cancelable(
             return Err(cancelled_error());
         }
         let pending = reader.start_read(buffer);
-        let (next_buffer, result) = reader.finish_read(pending, || cancelled());
+        let (next_buffer, result) = reader.finish_read(pending, &mut cancelled);
         buffer = next_buffer;
         let n = result?;
         if n == 0 {
