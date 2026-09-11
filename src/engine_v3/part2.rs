@@ -114,15 +114,19 @@ fn reset_part_after_partial_write(
     Ok(())
 }
 
+struct WriteRetryContext<'a> {
+    state: &'a JobState,
+    slot: usize,
+    control: &'a DestControl,
+    rel: &'a str,
+}
+
 fn write_buffer_retrying(
     file: &mut Option<File>,
     tmp: &Path,
     committed: u64,
     data: &[u8],
-    state: &JobState,
-    slot: usize,
-    control: &DestControl,
-    rel: &str,
+    ctx: &WriteRetryContext<'_>,
 ) -> Result<(), String> {
     const WRITE_CHUNK: usize = 1024 * 1024;
     let mut last_err = String::new();
@@ -131,7 +135,7 @@ fn write_buffer_retrying(
         let mut offset = 0usize;
         let mut attempt_error = None;
         while offset < data.len() {
-            if !wait_pause(state) {
+            if !wait_pause(ctx.state) {
                 attempt_error = Some("Cancelado".to_owned());
                 break;
             }
@@ -143,10 +147,10 @@ fn write_buffer_retrying(
             match handle.write_all(&data[offset..end]) {
                 Ok(()) => {
                     offset = end;
-                    control.note_progress();
+                    ctx.control.note_progress();
                 }
                 Err(e) => {
-                    attempt_error = Some(format!("escritura {rel}: {e}"));
+                    attempt_error = Some(format!("escritura {}: {e}", ctx.rel));
                     break;
                 }
             }
@@ -162,9 +166,9 @@ fn write_buffer_retrying(
 
         reset_part_after_partial_write(file, tmp, committed)?;
         if attempt < RETRIES {
-            state.dests.lock().unwrap()[slot].retries += 1;
+            ctx.state.dests.lock().unwrap()[ctx.slot].retries += 1;
             thread::sleep(Duration::from_millis(75 * (attempt as u64 + 1)));
-            if !wait_pause(state) { return Err("Cancelado".into()); }
+            if !wait_pause(ctx.state) { return Err("Cancelado".into()); }
         }
     }
 
@@ -257,15 +261,18 @@ fn fanout_worker(
                         let rel = cur.info.rel.display().to_string();
                         let dst = dest.join(&cur.info.rel);
                         let tmp = part_path(&dest, &dst);
+                        let ctx = WriteRetryContext {
+                            state: &state,
+                            slot,
+                            control: &control,
+                            rel: &rel,
+                        };
                         let result = write_buffer_retrying(
                             &mut cur.file,
                             &tmp,
                             cur.copied,
                             &buf.data,
-                            &state,
-                            slot,
-                            &control,
-                            &rel,
+                            &ctx,
                         );
                         match result {
                             Ok(()) => {
