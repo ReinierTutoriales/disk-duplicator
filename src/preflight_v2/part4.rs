@@ -146,7 +146,46 @@ mod tests {
         let text = fs::read_to_string(manifest_path(&dest)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0], format!("{}  a.bin", new_hash.to_hex()));
+        assert_eq!(
+            lines[0],
+            format!("{}  {}", new_hash.to_hex(), manifest_key(Path::new("a.bin")))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_state_and_manifest_are_upgraded_to_lossless_keys() {
+        let root = temp_dir("lossless-migration");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"abc").unwrap();
+        fs::copy(source.join("a.bin"), dest.join("a.bin")).unwrap();
+        let src_mtime = fs::metadata(source.join("a.bin")).unwrap().modified().unwrap();
+        File::options().write(true).open(dest.join("a.bin")).unwrap().set_modified(src_mtime).unwrap();
+
+        let (files, _) = scan_source(&source).unwrap();
+        let old_key = legacy_state_key(&files[0]);
+        let new_key = state_key(&files[0]);
+        assert_ne!(old_key, new_key);
+        let dir = state_dir_for(&dest);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(state_path(&dest), format!("{{\"key\":\"{old_key}\"}}\n")).unwrap();
+        fs::write(
+            manifest_path(&dest),
+            format!("{}  a.bin\n", blake3::hash(b"abc").to_hex()),
+        ).unwrap();
+
+        let valid = normalize_completed_state(&source, &dest, &files).unwrap();
+        assert!(valid.contains(&new_key));
+        assert!(!load_completed(&dest).contains(&old_key));
+        assert!(load_completed(&dest).contains(&new_key));
+
+        compact_manifest(&dest, &files).unwrap();
+        let manifest = fs::read_to_string(manifest_path(&dest)).unwrap();
+        assert!(manifest.contains(&manifest_key(Path::new("a.bin"))));
+        assert!(!manifest.contains("  a.bin\n"));
         let _ = fs::remove_dir_all(root);
     }
 
