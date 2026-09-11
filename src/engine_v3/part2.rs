@@ -1,17 +1,5 @@
 fn fast_state_key(info: &FileInfo) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let path = info.rel.to_string_lossy();
-    let bytes = path.as_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2 + 48);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out.push('|');
-    out.push_str(&info.size.to_string());
-    out.push('|');
-    out.push_str(&info.mtime_ns.to_string());
-    out
+    format!("{}|{}|{}", persisted_path_key(&info.rel), info.size, info.mtime_ns)
 }
 
 fn hash_file_with_buffer(
@@ -126,8 +114,6 @@ fn fanout_worker(
     set_phase(&state, slot, DestPhase::Copying, None);
 
     while let Ok(item) = rx.recv() {
-        // Do not drain queued work while paused. A pause takes effect at the next safe point,
-        // never by interrupting a filesystem operation already in progress.
         if !wait_pause(&state) { break; }
         if !control.alive.load(Ordering::Acquire) { break; }
         match item {
@@ -384,8 +370,6 @@ fn fanout_worker(
                     continue;
                 }
 
-                // Once commit succeeds, finish metadata and durable state as one logical unit.
-                // Pause/cancel is observed again only before the next work item.
                 if let Some(m) = expected_mtime(&cur.info) {
                     if let Err(e) = set_mtime(&dst, m) {
                         record_file_error(&state, slot, e);
