@@ -6,6 +6,30 @@ const TRANSIENT_ID_HEX: usize = 32;
 const LEGACY_STATE_ID_HEX: usize = 16;
 const LEGACY_TRANSIENT_ID_HEX: usize = 24;
 
+#[cfg(windows)]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn ensure_normal_dir(path: &Path, label: &str) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("No se pudo inspeccionar {label} {}: {e}", path.display()))?;
+    if !meta.is_dir() || meta.file_type().is_symlink() || is_reparse_point(&meta) {
+        return Err(format!(
+            "{label} no es un directorio normal o es un enlace/junction/reparse point: {}.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn exact_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
@@ -136,7 +160,24 @@ pub(crate) fn legacy_state_dir_for(dest: &Path) -> PathBuf {
 
 pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
     let current = state_dir_for(dest);
+    let container = current
+        .parent()
+        .ok_or_else(|| "La ruta del directorio de estado no tiene padre.".to_owned())?;
+
+    if container.exists() {
+        ensure_normal_dir(container, "El contenedor de estado")?;
+    } else {
+        std::fs::create_dir(container).map_err(|e| {
+            format!(
+                "No se pudo crear el contenedor de estado {}: {e}",
+                container.display()
+            )
+        })?;
+        ensure_normal_dir(container, "El contenedor de estado")?;
+    }
+
     if current.exists() {
+        ensure_normal_dir(&current, "El directorio de estado")?;
         return Ok(current);
     }
 
@@ -144,8 +185,7 @@ pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
         if previous == current || !previous.exists() {
             continue;
         }
-        std::fs::create_dir_all(current.parent().unwrap_or(&current))
-            .map_err(|e| format!("No se pudo preparar el directorio de estado: {e}"))?;
+        ensure_normal_dir(&previous, "El directorio de estado anterior")?;
         std::fs::rename(&previous, &current).map_err(|e| {
             format!(
                 "No se pudo migrar el estado anterior {} a {}: {e}",
@@ -156,6 +196,15 @@ pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
         break;
     }
 
+    if !current.exists() {
+        std::fs::create_dir(&current).map_err(|e| {
+            format!(
+                "No se pudo crear el directorio de estado {}: {e}",
+                current.display()
+            )
+        })?;
+    }
+    ensure_normal_dir(&current, "El directorio de estado")?;
     Ok(current)
 }
 
