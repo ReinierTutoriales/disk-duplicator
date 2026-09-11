@@ -14,6 +14,22 @@ mod tests {
         CopyOpts { verify: true, skip_same, keep_going: true }
     }
 
+    fn normalize_completed_state(
+        source: &Path,
+        dest: &Path,
+        files: &[PlannedFile],
+    ) -> Result<HashSet<String>, String> {
+        let mut source_hashes = SourceHashCache::new();
+        let mut verify_buf = vec![0u8; VERIFY_BUF];
+        super::normalize_completed_state(
+            source,
+            dest,
+            files,
+            &mut source_hashes,
+            &mut verify_buf,
+        )
+    }
+
     #[test]
     fn scan_never_filters_regular_files_by_name() {
         let root = temp_dir("all-files");
