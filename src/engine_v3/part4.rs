@@ -178,6 +178,18 @@ mod tests {
     }
 
     #[test]
+    fn stall_thresholds_allow_slow_storage() {
+        let control = DestControl::new();
+        assert_eq!(control.stall_limit_secs(), 30);
+        control.enter_operation(OperationPhase::Sync);
+        assert_eq!(control.stall_limit_secs(), 120);
+        control.enter_operation(OperationPhase::Verify);
+        assert_eq!(control.stall_limit_secs(), 120);
+        control.enter_operation(OperationPhase::Commit);
+        assert_eq!(control.stall_limit_secs(), 120);
+    }
+
+    #[test]
     fn physical_part_size_is_checked_before_commit() {
         let root = temp_dir("part-size");
         let part = root.join("file.part");
