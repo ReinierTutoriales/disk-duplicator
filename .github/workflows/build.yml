@@ -37,7 +37,7 @@ jobs:
         name: RepartoCopier
         path: target/release/RepartoCopier.exe
     - name: Publish GitHub release when version is new
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -56,17 +56,25 @@ jobs:
         @"
         ## RepartoCopier $tag
 
-        Una carpeta. Varios destinos. Una sola operación.
+        FAN-OUT nativo: una carpeta origen, múltiples destinos y una sola lectura compartida por bloque.
 
         ### Novedades principales
-        - Copia una carpeta a múltiples destinos al mismo tiempo.
-        - Interfaz más limpia, moderna y fácil de entender.
-        - Verificación opcional de integridad del contenido copiado.
-        - Reanudación inteligente de trabajos interrumpidos.
-        - Los destinos continúan trabajando de forma independiente si uno presenta un problema.
-        - Conserva la estructura de carpetas, incluidas las carpetas vacías.
-        - Progreso, velocidad, tiempo restante y estado de cada destino en una sola vista.
-        - Mejoras de estabilidad, seguridad de datos y recuperación ante errores.
+        - FAN-OUT como único motor de copia, optimizado para múltiples destinos simultáneos.
+        - Conserva exactamente la carpeta raíz seleccionada, toda la jerarquía y las carpetas vacías.
+        - Verificación BLAKE3 del contenido y validación final de cada destino.
+        - I/O nativo OVERLAPPED en Windows para lectura y escritura, con cancelación segura.
+        - Reanudación robusta mediante journal y manifest fuera del árbol copiado.
+        - Watchdog de lectura, escritura, sincronización y verificación para detectar destinos atascados.
+        - Protección reforzada frente a symlinks, junctions y reparse points durante preflight y ejecución.
+        - Estado temporal y commits endurecidos para evitar carreras entre destinos y rutas reemplazadas.
+        - Backpressure por destino, reutilización de buffers y presupuesto global de memoria controlado.
+        - Mejoras de estabilidad en cancelación, recuperación de escrituras parciales y commits críticos.
+
+        ### Validación
+        - Clippy con warnings tratados como errores.
+        - Tests release en Rust 1.98.1.
+        - Tests release en latest stable.
+        - Build release Windows x64.
 
         ### Plataforma
         - Windows 10/11 x64
