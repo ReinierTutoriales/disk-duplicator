@@ -15,6 +15,7 @@ fn plan_destination(
         .map_err(|e| format!("No se pudo consultar capacidad de {}: {e}", dest.display()))?;
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
     let completed = normalize_completed_state(source, dest, files)?;
+    compact_manifest(dest, files)?;
 
     let mut bytes_to_write = 0u64;
     let mut committed_delta: i128 = 0;
@@ -26,7 +27,12 @@ fn plan_destination(
         let dst = dest.join(&info.rel);
         let key = state_key(info);
         let physically_valid = same_enough(&src, &dst);
-        if (completed.contains(&key) && physically_valid) || (opts.skip_same && physically_valid) {
+        let skip_same_valid = if opts.skip_same && physically_valid && !completed.contains(&key) {
+            hash_path(&src)? == hash_path(&dst)?
+        } else {
+            false
+        };
+        if (completed.contains(&key) && physically_valid) || skip_same_valid {
             continue;
         }
 
@@ -229,6 +235,61 @@ fn load_manifest_hashes(dest: &Path) -> std::collections::HashMap<String, [u8; 3
         hashes.insert(name.to_owned(), hash);
     }
     hashes
+}
+
+fn compact_manifest(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
+    let path = manifest_path(dest);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let hashes = load_manifest_hashes(dest);
+    let allowed: HashSet<String> = files.iter().map(|info| manifest_key(&info.rel)).collect();
+    let mut entries: Vec<(String, [u8; 32])> = hashes
+        .into_iter()
+        .filter(|(name, _)| allowed.contains(name))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let tmp = path.with_extension("b3.compact");
+    let backup = path.with_extension("b3.compact.bak");
+    if tmp.exists() {
+        fs::remove_file(&tmp).map_err(|e| format!("No se pudo limpiar {}: {e}", tmp.display()))?;
+    }
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .map_err(|e| format!("No se pudo limpiar {}: {e}", backup.display()))?;
+    }
+
+    let mut f = File::create(&tmp)
+        .map_err(|e| format!("No se pudo crear {}: {e}", tmp.display()))?;
+    for (name, hash) in entries {
+        let hex = blake3::Hash::from(hash).to_hex();
+        writeln!(f, "{hex}  {name}")
+            .map_err(|e| format!("No se pudo compactar manifest: {e}"))?;
+    }
+    f.sync_data().map_err(|e| format!("No se pudo sincronizar manifest: {e}"))?;
+    drop(f);
+
+    fs::rename(&path, &backup)
+        .map_err(|e| format!("No se pudo preparar compactación de {}: {e}", path.display()))?;
+    match fs::rename(&tmp, &path) {
+        Ok(()) => {
+            fs::remove_file(&backup)
+                .map_err(|e| format!("No se pudo limpiar {}: {e}", backup.display()))?;
+            Ok(())
+        }
+        Err(commit_err) => match fs::rename(&backup, &path) {
+            Ok(()) => Err(format!(
+                "No se pudo compactar {}: {commit_err}; manifest anterior restaurado.",
+                path.display()
+            )),
+            Err(restore_err) => Err(format!(
+                "CRÍTICO: falló la compactación de {} ({commit_err}) y la restauración desde {} ({restore_err}).",
+                path.display(), backup.display()
+            )),
+        },
+    }
 }
 
 fn validate_destination_result_with_hashes(
