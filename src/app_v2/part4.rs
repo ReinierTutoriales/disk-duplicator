@@ -6,11 +6,13 @@ impl eframe::App for CopierApp {
         }
         self.poll_startup();
 
-        if self.theme_preference == ThemePreference::System
-            && self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL
-        {
-            self.use_light_theme = detect_system_theme();
+        if self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL {
+            if self.theme_preference == ThemePreference::System {
+                self.use_light_theme = detect_system_theme();
+            }
+            refresh_system_accent();
             self.last_theme_check = Instant::now();
+            self.applied_theme = None;
         }
 
         if self.applied_theme != Some(self.use_light_theme) {
@@ -129,14 +131,15 @@ impl eframe::App for CopierApp {
                     ui.add_space(SPACING_XS);
                     ui.label(
                         RichText::new("ORIGEN")
-                            .small()
+                            .size(11.5)
                             .strong()
                             .color(Theme::muted(self.use_light_theme)),
                     );
 
                     ui.horizontal(|ui| {
                         let button_width = 88.0;
-                        let field_width = (ui.available_width() - button_width - SPACING_SM).max(160.0);
+                        let field_width =
+                            (ui.available_width() - button_width - SPACING_SM).max(160.0);
                         ui.add_enabled_ui(!busy, |ui| {
                             ui.add_sized(
                                 [field_width, 30.0],
@@ -158,7 +161,7 @@ impl eframe::App for CopierApp {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("DESTINOS  ({})", self.dests.len()))
-                                .small()
+                                .size(11.5)
                                 .strong()
                                 .color(Theme::muted(self.use_light_theme)),
                         );
@@ -236,9 +239,18 @@ impl eframe::App for CopierApp {
                                 &mut self.keep_going,
                                 "Continuar si un destino falla",
                             )
-                            .on_hover_text("Los demás destinos continúan si uno presenta un error.");
+                            .on_hover_text(
+                                "Los demás destinos continúan si uno presenta un error.",
+                            );
                         });
-
+                    });
+                    ui.add_space(SPACING_SM);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("La integridad se verifica automáticamente con BLAKE3.")
+                                .size(11.5)
+                                .color(Theme::muted(self.use_light_theme)),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if running {
                                 if let Some(job) = &self.job {
@@ -251,7 +263,8 @@ impl eframe::App for CopierApp {
                                     }
                                 }
                             } else if !starting {
-                                let button = egui::Button::new(RichText::new("Iniciar copia").strong());
+                                let button =
+                                    egui::Button::new(RichText::new("Iniciar copia").strong());
                                 if ui.add_enabled(ready_to_start, button).clicked() {
                                     self.start();
                                 }
