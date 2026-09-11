@@ -1,0 +1,58 @@
+name: Runtime state path audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/state-runtime-audit.yml'
+      - '.github/state_runtime_hardening.py'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: false
+      - name: Apply state hardening and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python .github/state_runtime_hardening.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Commit clean audited tree and launch normal CI
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item .github/workflows/state-runtime-audit.yml
+          Remove-Item .github/state_runtime_hardening.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden runtime state paths'
+          git push origin HEAD:main
+          gh workflow run build.yml --ref main
