@@ -9,11 +9,24 @@ const LEGACY_TRANSIENT_ID_HEX: usize = 24;
 fn native_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
+        use std::char::decode_utf16;
         use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect()
+
+        let mut normalized = Vec::new();
+        for unit in decode_utf16(path.as_os_str().encode_wide()) {
+            match unit {
+                Ok(ch) => {
+                    for lower in ch.to_lowercase() {
+                        let mut buf = [0u16; 2];
+                        for encoded in lower.encode_utf16(&mut buf) {
+                            normalized.extend_from_slice(&encoded.to_le_bytes());
+                        }
+                    }
+                }
+                Err(err) => normalized.extend_from_slice(&err.unpaired_surrogate().to_le_bytes()),
+            }
+        }
+        normalized
     }
 
     #[cfg(not(windows))]
@@ -129,5 +142,14 @@ mod tests {
         let path = Path::new(r"C:\\example\\target");
         assert_eq!(state_id(path).len(), 32);
         assert_eq!(transient_id(path).len(), 32);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ids_are_case_insensitive_on_windows() {
+        let upper = Path::new(r"E:\\Backup\\Folder\\File.ISO");
+        let lower = Path::new(r"e:\\backup\\folder\\file.iso");
+        assert_eq!(state_id(upper), state_id(lower));
+        assert_eq!(transient_id(upper), transient_id(lower));
     }
 }
