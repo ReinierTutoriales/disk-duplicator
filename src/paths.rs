@@ -6,6 +6,28 @@ const TRANSIENT_ID_HEX: usize = 32;
 const LEGACY_STATE_ID_HEX: usize = 16;
 const LEGACY_TRANSIENT_ID_HEX: usize = 24;
 
+fn exact_path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+
+    #[cfg(all(not(windows), not(unix)))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
 fn native_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
@@ -29,7 +51,12 @@ fn native_path_bytes(path: &Path) -> Vec<u8> {
         normalized
     }
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        exact_path_bytes(path)
+    }
+
+    #[cfg(all(not(windows), not(unix)))]
     {
         path.to_string_lossy().as_bytes().to_vec()
     }
@@ -38,11 +65,7 @@ fn native_path_bytes(path: &Path) -> Vec<u8> {
 fn previous_native_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str()
-            .encode_wide()
-            .flat_map(u16::to_le_bytes)
-            .collect()
+        exact_path_bytes(path)
     }
 
     #[cfg(not(windows))]
@@ -58,6 +81,18 @@ fn digest_hex(bytes: &[u8], chars: usize) -> String {
 
 fn legacy_digest_hex(path: &Path, chars: usize) -> String {
     digest_hex(path.to_string_lossy().as_bytes(), chars)
+}
+
+pub(crate) fn persisted_path_key(path: &Path) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = exact_path_bytes(path);
+    let mut out = String::with_capacity(3 + bytes.len() * 2);
+    out.push_str("p2:");
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 pub(crate) fn state_id(dest: &Path) -> String {
@@ -186,6 +221,11 @@ mod tests {
         let path = Path::new(r"C:\\example\\target");
         assert_eq!(state_id(path).len(), 32);
         assert_eq!(transient_id(path).len(), 32);
+    }
+
+    #[test]
+    fn persisted_path_keys_are_versioned() {
+        assert!(persisted_path_key(Path::new("folder/file.bin")).starts_with("p2:"));
     }
 
     #[cfg(windows)]
