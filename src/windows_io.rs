@@ -429,7 +429,14 @@ impl NativeWriter {
                             return Err(cancelled_error());
                         }
                     }
-                    _ => return Err(io::Error::last_os_error()),
+                    _ => {
+                        let err = io::Error::last_os_error();
+                        unsafe {
+                            CancelIoEx(self.handle, &overlapped);
+                            WaitForSingleObject(self.event, INFINITE);
+                        }
+                        return Err(err);
+                    }
                 }
             }
 

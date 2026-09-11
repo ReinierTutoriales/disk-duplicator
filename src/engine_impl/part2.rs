@@ -280,14 +280,21 @@ fn fanout_worker(
     let mut effective_written = 0u64;
     let mut current: Option<CurrentFile> = None;
 
-    let tmp_dir = state_dir_for(&dest).join("tmp");
-    if let Err(e) = fs::create_dir_all(&tmp_dir) {
+    let tmp_dir = match prepare_runtime_state_tmp(&dest) {
+        Ok(path) => path,
+        Err(e) => {
+            control.alive.store(false, Ordering::Release);
+            set_phase(&state, slot, DestPhase::Failed, Some(e));
+            return;
+        }
+    };
+    if !tmp_dir.is_dir() {
         control.alive.store(false, Ordering::Release);
         set_phase(
             &state,
             slot,
             DestPhase::Failed,
-            Some(format!("tmp mkdir {}: {e}", tmp_dir.display())),
+            Some(format!("El temporal de estado no está disponible: {}", tmp_dir.display())),
         );
         return;
     }
@@ -319,6 +326,11 @@ fn fanout_worker(
             FanoutItem::Begin(info) => {
                 state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
                 let dst = dest.join(&info.rel);
+                if let Err(e) = prepare_runtime_state_tmp(&dest) {
+                    record_file_error(&state, slot, e);
+                    control.alive.store(false, Ordering::Release);
+                    break;
+                }
                 if let Err(e) = validate_runtime_destination_path(&dest, &info.rel) {
                     record_file_error(&state, slot, e);
                     if !opts.keep_going { control.alive.store(false, Ordering::Release); break; }
@@ -575,6 +587,13 @@ fn fanout_worker(
                     break;
                 }
 
+                if let Err(e) = prepare_runtime_state_tmp(&dest) {
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    record_file_error(&state, slot, e);
+                    control.alive.store(false, Ordering::Release);
+                    break;
+                }
                 if let Err(e) = validate_runtime_destination_path(&dest, &cur.info.rel) {
                     cleanup_part(&dest, &dst);
                     rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);

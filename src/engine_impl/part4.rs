@@ -163,6 +163,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_tmp_rejects_non_directory_entry() {
+        let root = temp_dir("runtime-state-tmp");
+        let dest = root.join("CopyName");
+        fs::create_dir_all(&dest).unwrap();
+        let state = prepare_state_dir(&dest).unwrap();
+        fs::write(state.join("tmp"), b"not-a-directory").unwrap();
+        assert!(prepare_runtime_state_tmp(&dest).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_state_creation_is_safe_for_sibling_destinations() {
+        let root = temp_dir("runtime-state-race");
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let dest = root.join(format!("dest-{index}"));
+            fs::create_dir_all(&dest).unwrap();
+            workers.push(thread::spawn(move || prepare_runtime_state_tmp(&dest)));
+        }
+        for worker in workers {
+            let tmp = worker.join().unwrap().unwrap();
+            assert!(tmp.is_dir());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_layout_rejects_file_as_intermediate_component() {
+        let root = temp_dir("unsafe-dir-layout");
+        let dest = root.join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("a"), b"file").unwrap();
+        let dirs = vec![PathBuf::from("a/b")];
+        assert!(create_directory_layout(std::slice::from_ref(&dest), &dirs).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn state_is_outside_destination_tree() {
         let root = temp_dir("state");
         let dest = root.join("CopyName");

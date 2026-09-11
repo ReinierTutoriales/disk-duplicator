@@ -1,4 +1,9 @@
-use crate::paths::{backup_path, manifest_path, part_path, persisted_path_key, state_dir_for, state_path};
+use crate::paths::{
+    backup_path, manifest_path, part_path, persisted_path_key, prepare_runtime_state_tmp,
+    prepare_state_dir, state_path,
+};
+#[cfg(test)]
+use crate::paths::state_dir_for;
 use crossbeam_channel as mpsc;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -293,9 +298,56 @@ fn expected_mtime(info: &FileInfo) -> Option<SystemTime> {
 }
 
 fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> {
-    let meta = fs::metadata(path).map_err(|e| format!("origen {}: {e}", path.display()))?;
-    if !meta.is_file() || meta.len() != info.size || metadata_mtime_ns(&meta) != info.mtime_ns {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("origen {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink()
+        || runtime_is_reparse(&meta)
+        || !meta.is_file()
+        || meta.len() != info.size
+        || metadata_mtime_ns(&meta) != info.mtime_ns
+    {
         return Err(format!("origen cambió: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn ensure_runtime_destination_directory(root: &Path, rel: &Path) -> Result<(), String> {
+    let root_meta = fs::symlink_metadata(root)
+        .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", root.display()))?;
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink() || runtime_is_reparse(&root_meta) {
+        return Err(format!("Destino inseguro o reemplazado durante la copia: {}", root.display()));
+    }
+
+    let mut current = root.to_path_buf();
+    let mut saw_component = false;
+    for component in rel.components() {
+        let Component::Normal(name) = component else {
+            return Err(format!("Ruta relativa insegura: {}", rel.display()));
+        };
+        saw_component = true;
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {
+                    return Err(format!("Componente de carpeta inseguro en destino: {}", current.display()));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("No se pudo crear la carpeta {}: {e}", current.display())),
+                }
+                let meta = fs::symlink_metadata(&current)
+                    .map_err(|e| format!("No se pudo verificar la carpeta {}: {e}", current.display()))?;
+                if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {
+                    return Err(format!("La carpeta creada no es segura: {}", current.display()));
+                }
+            }
+            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", current.display())),
+        }
+    }
+    if !saw_component {
+        return Err("Ruta relativa vacía en el layout de carpetas".into());
     }
     Ok(())
 }
@@ -303,10 +355,13 @@ fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> 
 fn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {
     for dest in dests {
         fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
+        let meta = fs::symlink_metadata(dest)
+            .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", dest.display()))?;
+        if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {
+            return Err(format!("Destino inseguro o reemplazado durante la copia: {}", dest.display()));
+        }
         for rel in dirs {
-            let path = dest.join(rel);
-            fs::create_dir_all(&path)
-                .map_err(|e| format!("No se pudo crear la carpeta {}: {e}", path.display()))?;
+            ensure_runtime_destination_directory(dest, rel)?;
         }
     }
     Ok(())
@@ -435,8 +490,7 @@ struct StateJournal {
 
 impl StateJournal {
     fn open(dest: &Path) -> Result<Self, String> {
-        let dir = state_dir_for(dest);
-        fs::create_dir_all(&dir).map_err(|e| format!("state mkdir {}: {e}", dir.display()))?;
+        prepare_state_dir(dest)?;
         let file = OpenOptions::new().create(true).append(true).open(state_path(dest))
             .map_err(|e| format!("state open: {e}"))?;
         Ok(Self {
@@ -478,8 +532,7 @@ struct ManifestWriter {
 
 impl ManifestWriter {
     fn open(dest: &Path) -> Result<Self, String> {
-        let dir = state_dir_for(dest);
-        fs::create_dir_all(&dir).map_err(|e| format!("manifest mkdir {}: {e}", dir.display()))?;
+        prepare_state_dir(dest)?;
         let file = OpenOptions::new().create(true).append(true).open(manifest_path(dest))
             .map_err(|e| format!("manifest open: {e}"))?;
         Ok(Self { writer: BufWriter::with_capacity(64 * 1024, file), dirty: false })
