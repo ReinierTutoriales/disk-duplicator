@@ -1,76 +1,285 @@
 # RepartoCopier
 
-RepartoCopier es una herramienta de copia 1 origen → N destinos para Windows, orientada a duplicar una carpeta completa a múltiples unidades conservando su estructura.
+**RepartoCopier** es una aplicación de escritorio para Windows diseñada para copiar **una carpeta de origen a varios destinos en paralelo**, con una interfaz gráfica simple, verificación de integridad y reanudación segura.
 
-## Características principales
+> Una carpeta. Varios destinos. Una sola operación.
 
-- Copia FAN-OUT: el origen se lee una vez y los bloques se comparten entre todos los destinos activos.
-- Conserva la carpeta raíz seleccionada, su estructura interna y las carpetas vacías.
-- Reanudación por destino con journal y manifiesto BLAKE3 fuera del árbol copiado.
-- Verificación BLAKE3 y validación final de tamaño/estructura.
-- Pausa y cancelación cooperativas sin espera activa.
-- Los destinos fallidos se aíslan del FAN-OUT para que los demás puedan continuar.
-- Recuperación de `.part`/`.bak` propios tras interrupciones.
-- Preflight de espacio, rutas solapadas, enlaces simbólicos y permisos de escritura.
+---
 
-## Modelo de copia
+## Características
 
-RepartoCopier usa un único modo de copia: FAN-OUT. El lector produce bloques del origen y los distribuye a los workers de cada destino. Cada destino mantiene su propio estado, cola, verificación y commit.
+- **1 origen → N destinos** en una sola operación.
+- Copia en paralelo mediante arquitectura **FAN-OUT**.
+- Conserva la **carpeta raíz seleccionada** en cada destino.
+- Mantiene la **estructura completa de subcarpetas**, incluidas las carpetas vacías.
+- Verificación de integridad mediante **BLAKE3**.
+- Reanudación de trabajos interrumpidos.
+- Estado de reanudación almacenado **fuera del árbol copiado**.
+- Recuperación segura mediante archivos temporales y backups.
+- Detección de destinos que dejan de responder.
+- Pausa y cancelación cooperativas.
+- Los destinos pueden continuar de forma independiente si uno falla.
+- Comprobación previa de espacio libre, permisos y conflictos de rutas.
+- Interfaz clara con:
+  - progreso general,
+  - progreso por destino,
+  - velocidad,
+  - ETA,
+  - archivos completados,
+  - omitidos,
+  - errores,
+  - reintentos,
+  - profundidad de cola.
+- Tema **Sistema / Claro / Oscuro**.
+- Integración con color de acento de Windows.
+- Ejecutable autónomo para **Windows 10/11 x64**.
 
-La aplicación no copia metadata interna dentro de la carpeta seleccionada. El estado operativo vive como hermano del destino en `.disk-duplicator-state/<id>`.
+---
 
-## Seguridad e integridad
+## Cómo funciona
 
-Antes del trabajo se escanea el origen y se valida cada destino. Durante la copia se comprueba que el snapshot del origen no cambie en tamaño/fecha, y el flujo se protege con BLAKE3. Con verificación habilitada se vuelve a comprobar físicamente el contenido antes de considerar el destino completo.
+Cuando seleccionas una carpeta de origen, RepartoCopier replica esa carpeta completa dentro de cada destino.
 
-Los reemplazos se realizan mediante archivo temporal y backup: si el commit falla, se intenta restaurar el archivo original. Si también falla la restauración, el error informa explícitamente dónde permanece el backup.
+Ejemplo:
 
-La pausa se implementa mediante `Condvar`; cancelar despierta a los workers pausados. La cancelación es cooperativa: una llamada de I/O síncrona que ya esté bloqueada dentro de Windows no puede ser interrumpida por `std::fs` hasta que el sistema operativo devuelva el control.
+```text
+Origen:
+D:\Instaladores
 
-La detección de destino atascado usa límites distintos por fase. Las escrituras disponen de margen suficiente para unidades USB/HDD lentas; `sync`, verificación y commit usan un límite más largo para evitar falsos positivos.
+Destinos:
+E:\
+F:\
+G:\
+```
+
+Resultado:
+
+```text
+E:\Instaladores\...
+F:\Instaladores\...
+G:\Instaladores\...
+```
+
+La estructura interna se conserva tal como existe en el origen.
+
+---
+
+## Arquitectura FAN-OUT
+
+RepartoCopier utiliza un único modo de copia: **FAN-OUT**.
+
+El origen se lee una vez y los bloques leídos se comparten entre todos los destinos activos.
+
+Conceptualmente:
+
+```text
+                ┌── Destino 1
+Origen → Reader ├── Destino 2
+                ├── Destino 3
+                └── Destino N
+```
+
+Cada destino posee su propio worker y su propia cola limitada.
+
+Esto permite que un destino más rápido siga avanzando aunque otro sea más lento, sin tener que volver a leer el archivo de origen independientemente para cada destino.
+
+---
+
+## Integridad y seguridad
+
+RepartoCopier utiliza varias capas de protección.
+
+### Archivos temporales
+
+Los archivos se escriben primero como temporales dentro del área de estado del programa.
+
+Solo después de completar correctamente la escritura se realiza el commit hacia el destino final.
+
+### Backup durante reemplazos
+
+Si ya existe un archivo en el destino:
+
+1. el archivo existente se mueve temporalmente a un backup;
+2. el archivo nuevo se coloca en su ubicación final;
+3. si el commit falla, se intenta restaurar el original.
+
+Si también falla la restauración, RepartoCopier conserva el backup y reporta claramente su ubicación.
+
+### Verificación BLAKE3
+
+Durante la lectura del origen se calcula un hash BLAKE3.
+
+El destino puede volver a leerse para verificar que los datos escritos coincidan exactamente con el flujo original.
+
+### Validación final
+
+Al terminar se valida:
+
+- existencia de archivos,
+- tamaño,
+- estructura de directorios,
+- hash cuando corresponde.
+
+Un destino no se considera completo si la validación final falla.
+
+---
 
 ## Reanudación
 
-El estado durable se mantiene en:
+El estado de una copia se almacena fuera de la carpeta duplicada.
+
+Ejemplo:
 
 ```text
-<padre-del-destino>/.disk-duplicator-state/<id>/
-├── completed.jsonl
-├── manifest.b3
-└── tmp/
+E:\Instaladores\
+E:\.disk-duplicator-state\<id>\
 ```
 
-El programa migra formatos anteriores de identificadores de estado y limpia/restaura temporales propios de versiones previas cuando corresponde.
+Dentro del estado pueden existir archivos como:
 
-Un registro de `completed.jsonl` solo se acepta como reanudable si existe prueba BLAKE3 durable y tanto origen como destino siguen coincidiendo con ella.
+```text
+completed.jsonl
+manifest.b3
+tmp\
+```
 
-## Plataforma
+Esto evita contaminar la carpeta copiada con archivos internos del programa.
 
-- Windows 10/11 x64
-- Rust 1.98.1 como toolchain fijado de CI
-- Compatibilidad adicional comprobada con el Rust stable más reciente
+Antes de reutilizar un estado previo, RepartoCopier valida que los archivos sigan coincidiendo con el manifiesto BLAKE3.
 
-## Compilación
+Si el origen o el destino divergen, el archivo vuelve a copiarse.
+
+---
+
+## Pausa y cancelación
+
+La pausa es cooperativa y utiliza primitivas de sincronización del sistema en lugar de espera activa.
+
+Los workers se detienen en puntos seguros entre operaciones de filesystem.
+
+La cancelación despierta también a los workers que estén pausados.
+
+> Una operación de I/O que ya se encuentre bloqueada dentro del sistema operativo debe regresar antes de que el thread pueda observar la cancelación.
+
+---
+
+## Preflight
+
+Antes de iniciar una copia se comprueba:
+
+- que el origen exista;
+- que los destinos sean válidos;
+- que origen y destino no se solapen;
+- que dos destinos no apunten a la misma ubicación;
+- que el destino sea escribible;
+- que no haya enlaces simbólicos peligrosos;
+- que no existan conflictos archivo/carpeta;
+- que exista espacio libre suficiente;
+- que temporales/backups anteriores puedan recuperarse correctamente.
+
+---
+
+## Espacio libre
+
+El cálculo de espacio intenta considerar el pico temporal necesario durante el reemplazo de archivos, no únicamente la suma lógica del contenido.
+
+También mantiene una reserva mínima para evitar llenar completamente el volumen.
+
+---
+
+## Requisitos
+
+### Para ejecutar
+
+- Windows 10/11 x64.
+
+### Para compilar
+
+- Rust estable compatible con el proyecto.
+- Toolchain MSVC para Windows.
+
+El workflow principal utiliza Rust **1.98.1** y además existe una comprobación no bloqueante contra el stable más reciente.
+
+---
+
+## Compilar
 
 ```powershell
-cargo build --locked --release
+cargo build --release
 ```
 
-El ejecutable resultante queda en:
+El ejecutable se genera en:
 
 ```text
 target\release\RepartoCopier.exe
 ```
 
+---
+
 ## Pruebas
 
+Ejecutar:
+
 ```powershell
-cargo test --locked --release
-cargo clippy --locked --all-targets -- -D warnings
+cargo test --release
 ```
 
-El workflow de GitHub Actions ejecuta Clippy, pruebas release y build release en Windows.
+Clippy:
+
+```powershell
+cargo clippy --all-targets -- -D warnings
+```
+
+---
+
+## GitHub Actions
+
+Cada push a `main` ejecuta en Windows:
+
+- Clippy,
+- pruebas release,
+- build release,
+- generación del ejecutable como artifact.
+
+Cuando `Cargo.toml` contiene una versión que todavía no posee release, el workflow puede crear automáticamente la release correspondiente.
+
+---
+
+## Estructura principal del proyecto
+
+```text
+src/
+├── main.rs
+├── app_v2.rs
+├── app_v2/
+├── engine.rs
+├── engine_v3/
+├── paths.rs
+├── preflight.rs
+├── preflight_v2/
+└── config.rs
+```
+
+Los archivos `app_v2.rs`, `engine.rs` y `preflight.rs` actúan como puntos de entrada para sus implementaciones divididas en partes.
+
+---
+
+## Filosofía del proyecto
+
+RepartoCopier prioriza:
+
+1. **integridad de datos**;
+2. **recuperación segura ante fallos**;
+3. **comportamiento predecible**;
+4. **rendimiento realista con múltiples destinos**;
+5. **interfaz simple**.
+
+El objetivo no es solamente copiar rápido, sino poder confiar en el resultado.
+
+---
 
 ## Licencia
 
-MIT
+MIT License
+
+Copyright © 2026 ReinierTutoriales
