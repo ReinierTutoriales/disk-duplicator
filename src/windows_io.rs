@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
@@ -72,6 +73,13 @@ extern "system" {
     ) -> Handle;
     fn CloseHandle(object: Handle) -> i32;
     fn GetLastError() -> u32;
+    fn ReadFile(
+        file: Handle,
+        buffer: *mut c_void,
+        bytes_to_read: u32,
+        bytes_read: *mut u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
     fn WriteFile(
         file: Handle,
         buffer: *const c_void,
@@ -90,6 +98,165 @@ extern "system" {
     fn GetCurrentThreadId() -> u32;
     fn OpenThread(desired_access: u32, inherit_handle: i32, thread_id: u32) -> Handle;
     fn CancelSynchronousIo(thread: Handle) -> i32;
+}
+
+pub(crate) struct PendingRead {
+    buffer: Vec<u8>,
+    overlapped: Box<Overlapped>,
+    start_error: Option<io::Error>,
+}
+
+pub(crate) struct CancelableReader {
+    handle: Handle,
+    event: Handle,
+    offset: u64,
+    pending: bool,
+}
+
+impl CancelableReader {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let wide = wide_path(path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+
+        let event = unsafe { CreateEventW(null(), 0, 0, null()) };
+        if event.is_null() {
+            let err = io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(err);
+        }
+
+        Ok(Self {
+            handle,
+            event,
+            offset: 0,
+            pending: false,
+        })
+    }
+
+    pub(crate) fn start_read(&mut self, mut buffer: Vec<u8>) -> PendingRead {
+        assert!(!self.pending, "solo puede existir una lectura OVERLAPPED pendiente por reader");
+        let mut overlapped = Box::new(unsafe { zeroed::<Overlapped>() });
+        overlapped.position = OverlappedPosition {
+            offset: OverlappedOffset {
+                offset: self.offset as u32,
+                offset_high: (self.offset >> 32) as u32,
+            },
+        };
+        overlapped.event = self.event;
+
+        let request_len = buffer.len().min(u32::MAX as usize) as u32;
+        let started = unsafe {
+            ReadFile(
+                self.handle,
+                buffer.as_mut_ptr().cast(),
+                request_len,
+                null_mut(),
+                &mut *overlapped,
+            )
+        };
+
+        let start_error = if started == 0 {
+            let code = unsafe { GetLastError() };
+            (code != ERROR_IO_PENDING).then(|| io::Error::from_raw_os_error(code as i32))
+        } else {
+            None
+        };
+        self.pending = start_error.is_none();
+
+        PendingRead {
+            buffer,
+            overlapped,
+            start_error,
+        }
+    }
+
+    pub(crate) fn finish_read(
+        &mut self,
+        mut pending: PendingRead,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> (Vec<u8>, io::Result<usize>) {
+        if let Some(err) = pending.start_error.take() {
+            self.pending = false;
+            return (pending.buffer, Err(err));
+        }
+
+        loop {
+            match unsafe { WaitForSingleObject(self.event, CANCEL_POLL_MS) } {
+                WAIT_OBJECT_0 => break,
+                WAIT_TIMEOUT => {
+                    if cancelled() {
+                        unsafe {
+                            CancelIoEx(self.handle, &*pending.overlapped);
+                            WaitForSingleObject(self.event, INFINITE);
+                        }
+                        self.pending = false;
+                        return (pending.buffer, Err(cancelled_error()));
+                    }
+                }
+                _ => {
+                    let err = io::Error::last_os_error();
+                    unsafe {
+                        CancelIoEx(self.handle, &*pending.overlapped);
+                        WaitForSingleObject(self.event, INFINITE);
+                    }
+                    self.pending = false;
+                    return (pending.buffer, Err(err));
+                }
+            }
+        }
+
+        let mut transferred = 0u32;
+        let result = if unsafe {
+            GetOverlappedResult(
+                self.handle,
+                &mut *pending.overlapped,
+                &mut transferred,
+                0,
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            self.offset = self.offset.saturating_add(transferred as u64);
+            Ok(transferred as usize)
+        };
+        self.pending = false;
+        (pending.buffer, result)
+    }
+
+    pub(crate) fn cancel_read(&mut self, pending: PendingRead) -> Vec<u8> {
+        let (buffer, _) = self.finish_read(pending, || true);
+        buffer
+    }
+}
+
+impl Drop for CancelableReader {
+    fn drop(&mut self) {
+        unsafe {
+            if self.pending {
+                CancelIoEx(self.handle, null());
+            }
+            if !self.event.is_null() {
+                CloseHandle(self.event);
+            }
+            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
+                CloseHandle(self.handle);
+            }
+        }
+    }
 }
 
 struct NativeWriter {
@@ -118,8 +285,6 @@ impl NativeWriter {
             return Err(io::Error::last_os_error());
         }
 
-        // Auto-reset: WaitForSingleObject consumes the completion signal, so no ResetEvent syscall
-        // is needed before the next sequential OVERLAPPED request on this writer.
         let event = unsafe { CreateEventW(null(), 0, 0, null()) };
         if event.is_null() {
             let err = io::Error::last_os_error();
@@ -431,6 +596,43 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("disk-duplicator-win-io-{name}-{stamp}.bin"))
+    }
+
+    #[test]
+    fn overlapped_reader_reads_sequential_buffers() {
+        let path = temp_file("reader");
+        fs::write(&path, b"abcdefgh").unwrap();
+        let mut reader = CancelableReader::open(&path).unwrap();
+
+        let first = reader.start_read(vec![0u8; 3]);
+        let (first_buf, first_n) = reader.finish_read(first, || false);
+        assert_eq!(first_n.unwrap(), 3);
+        assert_eq!(&first_buf[..3], b"abc");
+
+        let second = reader.start_read(vec![0u8; 5]);
+        let (second_buf, second_n) = reader.finish_read(second, || false);
+        assert_eq!(second_n.unwrap(), 5);
+        assert_eq!(&second_buf[..5], b"defgh");
+
+        let eof = reader.start_read(vec![0u8; 4]);
+        let (_, eof_n) = reader.finish_read(eof, || false);
+        assert_eq!(eof_n.unwrap(), 0);
+        drop(reader);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn overlapped_reader_honors_pre_cancel() {
+        let path = temp_file("reader-cancel");
+        fs::write(&path, vec![7u8; 1024 * 1024]).unwrap();
+        let mut reader = CancelableReader::open(&path).unwrap();
+        let pending = reader.start_read(vec![0u8; 1024 * 1024]);
+        let (_, result) = reader.finish_read(pending, || true);
+        if let Err(err) = result {
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        }
+        drop(reader);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
