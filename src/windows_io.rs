@@ -280,7 +280,7 @@ impl CancelableReader {
                             std::mem::take(&mut pending.buffer),
                             Err(io::Error::new(
                                 io::ErrorKind::TimedOut,
-                                "el origen no respondió durante 180 segundos",
+                                "la lectura no respondió durante 180 segundos",
                             )),
                         );
                     }
@@ -654,6 +654,32 @@ pub(crate) fn sync_file_cancelable(
     })
 }
 
+pub(crate) fn hash_file_cancelable(
+    path: &Path,
+    buffer_size: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> io::Result<blake3::Hash> {
+    let mut reader = CancelableReader::open(path)?;
+    let mut buffer = vec![0u8; buffer_size.max(1)];
+    let mut hasher = blake3::Hasher::new();
+
+    loop {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
+        let pending = reader.start_read(buffer);
+        let (next_buffer, result) = reader.finish_read(pending, || cancelled());
+        buffer = next_buffer;
+        let n = result?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    Ok(hasher.finalize())
+}
+
 fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelado")
 }
@@ -746,6 +772,24 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         }
         drop(reader);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancellable_hash_matches_blake3() {
+        let path = temp_file("hash");
+        fs::write(&path, b"hash me safely").unwrap();
+        let actual = hash_file_cancelable(&path, 4, || false).unwrap();
+        assert_eq!(actual, blake3::hash(b"hash me safely"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancellable_hash_honors_pre_cancel() {
+        let path = temp_file("hash-cancel");
+        fs::write(&path, b"data").unwrap();
+        let err = hash_file_cancelable(&path, 4, || true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         let _ = fs::remove_file(path);
     }
 
