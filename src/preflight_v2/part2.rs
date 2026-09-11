@@ -208,6 +208,10 @@ fn from_hex32(s: &str) -> Option<[u8; 32]> {
 }
 
 fn manifest_key(path: &Path) -> String {
+    persisted_path_key(path)
+}
+
+fn legacy_manifest_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -244,11 +248,14 @@ fn compact_manifest(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
     }
 
     let hashes = load_manifest_hashes(dest);
-    let allowed: HashSet<String> = files.iter().map(|info| manifest_key(&info.rel)).collect();
-    let mut entries: Vec<(String, [u8; 32])> = hashes
-        .into_iter()
-        .filter(|(name, _)| allowed.contains(name))
-        .collect();
+    let mut entries = Vec::new();
+    for info in files {
+        let key = manifest_key(&info.rel);
+        let old_key = legacy_manifest_key(&info.rel);
+        if let Some(hash) = hashes.get(&key).or_else(|| hashes.get(&old_key)) {
+            entries.push((key, *hash));
+        }
+    }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let tmp = path.with_extension("b3.compact");
@@ -264,7 +271,7 @@ fn compact_manifest(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
     let mut f = File::create(&tmp)
         .map_err(|e| format!("No se pudo crear {}: {e}", tmp.display()))?;
     for (name, hash) in entries {
-        let hex = blake3::Hash::from(hash).to_hex();
+        let hex = blake3::Hash::from_bytes(hash).to_hex();
         writeln!(f, "{hex}  {name}")
             .map_err(|e| format!("No se pudo compactar manifest: {e}"))?;
     }
@@ -337,14 +344,19 @@ fn validate_destination_result_with_hashes(
                 if dst_hash.as_bytes() != expected {
                     return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
                 }
-            } else if let Some(expected) = manifest_hashes.get(&manifest_key(&info.rel)) {
-                if dst_hash.as_bytes() != expected {
-                    return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
-                }
             } else {
-                let src = source.join(&info.rel);
-                if hash_path(&src)? != dst_hash {
-                    return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                let manifest_expected = manifest_hashes
+                    .get(&manifest_key(&info.rel))
+                    .or_else(|| manifest_hashes.get(&legacy_manifest_key(&info.rel)));
+                if let Some(expected) = manifest_expected {
+                    if dst_hash.as_bytes() != expected {
+                        return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                    }
+                } else {
+                    let src = source.join(&info.rel);
+                    if hash_path(&src)? != dst_hash {
+                        return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
+                    }
                 }
             }
         }
