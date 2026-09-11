@@ -194,6 +194,27 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn previous_32_hex_backup_is_restored_after_id_upgrade() {
+        let root = temp_dir("previous-backup-recovery");
+        let dest = root.join("DstWithUPPERCase");
+        fs::create_dir_all(&dest).unwrap();
+        prepare_state_dir(&dest).unwrap();
+        let info = FileInfo { rel: PathBuf::from("FileWithUPPERCase.bin"), size: 3, mtime_ns: 0 };
+        let dst = dest.join(&info.rel);
+        let backup = previous_backup_path(&dest, &dst);
+        let current_backup = backup_path(&dest, &dst);
+        assert_ne!(backup, current_backup, "la prueba necesita IDs transitorios distintos");
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, b"old").unwrap();
+
+        cleanup_owned_stale_files(&dest, std::slice::from_ref(&info)).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"old");
+        assert!(!backup.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn final_hash_detects_source_change_with_preserved_metadata() {
         let root = temp_dir("source-content-change");
