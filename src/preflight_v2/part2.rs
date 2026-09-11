@@ -204,11 +204,6 @@ fn hash_path_with_buffer(path: &Path, buf: &mut [u8]) -> Result<blake3::Hash, St
     Ok(h.finalize())
 }
 
-fn hash_path(path: &Path) -> Result<blake3::Hash, String> {
-    let mut buf = vec![0u8; VERIFY_BUF];
-    hash_path_with_buffer(path, &mut buf)
-}
-
 fn final_source_hashes(
     source: &Path,
     files: &[PlannedFile],
