@@ -335,7 +335,6 @@ mod tests {
             files_total: std::sync::atomic::AtomicU64::new(0),
             bytes_total: std::sync::atomic::AtomicU64::new(0),
             buffers_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            max_buffers: 1,
             dests: std::sync::Mutex::new(vec![crate::engine_impl::DestProgress {
                 label: dest.display().to_string(),
                 written: 0,
