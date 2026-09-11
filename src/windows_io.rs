@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
@@ -106,13 +106,36 @@ pub(crate) struct PendingRead {
     overlapped: Box<Overlapped>,
     start_error: Option<io::Error>,
     immediate_eof: bool,
+    handle: Handle,
+    event: Handle,
+    active: bool,
+    pending_flag: Rc<Cell<bool>>,
+}
+
+impl PendingRead {
+    fn mark_finished(&mut self) {
+        self.active = false;
+        self.pending_flag.set(false);
+    }
+}
+
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                CancelIoEx(self.handle, &*self.overlapped);
+                WaitForSingleObject(self.event, INFINITE);
+            }
+        }
+        self.pending_flag.set(false);
+    }
 }
 
 pub(crate) struct CancelableReader {
     handle: Handle,
     event: Handle,
     offset: u64,
-    pending: bool,
+    pending: Rc<Cell<bool>>,
 }
 
 impl CancelableReader {
@@ -144,12 +167,12 @@ impl CancelableReader {
             handle,
             event,
             offset: 0,
-            pending: false,
+            pending: Rc::new(Cell::new(false)),
         })
     }
 
     pub(crate) fn start_read(&mut self, mut buffer: Vec<u8>) -> PendingRead {
-        assert!(!self.pending, "solo puede existir una lectura OVERLAPPED pendiente por reader");
+        assert!(!self.pending.get(), "solo puede existir una lectura OVERLAPPED pendiente por reader");
         let mut overlapped = Box::new(unsafe { zeroed::<Overlapped>() });
         overlapped.position = OverlappedPosition {
             offset: OverlappedOffset {
@@ -182,13 +205,18 @@ impl CancelableReader {
         } else {
             None
         };
-        self.pending = start_error.is_none() && !immediate_eof;
+        let active = start_error.is_none() && !immediate_eof;
+        self.pending.set(active);
 
         PendingRead {
             buffer,
             overlapped,
             start_error,
             immediate_eof,
+            handle: self.handle,
+            event: self.event,
+            active,
+            pending_flag: Rc::clone(&self.pending),
         }
     }
 
@@ -198,12 +226,12 @@ impl CancelableReader {
         mut cancelled: impl FnMut() -> bool,
     ) -> (Vec<u8>, io::Result<usize>) {
         if pending.immediate_eof {
-            self.pending = false;
-            return (pending.buffer, Ok(0));
+            pending.mark_finished();
+            return (std::mem::take(&mut pending.buffer), Ok(0));
         }
         if let Some(err) = pending.start_error.take() {
-            self.pending = false;
-            return (pending.buffer, Err(err));
+            pending.mark_finished();
+            return (std::mem::take(&mut pending.buffer), Err(err));
         }
 
         loop {
@@ -215,8 +243,11 @@ impl CancelableReader {
                             CancelIoEx(self.handle, &*pending.overlapped);
                             WaitForSingleObject(self.event, INFINITE);
                         }
-                        self.pending = false;
-                        return (pending.buffer, Err(cancelled_error()));
+                        pending.mark_finished();
+                        return (
+                            std::mem::take(&mut pending.buffer),
+                            Err(cancelled_error()),
+                        );
                     }
                 }
                 _ => {
@@ -225,8 +256,8 @@ impl CancelableReader {
                         CancelIoEx(self.handle, &*pending.overlapped);
                         WaitForSingleObject(self.event, INFINITE);
                     }
-                    self.pending = false;
-                    return (pending.buffer, Err(err));
+                    pending.mark_finished();
+                    return (std::mem::take(&mut pending.buffer), Err(err));
                 }
             }
         }
@@ -251,8 +282,8 @@ impl CancelableReader {
             self.offset = self.offset.saturating_add(transferred as u64);
             Ok(transferred as usize)
         };
-        self.pending = false;
-        (pending.buffer, result)
+        pending.mark_finished();
+        (std::mem::take(&mut pending.buffer), result)
     }
 
     pub(crate) fn cancel_read(&mut self, pending: PendingRead) -> Vec<u8> {
@@ -264,7 +295,7 @@ impl CancelableReader {
 impl Drop for CancelableReader {
     fn drop(&mut self) {
         unsafe {
-            if self.pending {
+            if self.pending.get() {
                 CancelIoEx(self.handle, null());
             }
             if !self.event.is_null() {
@@ -635,6 +666,21 @@ mod tests {
         let eof = reader.start_read(vec![0u8; 4]);
         let (_, eof_n) = reader.finish_read(eof, || false);
         assert_eq!(eof_n.unwrap(), 0);
+        drop(reader);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn dropping_pending_reader_cancels_before_buffer_release() {
+        let path = temp_file("reader-drop");
+        fs::write(&path, vec![3u8; 1024 * 1024]).unwrap();
+        let mut reader = CancelableReader::open(&path).unwrap();
+        let pending = reader.start_read(vec![0u8; 1024 * 1024]);
+        drop(pending);
+        assert!(!reader.pending.get());
+        let next = reader.start_read(vec![0u8; 16]);
+        let (_, result) = reader.finish_read(next, || false);
+        assert!(result.is_ok());
         drop(reader);
         let _ = fs::remove_file(path);
     }
