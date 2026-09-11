@@ -231,31 +231,63 @@ fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Opti
 }
 
 fn hash_path_with_buffer(path: &Path, buf: &mut [u8]) -> Result<blake3::Hash, String> {
-    let mut f =
-        File::open(path).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
-    let mut h = blake3::Hasher::new();
-    loop {
-        let n = f
-            .read(buf)
-            .map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
+    hash_path_with_buffer_for_job(path, buf, None)
+}
+
+fn hash_path_with_buffer_for_job(
+    path: &Path,
+    buf: &mut [u8],
+    state: Option<&JobState>,
+) -> Result<blake3::Hash, String> {
+    #[cfg(windows)]
+    {
+        return crate::windows_io::hash_file_cancelable(path, buf.len(), || {
+            state.is_some_and(|s| s.cancel.load(Ordering::Acquire))
+        })
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                "Cancelado".to_owned()
+            } else {
+                format!("No se pudo verificar {}: {e}", path.display())
+            }
+        });
     }
-    Ok(h.finalize())
+
+    #[cfg(not(windows))]
+    {
+        let mut f =
+            File::open(path).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
+        let mut h = blake3::Hasher::new();
+        loop {
+            if state.is_some_and(|s| s.cancel.load(Ordering::Acquire)) {
+                return Err("Cancelado".to_owned());
+            }
+            let n = f
+                .read(buf)
+                .map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        Ok(h.finalize())
+    }
 }
 
 fn final_source_hashes(
     source: &Path,
     files: &[PlannedFile],
     reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+    state: &JobState,
 ) -> Result<std::collections::HashMap<PathBuf, [u8; 32]>, String> {
     let mut final_hashes = std::collections::HashMap::with_capacity(files.len());
     let mut buf = vec![0u8; VERIFY_BUF];
     for info in files {
+        if state.cancel.load(Ordering::Acquire) {
+            return Err("Cancelado".to_owned());
+        }
         let path = source.join(&info.rel);
-        let actual = hash_path_with_buffer(&path, &mut buf)?;
+        let actual = hash_path_with_buffer_for_job(&path, &mut buf, Some(state))?;
         if let Some(read_hash) = reader_hashes.get(&info.rel) {
             if actual.as_bytes() != read_hash {
                 return Err(format!(
@@ -385,8 +417,12 @@ fn validate_destination_result_with_hashes(
     dirs: &[PathBuf],
     verify: bool,
     expected_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+    state: Option<&JobState>,
 ) -> Result<(), String> {
     for rel in dirs {
+        if state.is_some_and(|s| s.cancel.load(Ordering::Acquire)) {
+            return Err("Cancelado".to_owned());
+        }
         let path = dest.join(rel);
         let meta = fs::symlink_metadata(&path)
             .map_err(|_| format!("Falta la carpeta {}", path.display()))?;
@@ -404,6 +440,9 @@ fn validate_destination_result_with_hashes(
 
     let mut total_bytes = 0u64;
     for info in files {
+        if state.is_some_and(|s| s.cancel.load(Ordering::Acquire)) {
+            return Err("Cancelado".to_owned());
+        }
         let dst = dest.join(&info.rel);
         let meta = fs::symlink_metadata(&dst)
             .map_err(|_| format!("Falta el archivo {}", dst.display()))?;
@@ -422,7 +461,7 @@ fn validate_destination_result_with_hashes(
 
         if verify {
             let buf = verify_buf.as_mut().expect("verify buffer");
-            let dst_hash = hash_path_with_buffer(&dst, buf)?;
+            let dst_hash = hash_path_with_buffer_for_job(&dst, buf, state)?;
             if let Some(expected) = expected_hashes.get(&info.rel) {
                 if dst_hash.as_bytes() != expected {
                     return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
@@ -437,7 +476,7 @@ fn validate_destination_result_with_hashes(
                     }
                 } else {
                     let src = source.join(&info.rel);
-                    if hash_path_with_buffer(&src, buf)? != dst_hash {
+                    if hash_path_with_buffer_for_job(&src, buf, state)? != dst_hash {
                         return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
                     }
                 }
@@ -473,5 +512,6 @@ fn validate_destination_result(
         dirs,
         verify,
         &std::collections::HashMap::new(),
+        None,
     )
 }
