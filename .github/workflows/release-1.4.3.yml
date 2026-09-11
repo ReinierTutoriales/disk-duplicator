@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   release:
@@ -28,7 +27,7 @@ jobs:
         with:
           cache-on-failure: false
 
-      - name: Prepare version and release metadata
+      - name: Prepare version metadata
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -49,15 +48,6 @@ jobs:
           }
           $lock = $rootRegex.Replace($lock, { param($m) $m.Groups[1].Value + '1.4.3' + $m.Groups[2].Value }, 1)
           Set-Content Cargo.lock -Value $lock -Encoding utf8 -NoNewline
-
-          $workflow = Get-Content .github/workflows/build.yml -Raw
-          $oldNote = '- Verificación opcional de integridad del contenido copiado.'
-          $newNote = '- Verificación BLAKE3 de integridad del contenido copiado y validación final endurecida.'
-          if (-not $workflow.Contains($oldNote)) {
-            throw 'No se encontro la nota antigua de verificacion en build.yml'
-          }
-          $workflow = $workflow.Replace($oldNote, $newNote)
-          Set-Content .github/workflows/build.yml -Value $workflow -Encoding utf8 -NoNewline
 
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -84,20 +74,15 @@ jobs:
           cargo +stable test --locked --release --verbose
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Commit verified 1.4.3 metadata to main
+      - name: Commit verified 1.4.3 version to main
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           git diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
           git config user.name 'github-actions[bot]'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          git add Cargo.toml Cargo.lock .github/workflows/build.yml
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git add Cargo.toml Cargo.lock
           git commit -m 'release: RepartoCopier 1.4.3'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git push origin HEAD:main
