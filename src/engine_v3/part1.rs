@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BLOCK: usize = 16 * 1024 * 1024;
-const RESERVED_RAM: usize = 2048 * 1024 * 1024;
+const RESERVED_RAM: usize = 512 * 1024 * 1024;
 const MIN_QUEUE: usize = 2;
 const MAX_QUEUE: usize = 16;
 const MAX_FREE_BUFFERS: usize = 16;
