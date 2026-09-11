@@ -127,13 +127,14 @@ pub fn start_job(
     dests: Vec<PathBuf>,
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-    let preflight = run_preflight(&source, &dests, opts)?;
+    let (preflight, verified_skips) = run_preflight(&source, &dests, opts)?;
     let (state, handles) = engine_impl::start_job_with_files_preverified(
         preflight.source.clone(),
         preflight.dests.clone(),
         Arc::clone(&preflight.files),
         Arc::clone(&preflight.dirs),
         opts,
+        verified_skips,
     )?;
     let supervisor = supervise_job(
         preflight.source,
