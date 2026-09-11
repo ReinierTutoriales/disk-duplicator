@@ -11,7 +11,7 @@ use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -30,6 +30,7 @@ const WAIT_TIMEOUT: u32 = 258;
 const INFINITE: u32 = 0xffff_ffff;
 const THREAD_TERMINATE: u32 = 0x0001;
 const CANCEL_POLL_MS: u32 = 40;
+const SOURCE_READ_STALL: Duration = Duration::from_secs(180);
 
 type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
@@ -101,15 +102,33 @@ extern "system" {
     fn CancelSynchronousIo(thread: Handle) -> i32;
 }
 
+struct ReaderHandles {
+    handle: Handle,
+    event: Handle,
+}
+
+impl Drop for ReaderHandles {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.event.is_null() {
+                CloseHandle(self.event);
+            }
+            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
 pub(crate) struct PendingRead {
     buffer: Vec<u8>,
     overlapped: Box<Overlapped>,
     start_error: Option<io::Error>,
     immediate_eof: bool,
-    handle: Handle,
-    event: Handle,
+    handles: Rc<ReaderHandles>,
     active: bool,
     pending_flag: Rc<Cell<bool>>,
+    started_at: Instant,
 }
 
 impl PendingRead {
@@ -123,8 +142,8 @@ impl Drop for PendingRead {
     fn drop(&mut self) {
         if self.active {
             unsafe {
-                CancelIoEx(self.handle, &*self.overlapped);
-                WaitForSingleObject(self.event, INFINITE);
+                CancelIoEx(self.handles.handle, &*self.overlapped);
+                WaitForSingleObject(self.handles.event, INFINITE);
             }
         }
         self.pending_flag.set(false);
@@ -132,8 +151,7 @@ impl Drop for PendingRead {
 }
 
 pub(crate) struct CancelableReader {
-    handle: Handle,
-    event: Handle,
+    handles: Rc<ReaderHandles>,
     offset: u64,
     pending: Rc<Cell<bool>>,
 }
@@ -164,15 +182,17 @@ impl CancelableReader {
         }
 
         Ok(Self {
-            handle,
-            event,
+            handles: Rc::new(ReaderHandles { handle, event }),
             offset: 0,
             pending: Rc::new(Cell::new(false)),
         })
     }
 
     pub(crate) fn start_read(&mut self, mut buffer: Vec<u8>) -> PendingRead {
-        assert!(!self.pending.get(), "solo puede existir una lectura OVERLAPPED pendiente por reader");
+        assert!(
+            !self.pending.get(),
+            "solo puede existir una lectura OVERLAPPED pendiente por reader"
+        );
         let mut overlapped = Box::new(unsafe { zeroed::<Overlapped>() });
         overlapped.position = OverlappedPosition {
             offset: OverlappedOffset {
@@ -180,12 +200,13 @@ impl CancelableReader {
                 offset_high: (self.offset >> 32) as u32,
             },
         };
-        overlapped.event = self.event;
+        overlapped.event = self.handles.event;
 
         let request_len = buffer.len().min(u32::MAX as usize) as u32;
+        let started_at = Instant::now();
         let started = unsafe {
             ReadFile(
-                self.handle,
+                self.handles.handle,
                 buffer.as_mut_ptr().cast(),
                 request_len,
                 null_mut(),
@@ -213,10 +234,10 @@ impl CancelableReader {
             overlapped,
             start_error,
             immediate_eof,
-            handle: self.handle,
-            event: self.event,
+            handles: Rc::clone(&self.handles),
             active,
             pending_flag: Rc::clone(&self.pending),
+            started_at,
         }
     }
 
@@ -235,13 +256,13 @@ impl CancelableReader {
         }
 
         loop {
-            match unsafe { WaitForSingleObject(self.event, CANCEL_POLL_MS) } {
+            match unsafe { WaitForSingleObject(pending.handles.event, CANCEL_POLL_MS) } {
                 WAIT_OBJECT_0 => break,
                 WAIT_TIMEOUT => {
                     if cancelled() {
                         unsafe {
-                            CancelIoEx(self.handle, &*pending.overlapped);
-                            WaitForSingleObject(self.event, INFINITE);
+                            CancelIoEx(pending.handles.handle, &*pending.overlapped);
+                            WaitForSingleObject(pending.handles.event, INFINITE);
                         }
                         pending.mark_finished();
                         return (
@@ -249,12 +270,26 @@ impl CancelableReader {
                             Err(cancelled_error()),
                         );
                     }
+                    if pending.started_at.elapsed() >= SOURCE_READ_STALL {
+                        unsafe {
+                            CancelIoEx(pending.handles.handle, &*pending.overlapped);
+                            WaitForSingleObject(pending.handles.event, INFINITE);
+                        }
+                        pending.mark_finished();
+                        return (
+                            std::mem::take(&mut pending.buffer),
+                            Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "el origen no respondió durante 180 segundos",
+                            )),
+                        );
+                    }
                 }
                 _ => {
                     let err = io::Error::last_os_error();
                     unsafe {
-                        CancelIoEx(self.handle, &*pending.overlapped);
-                        WaitForSingleObject(self.event, INFINITE);
+                        CancelIoEx(pending.handles.handle, &*pending.overlapped);
+                        WaitForSingleObject(pending.handles.event, INFINITE);
                     }
                     pending.mark_finished();
                     return (std::mem::take(&mut pending.buffer), Err(err));
@@ -265,7 +300,7 @@ impl CancelableReader {
         let mut transferred = 0u32;
         let result = if unsafe {
             GetOverlappedResult(
-                self.handle,
+                pending.handles.handle,
                 &mut *pending.overlapped,
                 &mut transferred,
                 0,
@@ -294,15 +329,9 @@ impl CancelableReader {
 
 impl Drop for CancelableReader {
     fn drop(&mut self) {
-        unsafe {
-            if self.pending.get() {
-                CancelIoEx(self.handle, null());
-            }
-            if !self.event.is_null() {
-                CloseHandle(self.event);
-            }
-            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
-                CloseHandle(self.handle);
+        if self.pending.get() {
+            unsafe {
+                CancelIoEx(self.handles.handle, null());
             }
         }
     }
@@ -408,7 +437,8 @@ impl NativeWriter {
             }
 
             let mut transferred = 0u32;
-            if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) } == 0 {
+            if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) } == 0
+            {
                 return Err(io::Error::last_os_error());
             }
             if transferred == 0 {
@@ -527,7 +557,9 @@ impl SyncWorker {
             }
             Err(_) => {
                 let _ = helper.join();
-                return Err(io::Error::other("el worker de sincronización terminó antes de iniciar"));
+                return Err(io::Error::other(
+                    "el worker de sincronización terminó antes de iniciar",
+                ));
             }
         };
 
@@ -539,11 +571,7 @@ impl SyncWorker {
         })
     }
 
-    fn sync(
-        &mut self,
-        file: File,
-        mut cancelled: impl FnMut() -> bool,
-    ) -> io::Result<()> {
+    fn sync(&mut self, file: File, mut cancelled: impl FnMut() -> bool) -> io::Result<()> {
         self.command_tx
             .send(SyncCommand::Sync(file))
             .map_err(|_| io::Error::other("el worker de sincronización no está disponible"))?;
@@ -551,7 +579,10 @@ impl SyncWorker {
         let mut cancel_requested = false;
         let mut cancel_error = None;
         let result = loop {
-            match self.done_rx.recv_timeout(Duration::from_millis(CANCEL_POLL_MS as u64)) {
+            match self
+                .done_rx
+                .recv_timeout(Duration::from_millis(CANCEL_POLL_MS as u64))
+            {
                 Ok(result) => break result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if cancelled() {
@@ -565,7 +596,9 @@ impl SyncWorker {
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    break Err(io::Error::other("el worker de sincronización terminó sin resultado"));
+                    break Err(io::Error::other(
+                        "el worker de sincronización terminó sin resultado",
+                    ));
                 }
             }
         };
@@ -686,6 +719,23 @@ mod tests {
     }
 
     #[test]
+    fn dropping_reader_before_pending_keeps_native_handles_alive() {
+        let path = temp_file("reader-owner-drop");
+        fs::write(&path, vec![9u8; 1024 * 1024]).unwrap();
+        let mut reader = CancelableReader::open(&path).unwrap();
+        let pending = reader.start_read(vec![0u8; 1024 * 1024]);
+        assert!(Rc::strong_count(&reader.handles) >= 2);
+        drop(reader);
+        drop(pending);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn source_read_watchdog_is_deliberately_conservative() {
+        assert_eq!(SOURCE_READ_STALL, Duration::from_secs(180));
+    }
+
+    #[test]
     fn overlapped_reader_honors_pre_cancel() {
         let path = temp_file("reader-cancel");
         fs::write(&path, vec![7u8; 1024 * 1024]).unwrap();
@@ -721,7 +771,9 @@ mod tests {
         let _owner = File::create(&path).unwrap();
         let mut first = CancelableFile::reopen_at(&path, 0).unwrap();
         let first_inner = Rc::clone(&first.inner);
-        let err = first.write_all_cancelable(b"data", || true).unwrap_err();
+        let err = first
+            .write_all_cancelable(b"data", || true)
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
 
         let second = CancelableFile::reopen_at(&path, 0).unwrap();
