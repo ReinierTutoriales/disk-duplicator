@@ -1,8 +1,8 @@
 use crate::engine_impl::{self, CopyOpts, DestPhase, FileInfo, JobState};
 use crate::paths::{
-    backup_path, legacy_backup_path, legacy_part_path, manifest_path, part_path, prepare_state_dir,
-    previous_backup_path, previous_part_path, state_dir_for, state_path, state_rewrite_backup_path,
-    state_rewrite_tmp_path,
+    backup_path, legacy_backup_path, legacy_part_path, manifest_path, part_path, persisted_path_key,
+    prepare_state_dir, previous_backup_path, previous_part_path, state_dir_for, state_path,
+    state_rewrite_backup_path, state_rewrite_tmp_path,
 };
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
@@ -91,6 +91,10 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
 }
 
 fn state_key(info: &PlannedFile) -> String {
+    format!("{}|{}|{}", persisted_path_key(&info.rel), info.size, info.mtime_ns)
+}
+
+fn legacy_state_key(info: &PlannedFile) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let rel = info.rel.to_string_lossy();
     let mut key = String::with_capacity(rel.len() * 2 + 48);
@@ -224,16 +228,18 @@ fn normalize_completed_state(
     let mut valid = HashSet::new();
     for info in files {
         let key = state_key(info);
-        if !loaded.contains(&key) { continue; }
+        let old_key = legacy_state_key(info);
+        if !loaded.contains(&key) && !loaded.contains(&old_key) { continue; }
 
         let src = source.join(&info.rel);
         let dst = dest.join(&info.rel);
-        let physically_valid = manifest_hashes
+        let expected = manifest_hashes
             .get(&manifest_key(&info.rel))
-            .is_some_and(|expected| {
-                matches_manifest_hash(&src, info.size, expected)
-                    && matches_manifest_hash(&dst, info.size, expected)
-            });
+            .or_else(|| manifest_hashes.get(&legacy_manifest_key(&info.rel)));
+        let physically_valid = expected.is_some_and(|expected| {
+            matches_manifest_hash(&src, info.size, expected)
+                && matches_manifest_hash(&dst, info.size, expected)
+        });
 
         if physically_valid {
             valid.insert(key);
