@@ -4,7 +4,7 @@ use crate::paths::{
     prepare_state_dir, previous_backup_path, previous_part_path, state_dir_for, state_path,
     state_rewrite_backup_path, state_rewrite_tmp_path,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -21,6 +21,7 @@ const RESERVE_PERCENT: u64 = 1;
 const VERIFY_BUF: usize = 4 * 1024 * 1024;
 
 type PlannedFile = FileInfo;
+type SourceHashCache = HashMap<PathBuf, [u8; 32]>;
 
 #[derive(Clone, Debug)]
 struct PreflightResult {
@@ -210,15 +211,36 @@ fn same_enough(src: &Path, dst: &Path) -> bool {
     }
 }
 
-fn matches_manifest_hash(path: &Path, size: u64, expected: &[u8; 32]) -> bool {
+fn cached_source_hash(
+    source: &Path,
+    info: &PlannedFile,
+    cache: &mut SourceHashCache,
+    buf: &mut [u8],
+) -> Result<[u8; 32], String> {
+    if let Some(hash) = cache.get(&info.rel) {
+        return Ok(*hash);
+    }
+    let hash = *hash_path_with_buffer(&source.join(&info.rel), buf)?.as_bytes();
+    cache.insert(info.rel.clone(), hash);
+    Ok(hash)
+}
+
+fn matches_manifest_hash_with_buffer(
+    path: &Path,
+    size: u64,
+    expected: &[u8; 32],
+    buf: &mut [u8],
+) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == size)
-        && hash_path(path).is_ok_and(|actual| actual.as_bytes() == expected)
+        && hash_path_with_buffer(path, buf).is_ok_and(|actual| actual.as_bytes() == expected)
 }
 
 fn normalize_completed_state(
     source: &Path,
     dest: &Path,
     files: &[PlannedFile],
+    source_hashes: &mut SourceHashCache,
+    verify_buf: &mut [u8],
 ) -> Result<HashSet<String>, String> {
     recover_completed_rewrite(dest)?;
     let loaded = load_completed(dest);
@@ -231,15 +253,18 @@ fn normalize_completed_state(
         let old_key = legacy_state_key(info);
         if !loaded.contains(&key) && !loaded.contains(&old_key) { continue; }
 
-        let src = source.join(&info.rel);
         let dst = dest.join(&info.rel);
         let expected = manifest_hashes
             .get(&manifest_key(&info.rel))
             .or_else(|| manifest_hashes.get(&legacy_manifest_key(&info.rel)));
-        let physically_valid = expected.is_some_and(|expected| {
-            matches_manifest_hash(&src, info.size, expected)
-                && matches_manifest_hash(&dst, info.size, expected)
-        });
+
+        let physically_valid = if let Some(expected) = expected {
+            let source_hash = cached_source_hash(source, info, source_hashes, verify_buf)?;
+            source_hash == *expected
+                && matches_manifest_hash_with_buffer(&dst, info.size, expected, verify_buf)
+        } else {
+            false
+        };
 
         if physically_valid {
             valid.insert(key);
