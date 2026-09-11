@@ -209,6 +209,37 @@ fn write_buffer_retrying(
     Err(last_err)
 }
 
+fn sync_temp_file(
+    file: &File,
+    state: &JobState,
+    control: &DestControl,
+    rel: &str,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let clone = file
+            .try_clone()
+            .map_err(|e| format!("sync clone {rel}: {e}"))?;
+        crate::windows_io::sync_file_cancelable(clone, || {
+            state.cancel.load(Ordering::Acquire) || !control.alive.load(Ordering::Acquire)
+        })
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted
+                && state.cancel.load(Ordering::Acquire)
+            {
+                "Cancelado".to_owned()
+            } else {
+                format!("sync {rel}: {e}")
+            }
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        file.sync_data().map_err(|e| format!("sync {rel}: {e}"))
+    }
+}
+
 fn fanout_worker(
     dest: PathBuf,
     rx: mpsc::Receiver<FanoutItem>,
@@ -389,11 +420,11 @@ fn fanout_worker(
                     break;
                 }
 
-                if let Some(file) = cur.file.as_mut() {
+                if let Some(file) = cur.file.as_ref() {
                     let rel = cur.info.rel.display().to_string();
                     control.enter_operation(OperationPhase::Sync);
                     let sync_result = retry_io(&state, slot, || {
-                        file.sync_data().map_err(|e| format!("sync {rel}: {e}"))
+                        sync_temp_file(file, &state, &control, &rel)
                     });
                     control.enter_operation(OperationPhase::Write);
                     if let Err(e) = sync_result {
