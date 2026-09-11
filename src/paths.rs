@@ -35,8 +35,6 @@ fn native_path_bytes(path: &Path) -> Vec<u8> {
     }
 }
 
-// Compatibility with the immediately previous 32-hex format, which hashed the
-// exact native Windows path bytes before IDs became case-insensitive.
 fn previous_native_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
@@ -107,9 +105,6 @@ pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
         return Ok(current);
     }
 
-    // Prefer the immediately previous 32-hex representation before falling
-    // back to the older 16-hex representation. This preserves resume data
-    // across the case-normalization upgrade.
     for previous in [previous_state_dir_for(dest), legacy_state_dir_for(dest)] {
         if previous == current || !previous.exists() {
             continue;
@@ -184,6 +179,7 @@ pub(crate) fn legacy_backup_path(dest_root: &Path, dst: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn hardened_ids_use_128_bits() {
@@ -210,5 +206,30 @@ mod tests {
         assert_ne!(previous_transient_id(upper), previous_transient_id(lower));
         assert_eq!(state_id(upper), state_id(lower));
         assert_eq!(transient_id(upper), transient_id(lower));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepare_state_dir_migrates_previous_32_hex_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("disk-duplicator-path-migration-{stamp}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("CopyWithUPPERCase");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let previous = previous_state_dir_for(&dest);
+        let current = state_dir_for(&dest);
+        assert_ne!(previous, current, "la prueba necesita que ambos formatos difieran");
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(previous.join("completed.jsonl"), b"resume-data").unwrap();
+
+        let prepared = prepare_state_dir(&dest).unwrap();
+        assert_eq!(prepared, current);
+        assert!(!previous.exists());
+        assert_eq!(std::fs::read(current.join("completed.jsonl")).unwrap(), b"resume-data");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
