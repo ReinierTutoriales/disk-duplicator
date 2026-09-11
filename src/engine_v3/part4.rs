@@ -190,6 +190,43 @@ mod tests {
     }
 
     #[test]
+    fn skip_same_does_not_trust_size_and_mtime_without_content_match() {
+        let root = temp_dir("skip-same-hash");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let src_path = source.join("a.bin");
+        let dst_path = dest.join("a.bin");
+        fs::write(&src_path, b"abc").unwrap();
+        fs::write(&dst_path, b"xyz").unwrap();
+        let src_mtime = fs::metadata(&src_path).unwrap().modified().unwrap();
+        File::options().write(true).open(&dst_path).unwrap().set_modified(src_mtime).unwrap();
+        let meta = fs::metadata(&src_path).unwrap();
+        let files = Arc::new(vec![FileInfo {
+            rel: PathBuf::from("a.bin"),
+            size: meta.len(),
+            mtime_ns: metadata_mtime_ns(&meta),
+        }]);
+        let opts = CopyOpts { verify: true, skip_same: true, keep_going: true };
+        let (state, handles) = start_job_with_files(
+            source,
+            vec![dest.clone()],
+            files,
+            Arc::new(Vec::new()),
+            opts,
+        ).unwrap();
+        for handle in handles { handle.join().unwrap(); }
+
+        assert_eq!(fs::read(&dst_path).unwrap(), b"abc");
+        let snap = state.snapshot();
+        assert_eq!(snap[0].files_skip, 0);
+        assert_eq!(snap[0].files_done, 1);
+        assert_eq!(snap[0].phase, DestPhase::Done);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn physical_part_size_is_checked_before_commit() {
         let root = temp_dir("part-size");
         let part = root.join("file.part");
