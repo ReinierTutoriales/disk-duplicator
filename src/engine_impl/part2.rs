@@ -342,7 +342,9 @@ fn fanout_worker(
                         );
                         match result {
                             Ok(()) => {
-                                cur.hasher.update(bytes);
+                                if !opts.verify {
+                                    cur.hasher.update(bytes);
+                                }
                                 let written = bytes.len() as u64;
                                 cur.copied += written;
                                 record_write_progress(
@@ -461,21 +463,26 @@ fn fanout_worker(
                     continue;
                 }
 
-                let expected = cur.hasher.finalize();
-                if expected.as_bytes() != &hash {
-                    cleanup_part(&dest, &dst);
-                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
-                    record_file_error(
-                        &state,
-                        slot,
-                        format!("hash de flujo no coincide: {}", dst.display()),
-                    );
-                    if !opts.keep_going {
-                        control.alive.store(false, Ordering::Release);
-                        break;
+                let expected = if opts.verify {
+                    blake3::Hash::from_bytes(hash)
+                } else {
+                    let streamed = cur.hasher.finalize();
+                    if streamed.as_bytes() != &hash {
+                        cleanup_part(&dest, &dst);
+                        rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                        record_file_error(
+                            &state,
+                            slot,
+                            format!("hash de flujo no coincide: {}", dst.display()),
+                        );
+                        if !opts.keep_going {
+                            control.alive.store(false, Ordering::Release);
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                    streamed
+                };
 
                 if !wait_pause(&state) {
                     cleanup_part(&dest, &dst);
