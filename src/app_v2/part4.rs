@@ -20,17 +20,10 @@ impl eframe::App for CopierApp {
             self.applied_theme = Some(self.use_light_theme);
         }
 
-        let snaps = self
-            .job
-            .as_ref()
-            .map(|job| job.snapshot())
-            .unwrap_or_default();
+        let snaps = self.job.as_ref().map(|job| job.snapshot()).unwrap_or_default();
         let all_terminal = !snaps.is_empty()
             && snaps.iter().all(|dest| {
-                matches!(
-                    dest.phase,
-                    DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled
-                )
+                matches!(dest.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
             });
         let starting = self.starting();
         let running = self.running_job() && !all_terminal;
@@ -50,12 +43,7 @@ impl eframe::App for CopierApp {
         if starting {
             ctx.request_repaint_after(STARTING_REPAINT);
         } else if running {
-            let delay = if paused {
-                PAUSED_REPAINT
-            } else {
-                RUNNING_REPAINT
-            };
-            ctx.request_repaint_after(delay);
+            ctx.request_repaint_after(if paused { PAUSED_REPAINT } else { RUNNING_REPAINT });
         } else {
             ctx.request_repaint_after(THEME_CHECK_INTERVAL);
         }
@@ -64,11 +52,7 @@ impl eframe::App for CopierApp {
         if key != self.paths_key || self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL {
             self.paths_key = key;
             self.last_path_check = Instant::now();
-            self.path_errors = if busy {
-                Vec::new()
-            } else {
-                self.validate_paths()
-            };
+            self.path_errors = if busy { Vec::new() } else { self.validate_paths() };
         }
 
         let path_error_count = self.path_errors.len();
@@ -100,28 +84,26 @@ impl eframe::App for CopierApp {
         });
 
         egui::TopBottomPanel::bottom("footer_v2").show(ctx, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
                 let (status, color): (&str, Color32) = if self.error_flash_until.is_some() {
                     (self.status.as_str(), Theme::error(self.use_light_theme))
                 } else if paused {
                     ("Copia en pausa", Theme::warning(self.use_light_theme))
                 } else if verifying {
-                    (
-                        "Verificando integridad…",
-                        Theme::verify(self.use_light_theme),
-                    )
+                    ("Verificando integridad…", Theme::verify(self.use_light_theme))
                 } else {
                     (self.status.as_str(), Theme::muted(self.use_light_theme))
                 };
-
                 let max_chars = ((ui.available_width() / 8.0) as usize).clamp(24, 88);
                 ui.colored_label(color, compact_path(status, max_chars));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Acerca de").clicked() {
+                    if ui.add_sized([82.0, 24.0], egui::Button::new("Acerca de")).clicked() {
                         self.show_credits = true;
                     }
                 });
             });
+            ui.add_space(2.0);
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -137,17 +119,16 @@ impl eframe::App for CopierApp {
                     );
 
                     ui.horizontal(|ui| {
-                        let button_width = 88.0;
-                        let field_width =
-                            (ui.available_width() - button_width - SPACING_SM).max(160.0);
+                        let button_width = 92.0;
+                        let field_width = (ui.available_width() - button_width - SPACING_SM).max(160.0);
                         ui.add_enabled_ui(!busy, |ui| {
                             ui.add_sized(
-                                [field_width, 30.0],
+                                [field_width, 32.0],
                                 egui::TextEdit::singleline(&mut self.source)
                                     .hint_text("Selecciona la carpeta que quieres copiar"),
                             );
                             if ui
-                                .add_sized([button_width, 30.0], egui::Button::new("Examinar"))
+                                .add_sized([button_width, 32.0], egui::Button::new("Examinar"))
                                 .clicked()
                             {
                                 if let Some(path) = Self::pick_dir() {
@@ -166,7 +147,10 @@ impl eframe::App for CopierApp {
                                 .color(Theme::muted(self.use_light_theme)),
                         );
                         ui.add_enabled_ui(!busy, |ui| {
-                            if ui.small_button("+ Agregar").clicked() {
+                            if ui
+                                .add_sized([88.0, 28.0], egui::Button::new("+ Agregar"))
+                                .clicked()
+                            {
                                 if let Some(path) = Self::pick_dir() {
                                     if !self.dests.contains(&path) {
                                         self.dests.push(path);
@@ -176,51 +160,64 @@ impl eframe::App for CopierApp {
                         });
                     });
 
-                    egui::ScrollArea::vertical()
-                        .id_salt("destinations_v2")
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            let mut remove = None;
-                            for (index, dest) in self.dests.iter().enumerate() {
-                                card_frame(self.use_light_theme).show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.weak(format!("{:02}", index + 1));
-                                        let max_chars = ((ui.available_width() / 7.2) as usize)
-                                            .clamp(18, 72);
-                                        ui.label(compact_path(dest, max_chars))
+                    if !self.dests.is_empty() {
+                        let visible_rows = self.dests.len().min(6) as f32;
+                        let list_height = (visible_rows * 45.0 + 2.0).clamp(47.0, 272.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("destinations_v2")
+                            .max_height(list_height)
+                            .auto_shrink([false, true])
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                            .show(ui, |ui| {
+                                let mut remove = None;
+                                for (index, dest) in self.dests.iter().enumerate() {
+                                    card_frame(self.use_light_theme).show(ui, |ui| {
+                                        ui.set_min_height(30.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(format!("{:02}", index + 1))
+                                                    .size(11.5)
+                                                    .color(Theme::muted(self.use_light_theme)),
+                                            );
+                                            let max_chars = ((ui.available_width() / 7.2) as usize)
+                                                .clamp(18, 72);
+                                            ui.label(
+                                                RichText::new(compact_path(dest, max_chars)).strong(),
+                                            )
                                             .on_hover_text(dest);
 
-                                        if let Some(progress) = snaps.get(index) {
-                                            let (label, color) = phase_label(
-                                                progress.phase,
-                                                progress.files_err,
-                                                self.use_light_theme,
-                                                paused,
-                                            );
-                                            ui.colored_label(color, label);
-                                        }
+                                            if let Some(progress) = snaps.get(index) {
+                                                let (label, color) = phase_label(
+                                                    progress.phase,
+                                                    progress.files_err,
+                                                    self.use_light_theme,
+                                                    paused,
+                                                );
+                                                ui.colored_label(color, RichText::new(label).strong());
+                                            }
 
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if !busy
-                                                    && ui
-                                                        .small_button("×")
-                                                        .on_hover_text("Quitar destino")
-                                                        .clicked()
-                                                {
-                                                    remove = Some(index);
-                                                }
-                                            },
-                                        );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if !busy
+                                                        && ui
+                                                            .add_sized([30.0, 24.0], egui::Button::new("×"))
+                                                            .on_hover_text("Quitar destino")
+                                                            .clicked()
+                                                    {
+                                                        remove = Some(index);
+                                                    }
+                                                },
+                                            );
+                                        });
                                     });
-                                });
-                                ui.add_space(SPACING_XS);
-                            }
-                            if let Some(index) = remove {
-                                self.dests.remove(index);
-                            }
-                        });
+                                    ui.add_space(SPACING_XS);
+                                }
+                                if let Some(index) = remove {
+                                    self.dests.remove(index);
+                                }
+                            });
+                    }
 
                     if path_error_count > 0 {
                         ui.colored_label(
@@ -230,46 +227,39 @@ impl eframe::App for CopierApp {
                         .on_hover_text(self.path_errors.join("\n"));
                     }
 
+                    ui.add_space(SPACING_XS);
                     ui.separator();
+                    ui.add_space(SPACING_XS);
                     ui.horizontal_wrapped(|ui| {
                         ui.add_enabled_ui(!busy, |ui| {
                             ui.checkbox(&mut self.skip_same, "Omitir archivos iguales")
                                 .on_hover_text("Evita copiar de nuevo archivos que ya coinciden.");
-                            ui.checkbox(
-                                &mut self.keep_going,
-                                "Continuar si un destino falla",
-                            )
-                            .on_hover_text(
-                                "Los demás destinos continúan si uno presenta un error.",
-                            );
+                            ui.checkbox(&mut self.keep_going, "Continuar si un destino falla")
+                                .on_hover_text("Los demás destinos continúan si uno presenta un error.");
                         });
                     });
+
                     ui.add_space(SPACING_SM);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("La integridad se verifica automáticamente con BLAKE3.")
-                                .size(11.5)
-                                .color(Theme::muted(self.use_light_theme)),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if running {
-                                if let Some(job) = &self.job {
-                                    if ui.button("Cancelar").clicked() {
-                                        job.request_cancel();
-                                    }
-                                    let pause_label = if paused { "Continuar" } else { "Pausar" };
-                                    if ui.button(pause_label).clicked() {
-                                        job.set_paused(!paused);
-                                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if running {
+                            if let Some(job) = &self.job {
+                                if ui.add_sized([88.0, 30.0], egui::Button::new("Cancelar")).clicked() {
+                                    job.request_cancel();
                                 }
-                            } else if !starting {
-                                let button =
-                                    egui::Button::new(RichText::new("Iniciar copia").strong());
-                                if ui.add_enabled(ready_to_start, button).clicked() {
-                                    self.start();
+                                let pause_label = if paused { "Continuar" } else { "Pausar" };
+                                if ui
+                                    .add_sized([88.0, 30.0], egui::Button::new(pause_label))
+                                    .clicked()
+                                {
+                                    job.set_paused(!paused);
                                 }
                             }
-                        });
+                        } else if !starting {
+                            let button = egui::Button::new(RichText::new("Iniciar copia").strong());
+                            if ui.add_enabled(ready_to_start, button).clicked() {
+                                self.start();
+                            }
+                        }
                     });
 
                     if starting {
@@ -284,11 +274,7 @@ impl eframe::App for CopierApp {
                                 .iter()
                                 .map(|progress| {
                                     if progress.total == 0 {
-                                        if progress.phase == DestPhase::Done {
-                                            1.0
-                                        } else {
-                                            0.0
-                                        }
+                                        if progress.phase == DestPhase::Done { 1.0 } else { 0.0 }
                                     } else {
                                         progress.written as f64 / progress.total as f64
                                     }
@@ -299,28 +285,22 @@ impl eframe::App for CopierApp {
                             let total_bps = if paused {
                                 0.0
                             } else {
-                                snaps
-                                    .iter()
-                                    .map(|progress| {
-                                        shown_bps(progress.bps_recent, progress.last_tick)
-                                    })
+                                snaps.iter()
+                                    .map(|progress| shown_bps(progress.bps_recent, progress.last_tick))
                                     .sum()
                             };
 
                             let eta = if paused {
                                 "En pausa".to_owned()
+                            } else if all_terminal {
+                                "—".to_owned()
                             } else {
                                 let mut known = true;
                                 let mut eta_secs = 0.0f64;
                                 for progress in &snaps {
                                     let remaining = progress.total.saturating_sub(progress.written);
                                     if remaining == 0
-                                        || matches!(
-                                            progress.phase,
-                                            DestPhase::Done
-                                                | DestPhase::Failed
-                                                | DestPhase::Cancelled
-                                        )
+                                        || matches!(progress.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled)
                                     {
                                         continue;
                                     }
@@ -330,12 +310,13 @@ impl eframe::App for CopierApp {
                                     }
                                     eta_secs = eta_secs.max(remaining as f64 / progress.bps);
                                 }
-                                if known {
-                                    format_duration(eta_secs)
-                                } else {
-                                    "—".to_owned()
-                                }
+                                if known { format_duration(eta_secs) } else { "—".to_owned() }
                             };
+
+                            let terminal_errors = snaps.iter().any(|dest| {
+                                dest.phase == DestPhase::Failed || dest.files_err > 0
+                            });
+                            let terminal_cancelled = snaps.iter().any(|dest| dest.phase == DestPhase::Cancelled);
 
                             ui.add_space(SPACING_MD);
                             card_frame(self.use_light_theme).show(ui, |ui| {
@@ -344,27 +325,30 @@ impl eframe::App for CopierApp {
                                     let (label, color) = if paused {
                                         ("PAUSADO", Theme::warning(self.use_light_theme))
                                     } else if verifying {
-                                        (
-                                            "VERIFICANDO INTEGRIDAD",
-                                            Theme::verify(self.use_light_theme),
-                                        )
+                                        ("VERIFICANDO INTEGRIDAD", Theme::verify(self.use_light_theme))
+                                    } else if all_terminal && terminal_cancelled {
+                                        ("CANCELADO", Theme::muted(self.use_light_theme))
+                                    } else if all_terminal && terminal_errors {
+                                        ("FINALIZADO CON ERRORES", Theme::warning(self.use_light_theme))
+                                    } else if all_terminal {
+                                        ("COMPLETO", Theme::success(self.use_light_theme))
                                     } else {
                                         ("COPIANDO", Theme::accent(self.use_light_theme))
                                     };
-                                    ui.colored_label(color, label);
+                                    ui.colored_label(color, RichText::new(label).strong());
                                 });
                                 ui.add(
                                     egui::ProgressBar::new(average as f32)
                                         .desired_height(20.0)
-                                        .fill(Theme::accent(self.use_light_theme))
+                                        .fill(if all_terminal && !terminal_errors && !terminal_cancelled {
+                                            Theme::success(self.use_light_theme)
+                                        } else {
+                                            Theme::accent(self.use_light_theme)
+                                        })
                                         .show_percentage(),
                                 );
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new(format_bps(total_bps))
-                                            .strong()
-                                            .size(18.0),
-                                    );
+                                    ui.label(RichText::new(format_bps(total_bps)).strong().size(18.0));
                                     ui.weak(format!(
                                         "{} · Tiempo restante {eta}",
                                         format_bytes(job.bytes_total.load(Ordering::Relaxed))
@@ -375,14 +359,9 @@ impl eframe::App for CopierApp {
                             ui.add_space(SPACING_SM);
                             for progress in &snaps {
                                 let fraction = if progress.total == 0 {
-                                    if progress.phase == DestPhase::Done {
-                                        1.0
-                                    } else {
-                                        0.0
-                                    }
+                                    if progress.phase == DestPhase::Done { 1.0 } else { 0.0 }
                                 } else {
-                                    (progress.written as f32 / progress.total as f32)
-                                        .clamp(0.0, 1.0)
+                                    (progress.written as f32 / progress.total as f32).clamp(0.0, 1.0)
                                 };
                                 let (label, color) = phase_label(
                                     progress.phase,
@@ -394,20 +373,23 @@ impl eframe::App for CopierApp {
                                 card_frame(self.use_light_theme).show(ui, |ui| {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
-                                            RichText::new(compact_path(&progress.label, 54))
-                                                .strong(),
+                                            RichText::new(compact_path(&progress.label, 54)).strong(),
                                         )
                                         .on_hover_text(&progress.label);
-                                        ui.colored_label(color, label);
+                                        ui.colored_label(color, RichText::new(label).strong());
                                     });
                                     ui.add(
                                         egui::ProgressBar::new(fraction)
                                             .desired_height(16.0)
-                                            .fill(Theme::accent(self.use_light_theme))
+                                            .fill(if progress.phase == DestPhase::Done && progress.files_err == 0 {
+                                                Theme::success(self.use_light_theme)
+                                            } else {
+                                                Theme::accent(self.use_light_theme)
+                                            })
                                             .show_percentage(),
                                     );
                                     ui.horizontal_wrapped(|ui| {
-                                        let speed = if paused {
+                                        let speed = if paused || matches!(progress.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled) {
                                             0.0
                                         } else {
                                             shown_bps(progress.bps_recent, progress.last_tick)
@@ -415,9 +397,7 @@ impl eframe::App for CopierApp {
                                         ui.weak(format_bps(speed));
                                         ui.weak(format!(
                                             "{} completados · {} omitidos · {} errores",
-                                            progress.files_done,
-                                            progress.files_skip,
-                                            progress.files_err
+                                            progress.files_done, progress.files_skip, progress.files_err
                                         ));
                                     });
                                 });
@@ -429,10 +409,8 @@ impl eframe::App for CopierApp {
                         ui.vertical_centered(|ui| {
                             ui.label(RichText::new("Listo para copiar").size(20.0).strong());
                             ui.label(
-                                RichText::new(
-                                    "Selecciona un origen y agrega uno o más destinos.",
-                                )
-                                .color(Theme::muted(self.use_light_theme)),
+                                RichText::new("Selecciona un origen y agrega uno o más destinos.")
+                                    .color(Theme::muted(self.use_light_theme)),
                             );
                         });
                     }
@@ -443,33 +421,22 @@ impl eframe::App for CopierApp {
         self.draw_about(ctx);
 
         if !busy && all_terminal {
-            let ok = snaps
-                .iter()
+            let ok = snaps.iter()
                 .filter(|dest| dest.phase == DestPhase::Done && dest.files_err == 0)
                 .count();
-            let with_errors = snaps
-                .iter()
+            let with_errors = snaps.iter()
                 .filter(|dest| dest.phase == DestPhase::Done && dest.files_err > 0)
                 .count();
-            let failed = snaps
-                .iter()
-                .filter(|dest| dest.phase == DestPhase::Failed)
-                .count();
-            let cancelled = snaps
-                .iter()
-                .filter(|dest| dest.phase == DestPhase::Cancelled)
-                .count();
+            let failed = snaps.iter().filter(|dest| dest.phase == DestPhase::Failed).count();
+            let cancelled = snaps.iter().filter(|dest| dest.phase == DestPhase::Cancelled).count();
 
-            if cancelled > 0 {
-                self.status = format!("Cancelado · {cancelled} destino(s)");
+            self.status = if cancelled > 0 {
+                format!("Cancelado · {cancelled} destino(s)")
             } else if failed > 0 || with_errors > 0 {
-                self.status = format!(
-                    "Finalizado con errores · {ok} correcto(s) · {} con problemas",
-                    failed + with_errors
-                );
+                format!("Finalizado con errores · {ok} correcto(s) · {} con problemas", failed + with_errors)
             } else {
-                self.status = format!("Completado · {ok}/{} sin errores", snaps.len());
-            }
+                format!("Completado · {ok}/{} sin errores", snaps.len())
+            };
         }
     }
 }
