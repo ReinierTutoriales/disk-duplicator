@@ -342,7 +342,6 @@ fn fanout_job(
                 };
 
                 let Some(first_raw) = pool.acquire(&state) else {
-                    read_ok = false;
                     if state.cancel.load(Ordering::Relaxed) { break 'files; }
                     continue;
                 };
