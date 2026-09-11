@@ -67,6 +67,110 @@ fn commit_part_fast(dest_root: &Path, part: &Path, dst: &Path) -> Result<(), Str
     }
 }
 
+fn retry_commit(
+    state: &JobState,
+    slot: usize,
+    mut op: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 0..=RETRIES {
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if e.starts_with("CRÍTICO:") {
+                    return Err(e);
+                }
+                last_err = e;
+                if attempt < RETRIES {
+                    state.dests.lock().unwrap()[slot].retries += 1;
+                    thread::sleep(Duration::from_millis(75 * (attempt as u64 + 1)));
+                    if !wait_pause(state) { return Err("Cancelado".into()); }
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn reset_part_after_partial_write(
+    file: &mut Option<File>,
+    tmp: &Path,
+    committed: u64,
+) -> Result<(), String> {
+    file.take();
+    let reset = OpenOptions::new()
+        .write(true)
+        .open(tmp)
+        .map_err(|e| format!("No se pudo reabrir temporal {} para recuperar escritura parcial: {e}", tmp.display()))?;
+    reset
+        .set_len(committed)
+        .map_err(|e| format!("No se pudo truncar temporal {} tras escritura parcial: {e}", tmp.display()))?;
+    *file = Some(
+        OpenOptions::new()
+            .append(true)
+            .open(tmp)
+            .map_err(|e| format!("No se pudo reabrir temporal {} tras recuperar escritura parcial: {e}", tmp.display()))?,
+    );
+    Ok(())
+}
+
+fn write_buffer_retrying(
+    file: &mut Option<File>,
+    tmp: &Path,
+    committed: u64,
+    data: &[u8],
+    state: &JobState,
+    slot: usize,
+    control: &DestControl,
+    rel: &str,
+) -> Result<(), String> {
+    const WRITE_CHUNK: usize = 1024 * 1024;
+    let mut last_err = String::new();
+
+    for attempt in 0..=RETRIES {
+        let mut offset = 0usize;
+        let mut attempt_error = None;
+        while offset < data.len() {
+            if !wait_pause(state) {
+                attempt_error = Some("Cancelado".to_owned());
+                break;
+            }
+            let end = (offset + WRITE_CHUNK).min(data.len());
+            let Some(handle) = file.as_mut() else {
+                attempt_error = Some("archivo temporal no disponible".to_owned());
+                break;
+            };
+            match handle.write_all(&data[offset..end]) {
+                Ok(()) => {
+                    offset = end;
+                    control.note_progress();
+                }
+                Err(e) => {
+                    attempt_error = Some(format!("escritura {rel}: {e}"));
+                    break;
+                }
+            }
+        }
+
+        if attempt_error.is_none() {
+            return Ok(());
+        }
+        last_err = attempt_error.expect("write attempt error");
+        if last_err == "Cancelado" {
+            return Err(last_err);
+        }
+
+        reset_part_after_partial_write(file, tmp, committed)?;
+        if attempt < RETRIES {
+            state.dests.lock().unwrap()[slot].retries += 1;
+            thread::sleep(Duration::from_millis(75 * (attempt as u64 + 1)));
+            if !wait_pause(state) { return Err("Cancelado".into()); }
+        }
+    }
+
+    Err(last_err)
+}
+
 fn fanout_worker(
     dest: PathBuf,
     rx: mpsc::Receiver<FanoutItem>,
@@ -151,17 +255,22 @@ fn fanout_worker(
                 if let Some(cur) = current.as_mut() {
                     if !cur.failed {
                         let rel = cur.info.rel.display().to_string();
-                        let result = match cur.file.as_mut() {
-                            Some(file) => retry_io(&state, slot, || {
-                                file.write_all(&buf.data).map_err(|e| format!("escritura {rel}: {e}"))
-                            }),
-                            None => Err("archivo temporal no disponible".into()),
-                        };
+                        let dst = dest.join(&cur.info.rel);
+                        let tmp = part_path(&dest, &dst);
+                        let result = write_buffer_retrying(
+                            &mut cur.file,
+                            &tmp,
+                            cur.copied,
+                            &buf.data,
+                            &state,
+                            slot,
+                            &control,
+                            &rel,
+                        );
                         match result {
                             Ok(()) => {
                                 cur.hasher.update(&buf.data);
                                 cur.copied += buf.data.len() as u64;
-                                control.note_progress();
                                 record_write_progress(
                                     &state,
                                     slot,
@@ -181,8 +290,10 @@ fn fanout_worker(
                                     &mut effective_written,
                                     start,
                                 );
-                                record_file_error(&state, slot, e);
-                                if !opts.keep_going {
+                                if e != "Cancelado" {
+                                    record_file_error(&state, slot, e);
+                                }
+                                if !opts.keep_going || state.cancel.load(Ordering::Acquire) {
                                     control.alive.store(false, Ordering::Release);
                                 }
                             }
@@ -351,7 +462,7 @@ fn fanout_worker(
                 }
 
                 control.enter_operation(OperationPhase::Commit);
-                let commit_result = retry_io(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
+                let commit_result = retry_commit(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
                 control.enter_operation(OperationPhase::Write);
                 if let Err(e) = commit_result {
                     cleanup_part(&dest, &dst);
