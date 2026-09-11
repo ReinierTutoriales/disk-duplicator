@@ -62,7 +62,11 @@ fn plan_destination(
     }
 
     let peak_extra_space = peak_extra.max(0).min(u64::MAX as i128) as u64;
-    let reserve_space = if bytes_to_write == 0 { 0 } else { reserve_for_volume(total) };
+    let reserve_space = if bytes_to_write == 0 {
+        0
+    } else {
+        reserve_for_volume(total)
+    };
     let required_with_reserve = peak_extra_space.saturating_add(reserve_space);
     if available < required_with_reserve {
         let missing = required_with_reserve - available;
@@ -84,17 +88,25 @@ fn canonical_existing(path: &Path, label: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("No se pudo resolver {label} {}: {e}", path.display()))
 }
 
+fn reject_reparse_root(path: &Path, label: &str) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("No se pudo inspeccionar {label} {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+        return Err(format!(
+            "No se permite usar un enlace simbólico, junction o reparse point como {label}: {}.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_destinations(source: &Path, dests: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let source_canon = canonical_existing(source, "origen")?;
     let mut canonical = Vec::with_capacity(dests.len());
 
     for dest in dests {
         fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
-        let root_meta = fs::symlink_metadata(dest)
-            .map_err(|e| format!("destino {}: {e}", dest.display()))?;
-        if root_meta.file_type().is_symlink() {
-            return Err(format!("No se permite usar un enlace simbólico como destino: {}.", dest.display()));
-        }
+        reject_reparse_root(dest, "destino")?;
         let d = canonical_existing(dest, "destino")?;
         if d == source_canon || d.starts_with(&source_canon) || source_canon.starts_with(&d) {
             return Err(format!("El destino {} se solapa con el origen.", dest.display()));
@@ -130,9 +142,14 @@ fn run_preflight(
     dests: &[PathBuf],
     opts: CopyOpts,
 ) -> Result<PreflightPlan, String> {
-    if !source.is_dir() { return Err("El origen debe ser una carpeta.".into()); }
-    if dests.is_empty() { return Err("Agrega al menos un destino.".into()); }
+    if !source.is_dir() {
+        return Err("El origen debe ser una carpeta.".into());
+    }
+    if dests.is_empty() {
+        return Err("Agrega al menos un destino.".into());
+    }
 
+    reject_reparse_root(source, "origen")?;
     let canonical_source = canonical_existing(source, "origen")?;
     let canonical_dests = validate_destinations(&canonical_source, dests)?;
     let (files, dirs) = scan_source(&canonical_source)?;
@@ -168,17 +185,37 @@ fn run_preflight(
 fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Option<String> {
     for info in files {
         let path = source.join(&info.rel);
-        let Ok(meta) = fs::metadata(&path) else {
-            return Some(format!("El archivo de origen desapareció durante la copia: {}", path.display()));
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            return Some(format!(
+                "El archivo de origen desapareció durante la copia: {}",
+                path.display()
+            ));
         };
-        if !meta.is_file() || meta.len() != info.size || metadata_mtime_ns(&meta) != info.mtime_ns {
-            return Some(format!("El archivo de origen cambió durante la copia: {}", path.display()));
+        if meta.file_type().is_symlink()
+            || is_reparse_point(&meta)
+            || !meta.is_file()
+            || meta.len() != info.size
+            || metadata_mtime_ns(&meta) != info.mtime_ns
+        {
+            return Some(format!(
+                "El archivo de origen cambió durante la copia: {}",
+                path.display()
+            ));
         }
     }
     for rel in dirs {
         let path = source.join(rel);
-        if !path.is_dir() {
-            return Some(format!("La carpeta de origen cambió durante la copia: {}", path.display()));
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            return Some(format!(
+                "La carpeta de origen cambió durante la copia: {}",
+                path.display()
+            ));
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() || is_reparse_point(&meta) {
+            return Some(format!(
+                "La carpeta de origen cambió durante la copia: {}",
+                path.display()
+            ));
         }
     }
 
@@ -194,11 +231,16 @@ fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Opti
 }
 
 fn hash_path_with_buffer(path: &Path, buf: &mut [u8]) -> Result<blake3::Hash, String> {
-    let mut f = File::open(path).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
+    let mut f =
+        File::open(path).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
     let mut h = blake3::Hasher::new();
     loop {
-        let n = f.read(buf).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
-        if n == 0 { break; }
+        let n = f
+            .read(buf)
+            .map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
         h.update(&buf[..n]);
     }
     Ok(h.finalize())
@@ -229,7 +271,9 @@ fn final_source_hashes(
 
 fn from_hex32(s: &str) -> Option<[u8; 32]> {
     let bytes = s.as_bytes();
-    if bytes.len() != 64 { return None; }
+    if bytes.len() != 64 {
+        return None;
+    }
     let mut out = [0u8; 32];
     for i in 0..32 {
         let hi = (bytes[i * 2] as char).to_digit(16)? as u8;
@@ -249,7 +293,9 @@ fn legacy_manifest_key(path: &Path) -> String {
 
 fn load_manifest_hashes(dest: &Path) -> std::collections::HashMap<String, [u8; 32]> {
     let path = manifest_path(dest);
-    let Ok(text) = fs::read_to_string(&path) else { return std::collections::HashMap::new(); };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return std::collections::HashMap::new();
+    };
     let mut hashes = std::collections::HashMap::new();
     for (index, line) in text.lines().enumerate() {
         let Some((hex, name)) = line.split_once("  ") else {
@@ -300,14 +346,15 @@ fn compact_manifest(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
             .map_err(|e| format!("No se pudo limpiar {}: {e}", backup.display()))?;
     }
 
-    let mut f = File::create(&tmp)
-        .map_err(|e| format!("No se pudo crear {}: {e}", tmp.display()))?;
+    let mut f =
+        File::create(&tmp).map_err(|e| format!("No se pudo crear {}: {e}", tmp.display()))?;
     for (name, hash) in entries {
         let hex = blake3::Hash::from_bytes(hash).to_hex();
         writeln!(f, "{hex}  {name}")
             .map_err(|e| format!("No se pudo compactar manifest: {e}"))?;
     }
-    f.sync_data().map_err(|e| format!("No se pudo sincronizar manifest: {e}"))?;
+    f.sync_data()
+        .map_err(|e| format!("No se pudo sincronizar manifest: {e}"))?;
     drop(f);
 
     fs::rename(&path, &backup)
@@ -343,7 +390,7 @@ fn validate_destination_result_with_hashes(
         let path = dest.join(rel);
         let meta = fs::symlink_metadata(&path)
             .map_err(|_| format!("Falta la carpeta {}", path.display()))?;
-        if !meta.is_dir() || meta.file_type().is_symlink() {
+        if !meta.is_dir() || meta.file_type().is_symlink() || is_reparse_point(&meta) {
             return Err(format!("La carpeta no coincide: {}", path.display()));
         }
     }
@@ -358,15 +405,17 @@ fn validate_destination_result_with_hashes(
     let mut total_bytes = 0u64;
     for info in files {
         let dst = dest.join(&info.rel);
-        let meta = fs::metadata(&dst)
+        let meta = fs::symlink_metadata(&dst)
             .map_err(|_| format!("Falta el archivo {}", dst.display()))?;
-        if !meta.is_file() {
-            return Err(format!("La entrada no es un archivo: {}", dst.display()));
+        if meta.file_type().is_symlink() || is_reparse_point(&meta) || !meta.is_file() {
+            return Err(format!("La entrada no es un archivo normal: {}", dst.display()));
         }
         if meta.len() != info.size {
             return Err(format!(
                 "Tamaño incorrecto en {}: esperado {}, obtenido {}.",
-                dst.display(), info.size, meta.len()
+                dst.display(),
+                info.size,
+                meta.len()
             ));
         }
         total_bytes = total_bytes.saturating_add(meta.len());
@@ -400,7 +449,9 @@ fn validate_destination_result_with_hashes(
     if total_bytes != expected_bytes {
         return Err(format!(
             "Validación de tamaño total falló en {}: esperado {}, obtenido {}.",
-            dest.display(), expected_bytes, total_bytes
+            dest.display(),
+            expected_bytes,
+            total_bytes
         ));
     }
 
