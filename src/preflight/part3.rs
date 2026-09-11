@@ -137,6 +137,19 @@ fn supervise_job(
             }
         }
 
+        if state.cancel.load(Ordering::Acquire) {
+            let mut progress = state.dests.lock().unwrap();
+            for dp in progress.iter_mut() {
+                if dp.phase != DestPhase::Failed {
+                    dp.phase = DestPhase::Cancelled;
+                    dp.error = Some("Cancelado".into());
+                }
+            }
+            drop(progress);
+            state.running.store(false, Ordering::Release);
+            return;
+        }
+
         let mut progress = state.dests.lock().unwrap();
         for (slot, dp) in progress.iter_mut().enumerate() {
             if dp.files_err > 0 && final_errors[slot].is_none() {
