@@ -1,0 +1,45 @@
+name: Tail watchdog audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-tail.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: false
+      - name: Apply patch and verify
+        shell: pwsh
+        run: |
+          python .github/audit_tail_patch.py
+          cargo fmt --all
+          git diff --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --release
+          cargo build --locked --release
+      - name: Commit verified patch
+        shell: pwsh
+        run: |
+          Remove-Item .github/workflows/audit-tail.yml
+          Remove-Item .github/audit_tail_patch.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden fanout tail watchdog'
+          git push origin HEAD:main
