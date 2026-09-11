@@ -16,6 +16,7 @@ fn build_job(
     files: Arc<Vec<FileInfo>>,
     dirs: Arc<Vec<PathBuf>>,
     opts: CopyOpts,
+    preflight_verified_skip_same: bool,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     create_directory_layout(&dests, &dirs)?;
 
@@ -53,7 +54,14 @@ fn build_job(
         reader_hashes: Mutex::new(HashMap::new()),
     });
 
-    let handles = fanout_job(source, dests, files, Arc::clone(&state), opts);
+    let handles = fanout_job(
+        source,
+        dests,
+        files,
+        Arc::clone(&state),
+        opts,
+        preflight_verified_skip_same,
+    );
     Ok((state, handles))
 }
 
@@ -65,7 +73,18 @@ pub(crate) fn start_job_with_files(
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     validate_job_paths(&source, &dests)?;
-    build_job(source, dests, files, dirs, opts)
+    build_job(source, dests, files, dirs, opts, false)
+}
+
+pub(crate) fn start_job_with_files_preverified(
+    source: PathBuf,
+    dests: Vec<PathBuf>,
+    files: Arc<Vec<FileInfo>>,
+    dirs: Arc<Vec<PathBuf>>,
+    opts: CopyOpts,
+) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
+    validate_job_paths(&source, &dests)?;
+    build_job(source, dests, files, dirs, opts, true)
 }
 
 pub fn format_bps(bps: f64) -> String {
