@@ -45,7 +45,6 @@ fn build_job(
         retries: 0,
     }).collect();
 
-    let max_buffers = (RESERVED_RAM / BLOCK).max(8);
     let state = Arc::new(JobState {
         running: AtomicBool::new(true),
         cancel: AtomicBool::new(false),
@@ -55,7 +54,6 @@ fn build_job(
         files_total: AtomicU64::new(files_total),
         bytes_total: AtomicU64::new(bytes_total),
         buffers_in_flight: Arc::new(AtomicUsize::new(0)),
-        max_buffers,
         dests: Mutex::new(progress),
         reader_hashes: Mutex::new(HashMap::new()),
     });
@@ -123,7 +121,6 @@ mod tests {
             files_total: AtomicU64::new(1),
             bytes_total: AtomicU64::new(size),
             buffers_in_flight: Arc::new(AtomicUsize::new(0)),
-            max_buffers: 2,
             dests: Mutex::new(vec![DestProgress {
                 label: dest.display().to_string(),
                 written: 0,
@@ -181,12 +178,21 @@ mod tests {
             running: AtomicBool::new(true), cancel: AtomicBool::new(false), pause: AtomicBool::new(false),
             pause_mutex: Mutex::new(()), pause_cv: Condvar::new(),
             files_total: AtomicU64::new(0), bytes_total: AtomicU64::new(0), buffers_in_flight: gauge,
-            max_buffers: 2, dests: Mutex::new(Vec::new()), reader_hashes: Mutex::new(HashMap::new()),
+            dests: Mutex::new(Vec::new()), reader_hashes: Mutex::new(HashMap::new()),
         };
         let buf = pool.acquire(&state).unwrap();
         assert_eq!(buf.len(), BLOCK);
         pool.release(buf);
         assert_eq!(state.buffers_in_flight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn queue_depth_respects_memory_budget() {
+        assert_eq!(queue_depth_for(1), 16);
+        assert_eq!(queue_depth_for(2), 16);
+        assert_eq!(queue_depth_for(4), 8);
+        assert_eq!(queue_depth_for(8), 4);
+        assert_eq!(queue_depth_for(16), 2);
     }
 
     #[test]
