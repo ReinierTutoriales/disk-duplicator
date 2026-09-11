@@ -109,7 +109,6 @@ p2 = replace_once(
     "worker verify call",
 )
 
-# Keep an existing watchdog failure message instead of replacing it with a secondary I/O error.
 p2 = replace_once(
     p2,
     '''                    if let Err(e) = sync_result {
@@ -310,15 +309,21 @@ p2 = replace_once(
     "cancel final lifecycle",
 )
 
-p2 = replace_once(
+p2 = regex_once(
     p2,
-    '''    } else {
-        set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
-    }
-}
-''',
-    '''    } else {
-        set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
+    r"    let errs = state\.dests\.lock\(\)\.unwrap\(\)\[slot\]\.files_err;\n.*?\n\}\s*\Z",
+    '''    let errs = state.dests.lock().unwrap()[slot].files_err;
+    if !control.alive.load(Ordering::Acquire) {
+        set_phase(&state, slot, DestPhase::Failed, None);
+    } else if errs == 0 {
+        set_phase(&state, slot, DestPhase::Done, None);
+    } else {
+        set_phase(
+            &state,
+            slot,
+            DestPhase::Done,
+            Some(format!("Terminado con {errs} error(es).")),
+        );
     }
     control.alive.store(false, Ordering::Release);
     control.note_progress();
@@ -414,7 +419,6 @@ p4 = replace_once(
     "tail watchdog regression",
 )
 
-# Transactional write after all source-shape checks succeeded.
 write("src/engine_impl/part1.rs", p1)
 write("src/engine_impl/part2.rs", p2)
 write("src/engine_impl/part3.rs", p3)
