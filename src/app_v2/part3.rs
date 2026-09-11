@@ -1,5 +1,6 @@
 impl CopierApp {
     pub fn new() -> Self {
+        refresh_system_accent();
         let settings = load_settings();
         let use_light_theme = resolve_theme(settings.theme);
         Self {
@@ -77,6 +78,7 @@ impl CopierApp {
     }
 
     fn save_theme(&mut self) {
+        refresh_system_accent();
         self.use_light_theme = resolve_theme(self.theme_preference);
         self.applied_theme = None;
         self.last_theme_check = Instant::now();
@@ -183,21 +185,27 @@ impl CopierApp {
         let response = egui::Frame::none()
             .fill(fill)
             .stroke(stroke)
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 9.0))
+            .rounding(egui::Rounding::same(9.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 10.0))
             .show(ui, |ui| {
-                ui.set_width(width.max(72.0));
+                ui.set_width(width.max(84.0));
+                ui.set_min_height(76.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new(theme_glyph(choice))
-                            .size(18.0)
+                            .size(22.0)
                             .color(if selected {
                                 Theme::accent(light)
                             } else {
                                 Theme::muted(light)
                             }),
                     );
-                    ui.label(RichText::new(choice.label()).strong());
+                    ui.label(RichText::new(choice.label()).strong().size(14.0));
+                    ui.label(
+                        RichText::new(theme_card_caption(choice))
+                            .size(11.5)
+                            .color(Theme::muted(light)),
+                    );
                 });
             })
             .response
@@ -212,8 +220,8 @@ impl CopierApp {
         }
 
         let screen = ctx.screen_rect();
-        let width = (screen.width() - 48.0).clamp(340.0, 500.0);
-        let height = (screen.height() - 64.0).clamp(300.0, 430.0);
+        let width = (screen.width() - 64.0).clamp(360.0, 560.0);
+        let height = (screen.height() - 96.0).clamp(300.0, 350.0);
         let mut open = true;
         let mut requested_theme = None;
 
@@ -223,88 +231,80 @@ impl CopierApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .fixed_size(egui::vec2(width, height))
             .constrain_to(screen)
+            .frame(window_frame(ctx, self.use_light_theme))
             .open(&mut open)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            RichText::new("Apariencia")
-                                .size(18.0)
-                                .strong()
-                                .color(Theme::accent(self.use_light_theme)),
-                        );
-                        ui.label(
-                            RichText::new("Elige cómo quieres ver RepartoCopier.")
-                                .small()
-                                .color(Theme::muted(self.use_light_theme)),
-                        );
-                        ui.add_space(SPACING_MD);
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("Apariencia")
+                        .size(18.0)
+                        .strong()
+                        .color(Theme::accent(self.use_light_theme)),
+                );
+                ui.label(
+                    RichText::new("Elige cómo quieres ver RepartoCopier.")
+                        .size(12.5)
+                        .color(Theme::muted(self.use_light_theme)),
+                );
+                ui.add_space(SPACING_MD);
 
-                        let choices = [
-                            ThemePreference::System,
-                            ThemePreference::Light,
-                            ThemePreference::Dark,
-                        ];
-                        let available = ui.available_width();
-                        if available >= 360.0 {
-                            let card_width = ((available - 2.0 * SPACING_SM) / 3.0).max(94.0);
-                            ui.horizontal(|ui| {
-                                for choice in choices {
-                                    if Self::theme_choice(
-                                        ui,
-                                        self.theme_preference,
-                                        choice,
-                                        self.use_light_theme,
-                                        card_width,
-                                    ) {
-                                        requested_theme = Some(choice);
-                                    }
-                                }
-                            });
-                        } else {
-                            for choice in choices {
-                                if Self::theme_choice(
-                                    ui,
-                                    self.theme_preference,
-                                    choice,
-                                    self.use_light_theme,
-                                    ui.available_width(),
-                                ) {
-                                    requested_theme = Some(choice);
-                                }
-                                ui.add_space(SPACING_XS);
+                let choices = [
+                    ThemePreference::System,
+                    ThemePreference::Light,
+                    ThemePreference::Dark,
+                ];
+                let available = ui.available_width();
+                if available >= 390.0 {
+                    let card_width = ((available - 2.0 * SPACING_SM) / 3.0).max(100.0);
+                    ui.horizontal(|ui| {
+                        for choice in choices {
+                            if Self::theme_choice(
+                                ui,
+                                self.theme_preference,
+                                choice,
+                                self.use_light_theme,
+                                card_width,
+                            ) {
+                                requested_theme = Some(choice);
                             }
                         }
-
-                        ui.add_space(SPACING_MD);
-                        card_frame(self.use_light_theme).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.colored_label(
-                                    Theme::accent(self.use_light_theme),
-                                    theme_glyph(self.theme_preference),
-                                );
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        RichText::new(self.theme_preference.label()).strong(),
-                                    );
-                                    ui.label(
-                                        RichText::new(theme_description(self.theme_preference))
-                                            .small()
-                                            .color(Theme::muted(self.use_light_theme)),
-                                    );
-                                });
-                            });
-                        });
-
-                        ui.add_space(SPACING_SM);
-                        ui.label(
-                            RichText::new("Los cambios se guardan automáticamente.")
-                                .small()
-                                .color(Theme::muted(self.use_light_theme)),
-                        );
                     });
+                } else {
+                    for choice in choices {
+                        if Self::theme_choice(
+                            ui,
+                            self.theme_preference,
+                            choice,
+                            self.use_light_theme,
+                            ui.available_width(),
+                        ) {
+                            requested_theme = Some(choice);
+                        }
+                        ui.add_space(SPACING_XS);
+                    }
+                }
+
+                ui.add_space(SPACING_MD);
+                ui.separator();
+                ui.add_space(SPACING_SM);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(theme_glyph(self.theme_preference))
+                            .size(17.0)
+                            .color(Theme::accent(self.use_light_theme)),
+                    );
+                    ui.label(
+                        RichText::new(theme_description(self.theme_preference))
+                            .size(12.5)
+                            .color(Theme::muted(self.use_light_theme)),
+                    );
+                });
+                ui.add_space(SPACING_XS);
+                ui.label(
+                    RichText::new("Los cambios se aplican y guardan automáticamente.")
+                        .size(11.5)
+                        .color(Theme::muted(self.use_light_theme)),
+                );
             });
 
         self.show_settings = open;
@@ -332,6 +332,7 @@ impl CopierApp {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .fixed_size(egui::vec2(width, height))
             .constrain_to(screen)
+            .frame(window_frame(ctx, self.use_light_theme))
             .open(&mut open)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
