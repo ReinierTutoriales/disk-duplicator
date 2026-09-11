@@ -10,11 +10,9 @@ use std::ptr::{null, null_mut};
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-const CREATE_ALWAYS: u32 = 2;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
-const FILE_BEGIN: u32 = 0;
 const ERROR_IO_PENDING: u32 = 997;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
@@ -80,14 +78,6 @@ extern "system" {
         wait: i32,
     ) -> i32;
     fn CancelIoEx(file: Handle, overlapped: *const Overlapped) -> i32;
-    fn SetFilePointerEx(
-        file: Handle,
-        distance: i64,
-        new_pointer: *mut i64,
-        move_method: u32,
-    ) -> i32;
-    fn SetEndOfFile(file: Handle) -> i32;
-    fn FlushFileBuffers(file: Handle) -> i32;
 }
 
 pub(crate) struct CancelableFile {
@@ -100,15 +90,7 @@ pub(crate) struct CancelableFile {
 unsafe impl Send for CancelableFile {}
 
 impl CancelableFile {
-    pub(crate) fn create(path: &Path) -> io::Result<Self> {
-        Self::open(path, CREATE_ALWAYS, 0)
-    }
-
     pub(crate) fn reopen_at(path: &Path, offset: u64) -> io::Result<Self> {
-        Self::open(path, OPEN_EXISTING, offset)
-    }
-
-    fn open(path: &Path, disposition: u32, offset: u64) -> io::Result<Self> {
         let wide = wide_path(path);
         let handle = unsafe {
             CreateFileW(
@@ -116,7 +98,7 @@ impl CancelableFile {
                 GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 null(),
-                disposition,
+                OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                 null_mut(),
             )
@@ -208,28 +190,6 @@ impl CancelableFile {
             data = &data[done..];
         }
         Ok(())
-    }
-
-    pub(crate) fn truncate_to(&mut self, len: u64) -> io::Result<()> {
-        if len > i64::MAX as u64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "offset fuera de rango Win32"));
-        }
-        if unsafe { SetFilePointerEx(self.handle, len as i64, null_mut(), FILE_BEGIN) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { SetEndOfFile(self.handle) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.offset = len;
-        Ok(())
-    }
-
-    pub(crate) fn sync_data(&self) -> io::Result<()> {
-        if unsafe { FlushFileBuffers(self.handle) } == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
     }
 }
 
