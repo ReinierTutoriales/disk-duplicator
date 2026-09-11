@@ -23,7 +23,7 @@ const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const SPEED_DECAY_GRACE_SECS: f64 = 0.5;
 const SPEED_DECAY_TAU_SECS: f64 = 2.0;
-const DEFAULT_ACCENT_RGB: u32 = 0x0078_D4;
+const DEFAULT_ACCENT_RGB: u32 = 0x0000_78D4;
 
 static SYSTEM_ACCENT_RGB: AtomicU32 = AtomicU32::new(DEFAULT_ACCENT_RGB);
 
