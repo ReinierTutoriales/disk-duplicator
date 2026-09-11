@@ -1,33 +1,102 @@
 #![cfg(windows)]
 
-use std::ffi::OsStr;
+use std::ffi::c_void;
 use std::io;
 use std::mem::zeroed;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FlushFileBuffers, SetEndOfFile, SetFilePointerEx, WriteFile, CREATE_ALWAYS,
-    FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GENERIC_WRITE, OPEN_EXISTING,
-};
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
-
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const CREATE_ALWAYS: u32 = 2;
+const OPEN_EXISTING: u32 = 3;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+const FILE_BEGIN: u32 = 0;
+const ERROR_IO_PENDING: u32 = 997;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 258;
+const INFINITE: u32 = 0xffff_ffff;
 const CANCEL_POLL_MS: u32 = 40;
 
+type Handle = *mut c_void;
+const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OverlappedOffset {
+    offset: u32,
+    offset_high: u32,
+}
+
+#[repr(C)]
+union OverlappedPosition {
+    offset: OverlappedOffset,
+    pointer: *mut c_void,
+}
+
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    position: OverlappedPosition,
+    event: Handle,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *const c_void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: Handle,
+    ) -> Handle;
+    fn CreateEventW(
+        event_attributes: *const c_void,
+        manual_reset: i32,
+        initial_state: i32,
+        name: *const u16,
+    ) -> Handle;
+    fn CloseHandle(object: Handle) -> i32;
+    fn GetLastError() -> u32;
+    fn ResetEvent(event: Handle) -> i32;
+    fn WriteFile(
+        file: Handle,
+        buffer: *const c_void,
+        bytes_to_write: u32,
+        bytes_written: *mut u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
+    fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn GetOverlappedResult(
+        file: Handle,
+        overlapped: *mut Overlapped,
+        bytes_transferred: *mut u32,
+        wait: i32,
+    ) -> i32;
+    fn CancelIoEx(file: Handle, overlapped: *const Overlapped) -> i32;
+    fn SetFilePointerEx(
+        file: Handle,
+        distance: i64,
+        new_pointer: *mut i64,
+        move_method: u32,
+    ) -> i32;
+    fn SetEndOfFile(file: Handle) -> i32;
+    fn FlushFileBuffers(file: Handle) -> i32;
+}
+
 pub(crate) struct CancelableFile {
-    handle: HANDLE,
-    event: HANDLE,
+    handle: Handle,
+    event: Handle,
     offset: u64,
 }
 
-// Ownership of both Win32 handles is unique to this value. The type is deliberately not Sync.
+// Both handles are uniquely owned and only moved with this value. The type intentionally is not Sync.
 unsafe impl Send for CancelableFile {}
 
 impl CancelableFile {
@@ -49,7 +118,7 @@ impl CancelableFile {
                 null(),
                 disposition,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-                0,
+                null_mut(),
             )
         };
         if handle == INVALID_HANDLE_VALUE {
@@ -57,7 +126,7 @@ impl CancelableFile {
         }
 
         let event = unsafe { CreateEventW(null(), 1, 0, null()) };
-        if event == 0 {
+        if event.is_null() {
             let err = io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
             return Err(err);
@@ -77,12 +146,18 @@ impl CancelableFile {
             }
 
             let request_len = data.len().min(u32::MAX as usize) as u32;
-            unsafe { ResetEvent(self.event) };
+            if unsafe { ResetEvent(self.event) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
 
-            let mut overlapped: OVERLAPPED = unsafe { zeroed() };
-            overlapped.Anonymous.Anonymous.Offset = self.offset as u32;
-            overlapped.Anonymous.Anonymous.OffsetHigh = (self.offset >> 32) as u32;
-            overlapped.hEvent = self.event;
+            let mut overlapped: Overlapped = unsafe { zeroed() };
+            overlapped.position = OverlappedPosition {
+                offset: OverlappedOffset {
+                    offset: self.offset as u32,
+                    offset_high: (self.offset >> 32) as u32,
+                },
+            };
+            overlapped.event = self.event;
 
             let started = unsafe {
                 WriteFile(
@@ -108,7 +183,7 @@ impl CancelableFile {
                         if cancelled() {
                             unsafe {
                                 CancelIoEx(self.handle, &overlapped);
-                                WaitForSingleObject(self.event, u32::MAX);
+                                WaitForSingleObject(self.event, INFINITE);
                             }
                             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelado"));
                         }
@@ -118,11 +193,14 @@ impl CancelableFile {
             }
 
             let mut transferred = 0u32;
-            if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0 {
+            if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) } == 0 {
                 return Err(io::Error::last_os_error());
             }
             if transferred == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "WriteFile completó sin escribir bytes"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "WriteFile completó sin escribir bytes",
+                ));
             }
 
             let done = transferred as usize;
@@ -133,8 +211,10 @@ impl CancelableFile {
     }
 
     pub(crate) fn truncate_to(&mut self, len: u64) -> io::Result<()> {
-        let distance = len as i64;
-        if unsafe { SetFilePointerEx(self.handle, distance, null_mut(), FILE_BEGIN) } == 0 {
+        if len > i64::MAX as u64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "offset fuera de rango Win32"));
+        }
+        if unsafe { SetFilePointerEx(self.handle, len as i64, null_mut(), FILE_BEGIN) } == 0 {
             return Err(io::Error::last_os_error());
         }
         if unsafe { SetEndOfFile(self.handle) } == 0 {
@@ -156,10 +236,10 @@ impl CancelableFile {
 impl Drop for CancelableFile {
     fn drop(&mut self) {
         unsafe {
-            if self.event != 0 {
+            if !self.event.is_null() {
                 CloseHandle(self.event);
             }
-            if self.handle != 0 && self.handle != INVALID_HANDLE_VALUE {
+            if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
                 CloseHandle(self.handle);
             }
         }
@@ -167,7 +247,7 @@ impl Drop for CancelableFile {
 }
 
 fn wide_path(path: &Path) -> Vec<u16> {
-    OsStr::new(path.as_os_str())
+    path.as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
