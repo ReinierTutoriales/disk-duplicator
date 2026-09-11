@@ -61,7 +61,7 @@ impl eframe::App for CopierApp {
                 )
             });
         let starting = self.starting();
-        let running = self.running_job() && !all_terminal;
+        let running = self.running_job();
         let paused = running && self.job.as_ref().is_some_and(|job| job.is_paused());
         let verifying = running && snaps.iter().any(|dest| dest.phase == DestPhase::Verifying);
         let busy = starting || running;
