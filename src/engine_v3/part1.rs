@@ -65,7 +65,6 @@ pub struct JobState {
     pub files_total: AtomicU64,
     pub bytes_total: AtomicU64,
     pub buffers_in_flight: Arc<AtomicUsize>,
-    pub max_buffers: usize,
     pub dests: Mutex<Vec<DestProgress>>,
     pub(crate) reader_hashes: Mutex<HashMap<PathBuf, [u8; 32]>>,
 }
