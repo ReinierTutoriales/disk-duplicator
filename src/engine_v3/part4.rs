@@ -16,9 +16,15 @@ fn build_job(
     files: Arc<Vec<FileInfo>>,
     dirs: Arc<Vec<PathBuf>>,
     opts: CopyOpts,
-    preflight_verified_skip_same: bool,
+    preflight_verified_skips: Option<Arc<Vec<HashSet<PathBuf>>>>,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     create_directory_layout(&dests, &dirs)?;
+
+    if let Some(sets) = &preflight_verified_skips {
+        if sets.len() != dests.len() {
+            return Err("Pruebas de preflight inconsistentes con la cantidad de destinos.".into());
+        }
+    }
 
     let bytes_total: u64 = files.iter().map(|f| f.size).sum();
     let files_total = files.len() as u64;
@@ -60,7 +66,7 @@ fn build_job(
         files,
         Arc::clone(&state),
         opts,
-        preflight_verified_skip_same,
+        preflight_verified_skips,
     );
     Ok((state, handles))
 }
@@ -73,7 +79,7 @@ pub(crate) fn start_job_with_files(
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     validate_job_paths(&source, &dests)?;
-    build_job(source, dests, files, dirs, opts, false)
+    build_job(source, dests, files, dirs, opts, None)
 }
 
 pub(crate) fn start_job_with_files_preverified(
@@ -82,9 +88,10 @@ pub(crate) fn start_job_with_files_preverified(
     files: Arc<Vec<FileInfo>>,
     dirs: Arc<Vec<PathBuf>>,
     opts: CopyOpts,
+    preflight_verified_skips: Arc<Vec<HashSet<PathBuf>>>,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     validate_job_paths(&source, &dests)?;
-    build_job(source, dests, files, dirs, opts, true)
+    build_job(source, dests, files, dirs, opts, Some(preflight_verified_skips))
 }
 
 pub fn format_bps(bps: f64) -> String {
@@ -270,6 +277,50 @@ mod tests {
         assert_eq!(snap[0].files_skip, 0);
         assert_eq!(snap[0].files_done, 1);
         assert_eq!(snap[0].phase, DestPhase::Done);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preflight_skip_proofs_are_scoped_per_destination() {
+        let root = temp_dir("skip-proof-scope");
+        let source = root.join("src");
+        let dest_a = root.join("a");
+        let dest_b = root.join("b");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest_a).unwrap();
+        fs::create_dir_all(&dest_b).unwrap();
+        fs::write(source.join("x.bin"), b"good").unwrap();
+        fs::write(dest_a.join("x.bin"), b"good").unwrap();
+        fs::write(dest_b.join("x.bin"), b"evil").unwrap();
+        let source_mtime = fs::metadata(source.join("x.bin")).unwrap().modified().unwrap();
+        File::options().write(true).open(dest_a.join("x.bin")).unwrap().set_modified(source_mtime).unwrap();
+        File::options().write(true).open(dest_b.join("x.bin")).unwrap().set_modified(source_mtime).unwrap();
+        let meta = fs::metadata(source.join("x.bin")).unwrap();
+        let files = Arc::new(vec![FileInfo {
+            rel: PathBuf::from("x.bin"),
+            size: meta.len(),
+            mtime_ns: metadata_mtime_ns(&meta),
+        }]);
+        let proofs = Arc::new(vec![
+            HashSet::from([PathBuf::from("x.bin")]),
+            HashSet::new(),
+        ]);
+        let opts = CopyOpts { verify: true, skip_same: true, keep_going: true };
+        let (state, handles) = start_job_with_files_preverified(
+            source,
+            vec![dest_a.clone(), dest_b.clone()],
+            files,
+            Arc::new(Vec::new()),
+            opts,
+            proofs,
+        ).unwrap();
+        for handle in handles { handle.join().unwrap(); }
+
+        assert_eq!(fs::read(dest_a.join("x.bin")).unwrap(), b"good");
+        assert_eq!(fs::read(dest_b.join("x.bin")).unwrap(), b"good");
+        let snap = state.snapshot();
+        assert_eq!(snap[0].files_skip, 1);
+        assert_eq!(snap[1].files_skip, 0);
         let _ = fs::remove_dir_all(root);
     }
 
