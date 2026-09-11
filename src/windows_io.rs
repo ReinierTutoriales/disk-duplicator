@@ -97,6 +97,7 @@ struct NativeWriter {
     event: Handle,
     offset: u64,
     path: PathBuf,
+    reusable: bool,
 }
 
 impl NativeWriter {
@@ -131,11 +132,12 @@ impl NativeWriter {
             event,
             offset,
             path: path.to_path_buf(),
+            reusable: true,
         })
     }
 
     fn matches(&self, path: &Path, offset: u64) -> bool {
-        self.path == path && self.offset == offset
+        self.reusable && self.path == path && self.offset == offset
     }
 
     fn write_all_cancelable(
@@ -250,9 +252,14 @@ impl CancelableFile {
         data: &[u8],
         cancelled: impl FnMut() -> bool,
     ) -> io::Result<()> {
-        self.inner
+        let result = self
+            .inner
             .borrow_mut()
-            .write_all_cancelable(data, cancelled)
+            .write_all_cancelable(data, cancelled);
+        if result.is_err() {
+            self.inner.borrow_mut().reusable = false;
+        }
+        result
     }
 }
 
@@ -442,13 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn overlapped_writer_honors_pre_cancel() {
+    fn overlapped_writer_honors_pre_cancel_and_is_not_reused() {
         clear_writer_cache();
         let path = temp_file("cancel");
         let _owner = File::create(&path).unwrap();
-        let mut writer = CancelableFile::reopen_at(&path, 0).unwrap();
-        let err = writer.write_all_cancelable(b"data", || true).unwrap_err();
+        let mut first = CancelableFile::reopen_at(&path, 0).unwrap();
+        let first_inner = Rc::clone(&first.inner);
+        let err = first.write_all_cancelable(b"data", || true).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+
+        let second = CancelableFile::reopen_at(&path, 0).unwrap();
+        assert!(!Rc::ptr_eq(&first_inner, &second.inner));
+        drop(second);
+        drop(first);
         clear_writer_cache();
         let _ = fs::remove_file(path);
     }
