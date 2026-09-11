@@ -1,0 +1,134 @@
+name: Prepare RepartoCopier 1.4.3
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/release-1.4.3.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-on-failure: false
+
+      - name: Prepare version and release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $cargo = Get-Content Cargo.toml -Raw
+          if (($cargo | Select-String -Pattern 'version = "1\.4\.2"' -AllMatches).Matches.Count -ne 1) {
+            throw 'Cargo.toml no contiene exactamente una version 1.4.2'
+          }
+          $cargo = $cargo.Replace('version = "1.4.2"', 'version = "1.4.3"')
+          Set-Content Cargo.toml -Value $cargo -Encoding utf8 -NoNewline
+
+          $lock = Get-Content Cargo.lock -Raw
+          $oldRoot = "[[package]]`nname = `"disk-duplicator`"`nversion = `"1.4.2`""
+          $newRoot = "[[package]]`nname = `"disk-duplicator`"`nversion = `"1.4.3`""
+          if (-not $lock.Contains($oldRoot)) {
+            throw 'No se encontro el bloque raiz 1.4.2 en Cargo.lock'
+          }
+          $lock = $lock.Replace($oldRoot, $newRoot)
+          Set-Content Cargo.lock -Value $lock -Encoding utf8 -NoNewline
+
+          $workflow = Get-Content .github/workflows/build.yml -Raw
+          $oldNote = '- Verificación opcional de integridad del contenido copiado.'
+          $newNote = '- Verificación BLAKE3 de integridad del contenido copiado y validación final endurecida.'
+          if (-not $workflow.Contains($oldNote)) {
+            throw 'No se encontro la nota antigua de verificacion en build.yml'
+          }
+          $workflow = $workflow.Replace($oldNote, $newNote)
+          Set-Content .github/workflows/build.yml -Value $workflow -Encoding utf8 -NoNewline
+
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Clippy Rust 1.98.1
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test release Rust 1.98.1
+        run: cargo test --locked --release --verbose
+
+      - name: Build release Rust 1.98.1
+        run: cargo build --locked --release --verbose
+
+      - name: Verify latest stable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --component clippy --target x86_64-pc-windows-msvc
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked --release --verbose
+
+      - name: Commit clean 1.4.3 tree and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Remove-Item .github/workflows/release-1.4.3.yml
+
+          $changed = git status --short
+          Write-Host $changed
+          git diff --check
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock .github/workflows/build.yml .github/workflows/release-1.4.3.yml
+          git commit -m 'release: RepartoCopier 1.4.3'
+          git push origin HEAD:main
+
+          $sha = (git rev-parse HEAD).Trim()
+          $exe = 'target/release/RepartoCopier.exe'
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          @"
+          ## RepartoCopier v1.4.3
+
+          Release de estabilidad y endurecimiento del motor FAN-OUT.
+
+          ### Cambios principales
+          - FAN-OUT como único motor de copia, conservando la carpeta raíz, toda la jerarquía y carpetas vacías.
+          - Reader y writer Win32 OVERLAPPED endurecidos, con cancelación real mediante CancelIoEx y drenaje seguro de I/O pendiente.
+          - Watchdogs de lectura, escritura, sync, verify y operaciones finales del último archivo.
+          - Verificación BLAKE3 y validación final cancelables.
+          - Reanudación, journal, manifest y temporales fuera del árbol copiado con validación runtime.
+          - Protección reforzada contra symlinks, junctions y reparse points, incluyendo mitigaciones TOCTOU antes de escribir y commit.
+          - Corrección de carreras concurrentes al crear estado compartido entre destinos hermanos.
+          - Aislamiento de destinos lentos o fallidos y backpressure con presupuesto global de memoria.
+          - Correcciones de lifecycle/UI para impedir trabajos superpuestos durante la verificación final.
+          - Batería Windows release y compatibilidad latest stable verificadas antes de publicar.
+
+          ### Plataforma
+          - Windows 10/11 x64
+          - Ejecutable autónomo: RepartoCopier.exe
+
+          ### Integridad del binario
+          SHA-256: $hash
+          "@ | Set-Content release-notes-1.4.3.md -Encoding utf8
+
+          gh release create v1.4.3 $exe `
+            --target $sha `
+            --title 'RepartoCopier v1.4.3' `
+            --notes-file release-notes-1.4.3.md
+
+          gh workflow run build.yml --ref main
