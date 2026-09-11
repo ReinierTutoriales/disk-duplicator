@@ -257,12 +257,13 @@ pub(crate) fn sync_file_cancelable(
         match done_rx.recv_timeout(Duration::from_millis(CANCEL_POLL_MS as u64)) {
             Ok(result) => break result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !cancel_requested && cancelled() {
+                if cancelled() {
                     cancel_requested = true;
                     if unsafe { CancelSynchronousIo(thread_handle) } == 0 {
                         let code = unsafe { GetLastError() };
                         if code != ERROR_NOT_FOUND {
                             cancel_error = Some(io::Error::from_raw_os_error(code as i32));
+                            break Err(io::Error::other("no se pudo cancelar la sincronización"));
                         }
                     }
                 }
@@ -273,6 +274,9 @@ pub(crate) fn sync_file_cancelable(
         }
     };
 
+    if cancel_error.is_some() {
+        let _ = unsafe { CancelSynchronousIo(thread_handle) };
+    }
     unsafe { CloseHandle(thread_handle) };
     let join_result = helper.join();
     if join_result.is_err() {
