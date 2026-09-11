@@ -71,6 +71,7 @@ fn build_job(
     Ok((state, handles))
 }
 
+#[cfg(test)]
 pub(crate) fn start_job_with_files(
     source: PathBuf,
     dests: Vec<PathBuf>,
