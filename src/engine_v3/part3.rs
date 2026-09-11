@@ -1,4 +1,5 @@
 const MAX_PENDING_PER_DEST: usize = 32;
+const SKIP_VERIFY_BUFFER: usize = 4 * 1024 * 1024;
 
 type PendingQueues = Vec<std::collections::VecDeque<FanoutItem>>;
 
@@ -250,19 +251,49 @@ fn fanout_job(
             .map(|_| std::collections::VecDeque::new())
             .collect();
         let mut all_active: Vec<usize> = (0..dests.len()).collect();
+        let mut skip_verify_buf = vec![0u8; SKIP_VERIFY_BUFFER];
 
-        for info in files.iter() {
+        'files: for info in files.iter() {
             if !wait_pause(&state) { break; }
             let key = fast_state_key(info);
+            let src = source.join(&info.rel);
             let mut skip_mask = vec![false; dests.len()];
+            let mut source_skip_hash: Option<[u8; 32]> = None;
 
             for slot in 0..dests.len() {
                 if !controls[slot].alive.load(Ordering::Acquire) { continue; }
-                let src = source.join(&info.rel);
                 let dst = dests[slot].join(&info.rel);
                 let physically_valid = same_enough(&src, &dst);
                 let state_valid = state_cache[slot].contains(&key) && physically_valid;
-                skip_mask[slot] = state_valid || (opts.skip_same && physically_valid);
+                if state_valid {
+                    skip_mask[slot] = true;
+                    continue;
+                }
+
+                if opts.skip_same && physically_valid {
+                    let expected = match source_skip_hash {
+                        Some(hash) => hash,
+                        None => match hash_file_with_buffer(&src, &mut skip_verify_buf, Some(&state)) {
+                            Ok(hash) => {
+                                let bytes = *hash.as_bytes();
+                                state.reader_hashes.lock().unwrap().insert(info.rel.clone(), bytes);
+                                source_skip_hash = Some(bytes);
+                                bytes
+                            }
+                            Err(e) => {
+                                for &active_slot in &all_active {
+                                    set_error(&state, active_slot, e.clone());
+                                }
+                                state.request_cancel();
+                                break 'files;
+                            }
+                        },
+                    };
+
+                    if let Ok(actual) = hash_file_with_buffer(&dst, &mut skip_verify_buf, Some(&state)) {
+                        skip_mask[slot] = actual.as_bytes() == &expected;
+                    }
+                }
             }
 
             mark_skipped_all(&state, info, &skip_mask);
