@@ -11,7 +11,8 @@ fn display_path(path: &str) -> String {
 
 fn effective_destination_label(source: &str, destination: &str) -> String {
     let destination = display_path(destination);
-    let Some(source_name) = PathBuf::from(source.trim())
+    let source_path = PathBuf::from(source.trim());
+    let Some(source_name) = source_path
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -149,7 +150,6 @@ impl eframe::App for CopierApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(2.0);
 
-            // Bloque fijo: origen. Siempre visible y de una sola línea.
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("ORIGEN")
@@ -181,7 +181,6 @@ impl eframe::App for CopierApp {
 
             ui.add_space(SPACING_XS);
 
-            // Bloque fijo: cabecera y acciones de destinos.
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("DESTINOS  ({})", self.dests.len()))
@@ -304,7 +303,6 @@ impl eframe::App for CopierApp {
             ui.separator();
             ui.add_space(2.0);
 
-            // Opciones y controles comparten una única fila para no desperdiciar altura.
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.checkbox(&mut self.skip_same, "Omitir archivos iguales")
@@ -419,7 +417,6 @@ impl eframe::App for CopierApp {
                         .iter()
                         .any(|dest| dest.phase == DestPhase::Cancelled);
 
-                    // Progreso general fijo: queda inmediatamente debajo de controles.
                     ui.add_space(SPACING_XS);
                     card_frame(self.use_light_theme).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -476,9 +473,8 @@ impl eframe::App for CopierApp {
 
                     ui.add_space(SPACING_XS);
 
-                    // Solo la rejilla puede desbordar y desplazarse.
                     let grid_width = ui.available_width();
-                    let columns = if grid_width >= 1320.0 && snaps.len() >= 3 {
+                    let columns: usize = if grid_width >= 1320.0 && snaps.len() >= 3 {
                         3
                     } else if grid_width >= 760.0 && snaps.len() > 1 {
                         2
