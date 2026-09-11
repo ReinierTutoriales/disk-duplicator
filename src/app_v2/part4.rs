@@ -99,8 +99,8 @@ impl eframe::App for CopierApp {
 
         egui::TopBottomPanel::bottom("footer_v2").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let (status, color) = if self.error_flash_until.is_some() {
-                    (&self.status, Theme::error(self.use_light_theme))
+                let (status, color): (&str, Color32) = if self.error_flash_until.is_some() {
+                    (self.status.as_str(), Theme::error(self.use_light_theme))
                 } else if paused {
                     ("Copia en pausa", Theme::warning(self.use_light_theme))
                 } else if verifying {
@@ -109,7 +109,7 @@ impl eframe::App for CopierApp {
                         Theme::verify(self.use_light_theme),
                     )
                 } else {
-                    (&self.status, Theme::muted(self.use_light_theme))
+                    (self.status.as_str(), Theme::muted(self.use_light_theme))
                 };
 
                 let max_chars = ((ui.available_width() / 8.0) as usize).clamp(24, 88);
