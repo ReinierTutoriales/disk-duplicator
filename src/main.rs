@@ -7,6 +7,8 @@ mod config;
 mod engine_impl;
 mod paths;
 mod preflight;
+#[cfg(windows)]
+mod windows_io;
 
 mod engine {
     pub use crate::engine_impl::{format_bps, CopyOpts, DestPhase, JobState};
