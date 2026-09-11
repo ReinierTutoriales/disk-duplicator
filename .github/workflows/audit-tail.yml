@@ -1,11 +1,11 @@
-name: Tail watchdog audit
+name: Stability hardening audit
 
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/audit-tail.yml'
-      - '.github/audit_tail_patch.py'
+      - '.github/audit_stability_patch.py'
 
 permissions:
   contents: write
@@ -25,11 +25,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           cache-on-failure: false
-      - name: Apply patch and verify
+      - name: Apply stability patch and verify
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python .github/audit_tail_patch.py
+          python .github/audit_stability_patch.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fmt --all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -41,14 +41,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Commit verified patch
+      - name: Commit verified patch and remove audit helpers
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Remove-Item .github/workflows/audit-tail.yml
-          Remove-Item .github/audit_tail_patch.py
+          Remove-Item .github/audit_tail_patch.py -ErrorAction SilentlyContinue
+          Remove-Item .github/audit_stability_patch.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix: harden fanout tail watchdog'
+          git commit -m 'fix: harden fanout tail stability'
           git push origin HEAD:main
