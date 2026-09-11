@@ -15,8 +15,12 @@ const MIN_QUEUE: usize = 2;
 const MAX_QUEUE: usize = 16;
 const MAX_FREE_BUFFERS: usize = 16;
 const RETRIES: usize = 2;
-const STALL_THRESHOLD: Duration = Duration::from_secs(6);
-const LONG_OP_THRESHOLD: Duration = Duration::from_secs(60);
+// A 16 MiB synchronous write can legitimately take several seconds on slow USB,
+// SMR disks, or a device doing internal recovery. Six seconds produced false
+// positives. Thirty seconds still detects a genuinely stuck destination without
+// treating sub-MiB/s media as dead.
+const WRITE_STALL_THRESHOLD: Duration = Duration::from_secs(30);
+const LONG_OP_THRESHOLD: Duration = Duration::from_secs(120);
 const STATE_BATCH_FILES: usize = 128;
 const STATE_BATCH_INTERVAL: Duration = Duration::from_secs(1);
 const SPEED_TAU_SECS: f64 = 2.0;
@@ -220,7 +224,7 @@ impl DestControl {
     fn stall_timed_out(&self, last_write_progress: Instant) -> bool {
         let (phase, started) = *self.operation.lock().unwrap();
         match phase {
-            OperationPhase::Write => last_write_progress.elapsed() >= STALL_THRESHOLD,
+            OperationPhase::Write => last_write_progress.elapsed() >= WRITE_STALL_THRESHOLD,
             OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
                 started.elapsed() >= LONG_OP_THRESHOLD
             }
@@ -230,7 +234,7 @@ impl DestControl {
     fn stall_limit_secs(&self) -> u64 {
         let (phase, _) = *self.operation.lock().unwrap();
         match phase {
-            OperationPhase::Write => STALL_THRESHOLD.as_secs(),
+            OperationPhase::Write => WRITE_STALL_THRESHOLD.as_secs(),
             OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
                 LONG_OP_THRESHOLD.as_secs()
             }
@@ -496,8 +500,6 @@ fn record_done(state: &JobState, slot: usize) {
 }
 
 fn checkpoint_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    // Durability invariant: a completed journal entry must never become durable
-    // before the corresponding manifest hash is durable.
     manifest.finish()?;
     journal.checkpoint()
 }
