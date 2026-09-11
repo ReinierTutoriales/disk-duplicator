@@ -299,10 +299,15 @@ impl eframe::App for CopierApp {
                 }
             }
 
-            if path_error_count > 0 {
+            if let Some(first_error) = self.path_errors.first() {
+                let suffix = if path_error_count > 1 {
+                    format!(" · +{} más", path_error_count - 1)
+                } else {
+                    String::new()
+                };
                 ui.colored_label(
                     Theme::warning(self.use_light_theme),
-                    format!("⚠ {path_error_count} problema(s) de ruta"),
+                    RichText::new(format!("⚠ {first_error}{suffix}")).size(11.5),
                 )
                 .on_hover_text(self.path_errors.join("\n"));
             }
@@ -327,22 +332,43 @@ impl eframe::App for CopierApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if running {
                         if let Some(job) = &self.job {
-                            if ui
-                                .add_sized([84.0, 28.0], egui::Button::new("Cancelar"))
-                                .clicked()
-                            {
+                            let cancel = egui::Button::new(
+                                RichText::new("Cancelar")
+                                    .strong()
+                                    .color(Theme::error(self.use_light_theme)),
+                            )
+                            .fill(Theme::card(self.use_light_theme))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                Theme::border(self.use_light_theme),
+                            ));
+                            if ui.add_sized([88.0, 30.0], cancel).clicked() {
                                 job.request_cancel();
                             }
                             let pause_label = if paused { "Continuar" } else { "Pausar" };
-                            if ui
-                                .add_sized([84.0, 28.0], egui::Button::new(pause_label))
-                                .clicked()
-                            {
+                            let pause_button = egui::Button::new(
+                                RichText::new(pause_label)
+                                    .strong()
+                                    .color(Theme::accent(self.use_light_theme)),
+                            )
+                            .fill(Theme::selected(self.use_light_theme))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                Theme::accent(self.use_light_theme),
+                            ));
+                            if ui.add_sized([92.0, 30.0], pause_button).clicked() {
                                 job.set_paused(!paused);
                             }
                         }
                     } else if !starting {
-                        let button = egui::Button::new(RichText::new("Iniciar copia").strong());
+                        let button = egui::Button::new(
+                            RichText::new("Iniciar copia")
+                                .strong()
+                                .color(Theme::on_accent(self.use_light_theme)),
+                        )
+                        .fill(Theme::accent(self.use_light_theme))
+                        .stroke(egui::Stroke::NONE)
+                        .min_size(egui::vec2(116.0, 30.0));
                         if ui
                             .add_enabled(ready_to_start, button)
                             .on_hover_text("Iniciar copia a todos los destinos")
@@ -362,15 +388,11 @@ impl eframe::App for CopierApp {
                     let average = snaps
                         .iter()
                         .map(|progress| {
-                            if progress.total == 0 {
-                                if progress.phase == DestPhase::Done {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            } else {
-                                progress.written as f64 / progress.total as f64
-                            }
+                            f64::from(progress_fraction(
+                                progress.written,
+                                progress.total,
+                                progress.phase,
+                            ))
                         })
                         .sum::<f64>()
                         / snaps.len() as f64;
@@ -453,11 +475,13 @@ impl eframe::App for CopierApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.weak(format!(
-                                        "{} · {eta}",
+                                        "{} · ETA {eta}",
                                         format_bytes(job.bytes_total.load(Ordering::Relaxed))
                                     ));
                                     ui.label(
-                                        RichText::new(format_bps(total_bps)).strong().size(11.5),
+                                        RichText::new(format!("Vel. {}", format_bps(total_bps)))
+                                            .strong()
+                                            .size(11.5),
                                     );
                                 },
                             );
@@ -511,16 +535,11 @@ impl eframe::App for CopierApp {
                             .show(ui, |ui| {
                                 for row in snaps.chunks(columns) {
                                     for progress in row {
-                                        let fraction = if progress.total == 0 {
-                                            if progress.phase == DestPhase::Done {
-                                                1.0
-                                            } else {
-                                                0.0
-                                            }
-                                        } else {
-                                            (progress.written as f32 / progress.total as f32)
-                                                .clamp(0.0, 1.0)
-                                        };
+                                        let fraction = progress_fraction(
+                                            progress.written,
+                                            progress.total,
+                                            progress.phase,
+                                        );
                                         let (label, color) = phase_label(
                                             progress.phase,
                                             progress.files_err,
@@ -602,7 +621,7 @@ impl eframe::App for CopierApp {
                                                             ),
                                                             |ui| {
                                                                 ui.weak(format!(
-                                                                    "{} ✓ · {} omit. · {} err.",
+                                                                    "{} hechos · {} omit. · {} err.",
                                                                     progress.files_done,
                                                                     progress.files_skip,
                                                                     progress.files_err
