@@ -22,6 +22,7 @@ const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+const ERROR_HANDLE_EOF: u32 = 38;
 const ERROR_IO_PENDING: u32 = 997;
 const ERROR_NOT_FOUND: u32 = 1168;
 const WAIT_OBJECT_0: u32 = 0;
@@ -104,6 +105,7 @@ pub(crate) struct PendingRead {
     buffer: Vec<u8>,
     overlapped: Box<Overlapped>,
     start_error: Option<io::Error>,
+    immediate_eof: bool,
 }
 
 pub(crate) struct CancelableReader {
@@ -168,18 +170,25 @@ impl CancelableReader {
             )
         };
 
+        let mut immediate_eof = false;
         let start_error = if started == 0 {
             let code = unsafe { GetLastError() };
-            (code != ERROR_IO_PENDING).then(|| io::Error::from_raw_os_error(code as i32))
+            if code == ERROR_HANDLE_EOF {
+                immediate_eof = true;
+                None
+            } else {
+                (code != ERROR_IO_PENDING).then(|| io::Error::from_raw_os_error(code as i32))
+            }
         } else {
             None
         };
-        self.pending = start_error.is_none();
+        self.pending = start_error.is_none() && !immediate_eof;
 
         PendingRead {
             buffer,
             overlapped,
             start_error,
+            immediate_eof,
         }
     }
 
@@ -188,6 +197,10 @@ impl CancelableReader {
         mut pending: PendingRead,
         mut cancelled: impl FnMut() -> bool,
     ) -> (Vec<u8>, io::Result<usize>) {
+        if pending.immediate_eof {
+            self.pending = false;
+            return (pending.buffer, Ok(0));
+        }
         if let Some(err) = pending.start_error.take() {
             self.pending = false;
             return (pending.buffer, Err(err));
@@ -228,7 +241,12 @@ impl CancelableReader {
             )
         } == 0
         {
-            Err(io::Error::last_os_error())
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
+                Ok(0)
+            } else {
+                Err(err)
+            }
         } else {
             self.offset = self.offset.saturating_add(transferred as u64);
             Ok(transferred as usize)
