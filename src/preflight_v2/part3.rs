@@ -8,8 +8,6 @@ fn supervise_job(
     opts: CopyOpts,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        // A job remains live until every engine thread has actually terminated. Dropping an
-        // unfinished JoinHandle only detaches the thread; it does not cancel a blocked OS I/O.
         loop {
             state.running.store(true, Ordering::Release);
             if handles.iter().all(JoinHandle::is_finished) {
@@ -130,7 +128,7 @@ pub fn start_job(
     opts: CopyOpts,
 ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
     let preflight = run_preflight(&source, &dests, opts)?;
-    let (state, handles) = engine_impl::start_job_with_files(
+    let (state, handles) = engine_impl::start_job_with_files_preverified(
         preflight.source.clone(),
         preflight.dests.clone(),
         Arc::clone(&preflight.files),
