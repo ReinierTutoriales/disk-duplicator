@@ -1,3 +1,45 @@
+fn validate_destinations_parallel(
+    source: &Path,
+    dest_paths: &[PathBuf],
+    files: &[PlannedFile],
+    dirs: &[PathBuf],
+    verify: bool,
+    expected_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+    current_errors: &[Option<String>],
+) -> Vec<(usize, Result<(), String>)> {
+    thread::scope(|scope| {
+        let mut checks = Vec::new();
+        for (slot, dest) in dest_paths.iter().enumerate() {
+            if current_errors[slot].is_some() {
+                continue;
+            }
+            checks.push((
+                slot,
+                scope.spawn(move || {
+                    validate_destination_result_with_hashes(
+                        source,
+                        dest,
+                        files,
+                        dirs,
+                        verify,
+                        expected_hashes,
+                    )
+                }),
+            ));
+        }
+
+        checks
+            .into_iter()
+            .map(|(slot, handle)| {
+                let result = handle.join().unwrap_or_else(|_| {
+                    Err("La verificación final del destino terminó inesperadamente.".into())
+                });
+                (slot, result)
+            })
+            .collect()
+    })
+}
+
 fn supervise_job(
     source: PathBuf,
     dest_paths: Vec<PathBuf>,
@@ -72,18 +114,17 @@ fn supervise_job(
                 reader_hashes
             };
 
-            for (slot, dest) in dest_paths.iter().enumerate() {
-                if final_errors[slot].is_none() {
-                    if let Err(e) = validate_destination_result_with_hashes(
-                        &source,
-                        dest,
-                        &files,
-                        &dirs,
-                        opts.verify,
-                        &expected_hashes,
-                    ) {
-                        final_errors[slot] = Some(e);
-                    }
+            for (slot, result) in validate_destinations_parallel(
+                &source,
+                &dest_paths,
+                &files,
+                &dirs,
+                opts.verify,
+                &expected_hashes,
+                &final_errors,
+            ) {
+                if let Err(e) = result {
+                    final_errors[slot] = Some(e);
                 }
             }
         }
