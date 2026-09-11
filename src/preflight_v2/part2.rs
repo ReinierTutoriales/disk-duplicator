@@ -121,7 +121,7 @@ fn run_preflight(
     source: &Path,
     dests: &[PathBuf],
     opts: CopyOpts,
-) -> Result<(PreflightResult, Arc<Vec<HashSet<PathBuf>>>), String> {
+) -> Result<PreflightPlan, String> {
     if !source.is_dir() { return Err("El origen debe ser una carpeta.".into()); }
     if dests.is_empty() { return Err("Agrega al menos un destino.".into()); }
 
