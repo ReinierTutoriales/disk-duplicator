@@ -132,29 +132,63 @@ fn write_buffer_retrying(
     let mut last_err = String::new();
 
     for attempt in 0..=RETRIES {
+        if file.is_none() {
+            return Err("archivo temporal no disponible".to_owned());
+        }
+
         let mut offset = 0usize;
         let mut attempt_error = None;
-        while offset < data.len() {
+
+        #[cfg(windows)]
+        let mut native_writer = match crate::windows_io::CancelableFile::reopen_at(tmp, committed) {
+            Ok(writer) => Some(writer),
+            Err(e) => {
+                attempt_error = Some(format!("abrir I/O nativo {}: {e}", ctx.rel));
+                None
+            }
+        };
+
+        while offset < data.len() && attempt_error.is_none() {
             if !wait_pause(ctx.state) {
                 attempt_error = Some("Cancelado".to_owned());
                 break;
             }
             let end = (offset + WRITE_CHUNK).min(data.len());
-            let Some(handle) = file.as_mut() else {
-                attempt_error = Some("archivo temporal no disponible".to_owned());
-                break;
-            };
-            match handle.write_all(&data[offset..end]) {
+
+            #[cfg(windows)]
+            let write_result = native_writer
+                .as_mut()
+                .expect("native writer initialized")
+                .write_all_cancelable(&data[offset..end], || {
+                    ctx.state.cancel.load(Ordering::Acquire)
+                        || !ctx.control.alive.load(Ordering::Acquire)
+                });
+
+            #[cfg(not(windows))]
+            let write_result = file
+                .as_mut()
+                .expect("temporary file initialized")
+                .write_all(&data[offset..end]);
+
+            match write_result {
                 Ok(()) => {
                     offset = end;
                     ctx.control.note_progress();
                 }
                 Err(e) => {
-                    attempt_error = Some(format!("escritura {}: {e}", ctx.rel));
-                    break;
+                    if e.kind() == std::io::ErrorKind::Interrupted
+                        && ctx.state.cancel.load(Ordering::Acquire)
+                    {
+                        attempt_error = Some("Cancelado".to_owned());
+                    } else {
+                        attempt_error = Some(format!("escritura {}: {e}", ctx.rel));
+                    }
                 }
             }
         }
+
+        #[cfg(windows)]
+        drop(native_writer.take());
 
         if attempt_error.is_none() {
             return Ok(());
