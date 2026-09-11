@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/audit-tail.yml'
+      - '.github/audit_tail_patch.py'
 
 permissions:
   contents: write
@@ -27,15 +28,23 @@ jobs:
       - name: Apply patch and verify
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python .github/audit_tail_patch.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Commit verified patch
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Remove-Item .github/workflows/audit-tail.yml
           Remove-Item .github/audit_tail_patch.py
           git config user.name 'github-actions[bot]'
