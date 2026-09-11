@@ -122,6 +122,35 @@ mod tests {
     }
 
     #[test]
+    fn manifest_compaction_keeps_only_latest_current_entry() {
+        let root = temp_dir("manifest-compact");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(source.join("a.bin"), b"new").unwrap();
+        let (files, _) = scan_source(&source).unwrap();
+        let dir = state_dir_for(&dest);
+        fs::create_dir_all(&dir).unwrap();
+        let old_hash = blake3::hash(b"old");
+        let new_hash = blake3::hash(b"new");
+        fs::write(
+            manifest_path(&dest),
+            format!(
+                "{}  a.bin\n{}  stale.bin\n{}  a.bin\n",
+                old_hash.to_hex(), old_hash.to_hex(), new_hash.to_hex()
+            ),
+        ).unwrap();
+
+        compact_manifest(&dest, &files).unwrap();
+        let text = fs::read_to_string(manifest_path(&dest)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], format!("{}  a.bin", new_hash.to_hex()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn manifest_rejects_same_size_corruption_from_resume_state() {
         let root = temp_dir("resume-hash");
         let source = root.join("src");
