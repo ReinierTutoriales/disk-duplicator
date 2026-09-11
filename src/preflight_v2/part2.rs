@@ -4,7 +4,7 @@ fn plan_destination(
     files: &[PlannedFile],
     dirs: &[PathBuf],
     opts: CopyOpts,
-) -> Result<(), String> {
+) -> Result<HashSet<PathBuf>, String> {
     prepare_state_dir(dest)?;
     cleanup_owned_stale_files(dest, files)?;
     validate_destination_directories(dest, dirs)?;
@@ -17,6 +17,7 @@ fn plan_destination(
     let completed = normalize_completed_state(source, dest, files)?;
     compact_manifest(dest, files)?;
     let mut skip_verify_buf = opts.skip_same.then(|| vec![0u8; VERIFY_BUF]);
+    let mut verified_skips = HashSet::new();
 
     let mut bytes_to_write = 0u64;
     let mut committed_delta: i128 = 0;
@@ -28,14 +29,17 @@ fn plan_destination(
         let dst = dest.join(&info.rel);
         let key = state_key(info);
         let physically_valid = same_enough(&src, &dst);
-        let skip_same_valid = if opts.skip_same && physically_valid && !completed.contains(&key) {
-            let buf = skip_verify_buf.as_mut().expect("skip_same buffer");
-            hash_path_with_buffer(&src, buf)? == hash_path_with_buffer(&dst, buf)?
-        } else {
-            false
-        };
-        if (completed.contains(&key) && physically_valid) || skip_same_valid {
+        if completed.contains(&key) && physically_valid {
+            verified_skips.insert(info.rel.clone());
             continue;
+        }
+
+        if opts.skip_same && physically_valid {
+            let buf = skip_verify_buf.as_mut().expect("skip_same buffer");
+            if hash_path_with_buffer(&src, buf)? == hash_path_with_buffer(&dst, buf)? {
+                verified_skips.insert(info.rel.clone());
+                continue;
+            }
         }
 
         let old_alloc = destination_file_allocation(&dst, granularity)?;
@@ -64,7 +68,7 @@ fn plan_destination(
         ));
     }
 
-    Ok(())
+    Ok(verified_skips)
 }
 
 fn canonical_existing(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -113,7 +117,11 @@ fn validate_destinations(source: &Path, dests: &[PathBuf]) -> Result<Vec<PathBuf
     Ok(canonical)
 }
 
-fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<PreflightResult, String> {
+fn run_preflight(
+    source: &Path,
+    dests: &[PathBuf],
+    opts: CopyOpts,
+) -> Result<(PreflightResult, Arc<Vec<HashSet<PathBuf>>>), String> {
     if !source.is_dir() { return Err("El origen debe ser una carpeta.".into()); }
     if dests.is_empty() { return Err("Agrega al menos un destino.".into()); }
 
@@ -122,17 +130,21 @@ fn run_preflight(source: &Path, dests: &[PathBuf], opts: CopyOpts) -> Result<Pre
     let (files, dirs) = scan_source(&canonical_source)?;
     let files = Arc::new(files);
     let dirs = Arc::new(dirs);
+    let mut verified_skips = Vec::with_capacity(canonical_dests.len());
 
     for dest in &canonical_dests {
-        plan_destination(&canonical_source, dest, &files, &dirs, opts)?;
+        verified_skips.push(plan_destination(&canonical_source, dest, &files, &dirs, opts)?);
     }
 
-    Ok(PreflightResult {
-        source: canonical_source,
-        dests: canonical_dests,
-        files,
-        dirs,
-    })
+    Ok((
+        PreflightResult {
+            source: canonical_source,
+            dests: canonical_dests,
+            files,
+            dirs,
+        },
+        Arc::new(verified_skips),
+    ))
 }
 
 fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Option<String> {
