@@ -688,6 +688,8 @@ fn fanout_worker(
         } else {
             set_phase(&state, slot, DestPhase::Failed, Some(e));
         }
+        control.queue_depth.store(0, Ordering::Release);
+        state.dests.lock().unwrap()[slot].queue_depth = 0;
         control.alive.store(false, Ordering::Release);
         control.note_progress();
         return;
@@ -695,10 +697,15 @@ fn fanout_worker(
 
     if state.cancel.load(Ordering::Acquire) {
         set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        control.queue_depth.store(0, Ordering::Release);
+        state.dests.lock().unwrap()[slot].queue_depth = 0;
         control.alive.store(false, Ordering::Release);
         control.note_progress();
         return;
     }
+
+    control.queue_depth.store(0, Ordering::Release);
+    state.dests.lock().unwrap()[slot].queue_depth = 0;
 
     let errs = state.dests.lock().unwrap()[slot].files_err;
     if !control.alive.load(Ordering::Acquire) {

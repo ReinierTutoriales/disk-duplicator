@@ -128,13 +128,27 @@ fn legacy_state_key(info: &PlannedFile) -> String {
     key
 }
 
+fn ensure_owned_regular_file(path: &Path, label: &str) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|e| format!("No se pudo inspeccionar {label} {}: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || is_reparse_point(&meta) || !meta.is_file() {
+        return Err(format!(
+            "Entrada de estado no segura para {label}: {}. Se esperaba un archivo regular sin enlaces ni reparse points.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn recover_completed_rewrite(dest: &Path) -> Result<(), String> {
     let path = state_path(dest);
     let tmp = state_rewrite_tmp_path(dest);
     let backup = state_rewrite_backup_path(dest);
 
     if path.exists() {
+        ensure_owned_regular_file(&path, "journal")?;
         if backup.exists() {
+            ensure_owned_regular_file(&backup, "backup de estado")?;
             fs::remove_file(&backup).map_err(|e| {
                 format!(
                     "No se pudo limpiar backup de estado {}: {e}",
@@ -143,6 +157,7 @@ fn recover_completed_rewrite(dest: &Path) -> Result<(), String> {
             })?;
         }
         if tmp.exists() {
+            ensure_owned_regular_file(&tmp, "temporal de estado")?;
             fs::remove_file(&tmp).map_err(|e| {
                 format!(
                     "No se pudo limpiar temporal de estado {}: {e}",
@@ -154,10 +169,12 @@ fn recover_completed_rewrite(dest: &Path) -> Result<(), String> {
     }
 
     if backup.exists() {
+        ensure_owned_regular_file(&backup, "backup de estado")?;
         fs::rename(&backup, &path)
             .map_err(|e| format!("No se pudo restaurar el journal {}: {e}", path.display()))?;
     }
     if tmp.exists() {
+        ensure_owned_regular_file(&tmp, "temporal de estado")?;
         fs::remove_file(&tmp)
             .map_err(|e| format!("No se pudo limpiar temporal de estado {}: {e}", tmp.display()))?;
     }
@@ -351,6 +368,7 @@ fn cleanup_owned_stale_files(dest: &Path, files: &[PlannedFile]) -> Result<(), S
             if !backup.exists() {
                 continue;
             }
+            ensure_owned_regular_file(&backup, "backup de copia")?;
             if dst.exists() {
                 remove_owned_file(&backup, "backup")?;
             } else {
