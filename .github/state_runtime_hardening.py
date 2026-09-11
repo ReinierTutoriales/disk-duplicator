@@ -11,19 +11,28 @@ paths_path = Path('src/paths.rs')
 engine1_path = Path('src/engine_impl/part1.rs')
 engine2_path = Path('src/engine_impl/part2.rs')
 engine4_path = Path('src/engine_impl/part4.rs')
+windows_path = Path('src/windows_io.rs')
 
 paths = paths_path.read_text(encoding='utf-8')
 part1 = engine1_path.read_text(encoding='utf-8')
 part2 = engine2_path.read_text(encoding='utf-8')
 part4 = engine4_path.read_text(encoding='utf-8')
+windows = windows_path.read_text(encoding='utf-8')
 
 anchor = '''pub(crate) fn state_path(dest: &Path) -> PathBuf {\n    state_dir_for(dest).join("completed.jsonl")\n}\n'''
 insert = '''pub(crate) fn prepare_runtime_state_tmp(dest: &Path) -> Result<PathBuf, String> {\n    let current = prepare_state_dir(dest)?;\n    let tmp = current.join("tmp");\n    if tmp.exists() {\n        ensure_normal_dir(&tmp, "El directorio temporal de estado")?;\n    } else {\n        std::fs::create_dir(&tmp).map_err(|e| {\n            format!("No se pudo crear el directorio temporal de estado {}: {e}", tmp.display())\n        })?;\n        ensure_normal_dir(&tmp, "El directorio temporal de estado")?;\n    }\n    Ok(tmp)\n}\n\npub(crate) fn state_path(dest: &Path) -> PathBuf {\n    state_dir_for(dest).join("completed.jsonl")\n}\n'''
 paths = one(paths, anchor, insert, 'runtime state tmp helper')
 
 old_import = '''use crate::paths::{backup_path, manifest_path, part_path, persisted_path_key, state_dir_for, state_path};'''
-new_import = '''use crate::paths::{\n    backup_path, manifest_path, part_path, persisted_path_key, prepare_runtime_state_tmp,\n    prepare_state_dir, state_dir_for, state_path,\n};'''
+new_import = '''use crate::paths::{\n    backup_path, manifest_path, part_path, persisted_path_key, prepare_runtime_state_tmp,\n    prepare_state_dir, state_path,\n};'''
 part1 = one(part1, old_import, new_import, 'engine paths import')
+
+part1 = one(
+    part1,
+    '''fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> {\n    let meta = fs::metadata(path).map_err(|e| format!("origen {}: {e}", path.display()))?;\n    if !meta.is_file() || meta.len() != info.size || metadata_mtime_ns(&meta) != info.mtime_ns {\n        return Err(format!("origen cambió: {}", path.display()));\n    }\n    Ok(())\n}\n\nfn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {\n    for dest in dests {\n        fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;\n        for rel in dirs {\n            let path = dest.join(rel);\n            fs::create_dir_all(&path)\n                .map_err(|e| format!("No se pudo crear la carpeta {}: {e}", path.display()))?;\n        }\n    }\n    Ok(())\n}\n''',
+    '''fn validate_source_snapshot(path: &Path, info: &FileInfo) -> Result<(), String> {\n    let meta = fs::symlink_metadata(path).map_err(|e| format!("origen {}: {e}", path.display()))?;\n    if meta.file_type().is_symlink()\n        || runtime_is_reparse(&meta)\n        || !meta.is_file()\n        || meta.len() != info.size\n        || metadata_mtime_ns(&meta) != info.mtime_ns\n    {\n        return Err(format!("origen cambió: {}", path.display()));\n    }\n    Ok(())\n}\n\nfn ensure_runtime_destination_directory(root: &Path, rel: &Path) -> Result<(), String> {\n    let root_meta = fs::symlink_metadata(root)\n        .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", root.display()))?;\n    if !root_meta.is_dir() || root_meta.file_type().is_symlink() || runtime_is_reparse(&root_meta) {\n        return Err(format!("Destino inseguro o reemplazado durante la copia: {}", root.display()));\n    }\n\n    let mut current = root.to_path_buf();\n    let mut saw_component = false;\n    for component in rel.components() {\n        let Component::Normal(name) = component else {\n            return Err(format!("Ruta relativa insegura: {}", rel.display()));\n        };\n        saw_component = true;\n        current.push(name);\n        match fs::symlink_metadata(&current) {\n            Ok(meta) => {\n                if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {\n                    return Err(format!("Componente de carpeta inseguro en destino: {}", current.display()));\n                }\n            }\n            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {\n                fs::create_dir(&current)\n                    .map_err(|e| format!("No se pudo crear la carpeta {}: {e}", current.display()))?;\n                let meta = fs::symlink_metadata(&current)\n                    .map_err(|e| format!("No se pudo verificar la carpeta {}: {e}", current.display()))?;\n                if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {\n                    return Err(format!("La carpeta creada no es segura: {}", current.display()));\n                }\n            }\n            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", current.display())),\n        }\n    }\n    if !saw_component {\n        return Err("Ruta relativa vacía en el layout de carpetas".into());\n    }\n    Ok(())\n}\n\nfn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {\n    for dest in dests {\n        fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;\n        let meta = fs::symlink_metadata(dest)\n            .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", dest.display()))?;\n        if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse(&meta) {\n            return Err(format!("Destino inseguro o reemplazado durante la copia: {}", dest.display()));\n        }\n        for rel in dirs {\n            ensure_runtime_destination_directory(dest, rel)?;\n        }\n    }\n    Ok(())\n}\n''',
+    'runtime source and directory layout',
+)
 
 part1 = one(
     part1,
@@ -66,11 +75,19 @@ part2 = one(
     'commit state path validation',
 )
 
+windows = one(
+    windows,
+    '''                    _ => return Err(io::Error::last_os_error()),\n''',
+    '''                    _ => {\n                        let err = io::Error::last_os_error();\n                        unsafe {\n                            CancelIoEx(self.handle, &overlapped);\n                            WaitForSingleObject(self.event, INFINITE);\n                        }\n                        return Err(err);\n                    }\n''',
+    'writer wait drain',
+)
+
 needle = '''    #[test]\n    fn state_is_outside_destination_tree() {'''
-test = '''    #[test]\n    fn runtime_state_tmp_rejects_non_directory_entry() {\n        let root = temp_dir("runtime-state-tmp");\n        let dest = root.join("CopyName");\n        fs::create_dir_all(&dest).unwrap();\n        let state = prepare_state_dir(&dest).unwrap();\n        fs::write(state.join("tmp"), b"not-a-directory").unwrap();\n        assert!(prepare_runtime_state_tmp(&dest).is_err());\n        let _ = fs::remove_dir_all(root);\n    }\n\n    #[test]\n    fn state_is_outside_destination_tree() {'''
-part4 = one(part4, needle, test, 'runtime state tmp regression')
+test = '''    #[test]\n    fn runtime_state_tmp_rejects_non_directory_entry() {\n        let root = temp_dir("runtime-state-tmp");\n        let dest = root.join("CopyName");\n        fs::create_dir_all(&dest).unwrap();\n        let state = prepare_state_dir(&dest).unwrap();\n        fs::write(state.join("tmp"), b"not-a-directory").unwrap();\n        assert!(prepare_runtime_state_tmp(&dest).is_err());\n        let _ = fs::remove_dir_all(root);\n    }\n\n    #[test]\n    fn directory_layout_rejects_file_as_intermediate_component() {\n        let root = temp_dir("unsafe-dir-layout");\n        let dest = root.join("dest");\n        fs::create_dir_all(&dest).unwrap();\n        fs::write(dest.join("a"), b"file").unwrap();\n        let dirs = vec![PathBuf::from("a/b")];\n        assert!(create_directory_layout(std::slice::from_ref(&dest), &dirs).is_err());\n        let _ = fs::remove_dir_all(root);\n    }\n\n    #[test]\n    fn state_is_outside_destination_tree() {'''
+part4 = one(part4, needle, test, 'runtime state and directory regressions')
 
 paths_path.write_text(paths, encoding='utf-8')
 engine1_path.write_text(part1, encoding='utf-8')
 engine2_path.write_text(part2, encoding='utf-8')
 engine4_path.write_text(part4, encoding='utf-8')
+windows_path.write_text(windows, encoding='utf-8')
