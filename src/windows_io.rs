@@ -19,6 +19,7 @@ const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 const ERROR_IO_PENDING: u32 = 997;
 const ERROR_NOT_FOUND: u32 = 1168;
@@ -71,7 +72,6 @@ extern "system" {
     ) -> Handle;
     fn CloseHandle(object: Handle) -> i32;
     fn GetLastError() -> u32;
-    fn ResetEvent(event: Handle) -> i32;
     fn WriteFile(
         file: Handle,
         buffer: *const c_void,
@@ -109,7 +109,7 @@ impl NativeWriter {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OVERLAPPED,
                 null_mut(),
             )
         };
@@ -117,7 +117,9 @@ impl NativeWriter {
             return Err(io::Error::last_os_error());
         }
 
-        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+        // Auto-reset: WaitForSingleObject consumes the completion signal, so no ResetEvent syscall
+        // is needed before the next sequential OVERLAPPED request on this writer.
+        let event = unsafe { CreateEventW(null(), 0, 0, null()) };
         if event.is_null() {
             let err = io::Error::last_os_error();
             unsafe { CloseHandle(handle) };
@@ -147,10 +149,6 @@ impl NativeWriter {
             }
 
             let request_len = data.len().min(u32::MAX as usize) as u32;
-            if unsafe { ResetEvent(self.event) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-
             let mut overlapped: Overlapped = unsafe { zeroed() };
             overlapped.position = OverlappedPosition {
                 offset: OverlappedOffset {
