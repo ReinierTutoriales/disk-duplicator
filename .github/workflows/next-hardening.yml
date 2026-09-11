@@ -1,0 +1,53 @@
+name: Next stability hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/next_hardening.py'
+      - '.github/workflows/next-hardening.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  harden:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: clippy,rustfmt
+      - name: Apply hardening
+        shell: pwsh
+        run: python .github/next_hardening.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Diff check
+        shell: pwsh
+        run: git diff --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Release tests
+        run: cargo test --locked --release
+      - name: Release build
+        run: cargo build --locked --release
+      - name: Commit clean product
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Remove-Item .github/next_hardening.py
+          Remove-Item .github/workflows/next-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: harden recovery state and terminal queue accounting"
+          git push origin HEAD:main
+          gh workflow run build.yml --ref main
