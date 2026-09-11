@@ -31,12 +31,20 @@ impl eframe::App for CopierApp {
         self.poll_startup();
 
         if self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL {
+            let previous_theme = self.use_light_theme;
+            let previous_accent = SYSTEM_ACCENT_RGB.load(Ordering::Relaxed);
+
             if self.theme_preference == ThemePreference::System {
                 self.use_light_theme = detect_system_theme();
             }
             refresh_system_accent();
+
+            let accent_changed =
+                SYSTEM_ACCENT_RGB.load(Ordering::Relaxed) != previous_accent;
+            if self.use_light_theme != previous_theme || accent_changed {
+                self.applied_theme = None;
+            }
             self.last_theme_check = Instant::now();
-            self.applied_theme = None;
         }
 
         if self.applied_theme != Some(self.use_light_theme) {
@@ -133,7 +141,7 @@ impl eframe::App for CopierApp {
                 } else {
                     (self.status.as_str(), Theme::muted(self.use_light_theme))
                 };
-                let max_chars = ((ui.available_width() / 8.0) as usize).clamp(24, 88);
+                let max_chars = ((ui.available_width() / 8.0) as usize).clamp(32, 88);
                 ui.colored_label(color, compact_path(status, max_chars));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -473,6 +481,9 @@ impl eframe::App for CopierApp {
 
                     ui.add_space(SPACING_XS);
 
+                    const CARD_ROW_HEIGHT: f32 = 105.0;
+                    const ROW_SPACING: f32 = 6.0;
+
                     let grid_width = ui.available_width();
                     let columns: usize = if grid_width >= 1320.0 && snaps.len() >= 3 {
                         3
@@ -488,153 +499,158 @@ impl eframe::App for CopierApp {
                     } else {
                         grid_width.max(280.0)
                     };
-                    let max_grid_height = ui.available_height().max(96.0);
+                    let rows = snaps.len().div_ceil(columns);
+                    let estimated_grid_height = rows as f32 * CARD_ROW_HEIGHT
+                        + rows.saturating_sub(1) as f32 * ROW_SPACING;
+                    let available_grid_height = ui.available_height().max(96.0);
 
-                    egui::ScrollArea::vertical()
-                        .id_salt("progress_grid_zone_v4")
-                        .max_height(max_grid_height)
-                        .auto_shrink([false, true])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                        )
-                        .show(ui, |ui| {
-                            egui::Grid::new("progress_grid_v4")
-                                .num_columns(columns)
-                                .spacing(egui::vec2(SPACING_SM, 6.0))
-                                .show(ui, |ui| {
-                                    for row in snaps.chunks(columns) {
-                                        for progress in row {
-                                            let fraction = if progress.total == 0 {
-                                                if progress.phase == DestPhase::Done {
-                                                    1.0
-                                                } else {
-                                                    0.0
-                                                }
+                    let render_grid = |ui: &mut egui::Ui| {
+                        egui::Grid::new("progress_grid_v5")
+                            .num_columns(columns)
+                            .spacing(egui::vec2(SPACING_SM, ROW_SPACING))
+                            .show(ui, |ui| {
+                                for row in snaps.chunks(columns) {
+                                    for progress in row {
+                                        let fraction = if progress.total == 0 {
+                                            if progress.phase == DestPhase::Done {
+                                                1.0
                                             } else {
-                                                (progress.written as f32
-                                                    / progress.total as f32)
-                                                    .clamp(0.0, 1.0)
-                                            };
-                                            let (label, color) = phase_label(
-                                                progress.phase,
-                                                progress.files_err,
-                                                self.use_light_theme,
-                                                paused,
-                                            );
-                                            let shown_label = display_path(&progress.label);
+                                                0.0
+                                            }
+                                        } else {
+                                            (progress.written as f32 / progress.total as f32)
+                                                .clamp(0.0, 1.0)
+                                        };
+                                        let (label, color) = phase_label(
+                                            progress.phase,
+                                            progress.files_err,
+                                            self.use_light_theme,
+                                            paused,
+                                        );
+                                        let shown_label = display_path(&progress.label);
 
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(cell_width, 0.0),
-                                                egui::Layout::top_down(egui::Align::Min),
-                                                |ui| {
-                                                    card_frame(self.use_light_theme).show(ui, |ui| {
-                                                        ui.set_width(
-                                                            (cell_width - 20.0).max(240.0),
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(cell_width, 0.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                card_frame(self.use_light_theme).show(ui, |ui| {
+                                                    ui.set_width((cell_width - 20.0).max(240.0));
+                                                    ui.set_min_height(72.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new(compact_path(
+                                                                &shown_label,
+                                                                36,
+                                                            ))
+                                                            .strong()
+                                                            .size(11.5),
+                                                        )
+                                                        .on_hover_text(&shown_label);
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                ui.colored_label(
+                                                                    color,
+                                                                    RichText::new(label)
+                                                                        .size(10.0)
+                                                                        .strong(),
+                                                                );
+                                                            },
                                                         );
-                                                        ui.set_min_height(72.0);
-                                                        ui.horizontal(|ui| {
-                                                            ui.label(
-                                                                RichText::new(compact_path(
-                                                                    &shown_label,
-                                                                    36,
-                                                                ))
-                                                                .strong()
-                                                                .size(11.5),
-                                                            )
-                                                            .on_hover_text(&shown_label);
-                                                            ui.with_layout(
-                                                                egui::Layout::right_to_left(
-                                                                    egui::Align::Center,
-                                                                ),
-                                                                |ui| {
-                                                                    ui.colored_label(
-                                                                        color,
-                                                                        RichText::new(label)
-                                                                            .size(10.0)
-                                                                            .strong(),
-                                                                    );
-                                                                },
-                                                            );
-                                                        });
-                                                        ui.add(
-                                                            egui::ProgressBar::new(fraction)
-                                                                .desired_height(11.0)
-                                                                .fill(
-                                                                    if progress.phase
-                                                                        == DestPhase::Done
-                                                                        && progress.files_err == 0
-                                                                    {
-                                                                        Theme::success(
-                                                                            self.use_light_theme,
-                                                                        )
-                                                                    } else {
-                                                                        Theme::accent(
-                                                                            self.use_light_theme,
-                                                                        )
-                                                                    },
-                                                                )
-                                                                .show_percentage(),
-                                                        );
-                                                        let speed = if paused
-                                                            || matches!(
-                                                                progress.phase,
-                                                                DestPhase::Done
-                                                                    | DestPhase::Failed
-                                                                    | DestPhase::Cancelled
-                                                            )
-                                                        {
-                                                            0.0
-                                                        } else {
-                                                            shown_bps(
-                                                                progress.bps_recent,
-                                                                progress.last_tick,
-                                                            )
-                                                        };
-                                                        ui.horizontal(|ui| {
-                                                            ui.weak(format_bps(speed));
-                                                            ui.with_layout(
-                                                                egui::Layout::right_to_left(
-                                                                    egui::Align::Center,
-                                                                ),
-                                                                |ui| {
-                                                                    ui.weak(format!(
-                                                                        "{} ✓ · {} omit. · {} err.",
-                                                                        progress.files_done,
-                                                                        progress.files_skip,
-                                                                        progress.files_err
-                                                                    ));
-                                                                },
-                                                            );
-                                                        });
-
-                                                        if !progress.last_file.is_empty() {
-                                                            let last_file = display_path(
-                                                                &progress.last_file,
-                                                            );
-                                                            ui.weak(
-                                                                RichText::new(compact_path(
-                                                                    &last_file,
-                                                                    48,
-                                                                ))
-                                                                .size(9.5),
-                                                            )
-                                                            .on_hover_text(last_file);
-                                                        }
                                                     });
-                                                },
-                                            );
-                                        }
-                                        ui.end_row();
+                                                    ui.add(
+                                                        egui::ProgressBar::new(fraction)
+                                                            .desired_height(11.0)
+                                                            .fill(
+                                                                if progress.phase
+                                                                    == DestPhase::Done
+                                                                    && progress.files_err == 0
+                                                                {
+                                                                    Theme::success(
+                                                                        self.use_light_theme,
+                                                                    )
+                                                                } else {
+                                                                    Theme::accent(
+                                                                        self.use_light_theme,
+                                                                    )
+                                                                },
+                                                            )
+                                                            .show_percentage(),
+                                                    );
+                                                    let speed = if paused
+                                                        || matches!(
+                                                            progress.phase,
+                                                            DestPhase::Done
+                                                                | DestPhase::Failed
+                                                                | DestPhase::Cancelled
+                                                        )
+                                                    {
+                                                        0.0
+                                                    } else {
+                                                        shown_bps(
+                                                            progress.bps_recent,
+                                                            progress.last_tick,
+                                                        )
+                                                    };
+                                                    ui.horizontal(|ui| {
+                                                        ui.weak(format_bps(speed));
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                ui.weak(format!(
+                                                                    "{} ✓ · {} omit. · {} err.",
+                                                                    progress.files_done,
+                                                                    progress.files_skip,
+                                                                    progress.files_err
+                                                                ));
+                                                            },
+                                                        );
+                                                    });
+
+                                                    let last_file = if progress.last_file.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(display_path(&progress.last_file))
+                                                    };
+                                                    let last_file_text = last_file
+                                                        .as_deref()
+                                                        .map(|path| compact_path(path, 48))
+                                                        .unwrap_or_else(|| "\u{00A0}".to_owned());
+                                                    let response = ui.weak(
+                                                        RichText::new(last_file_text).size(9.5),
+                                                    );
+                                                    if let Some(last_file) = last_file {
+                                                        response.on_hover_text(last_file);
+                                                    }
+                                                });
+                                            },
+                                        );
                                     }
-                                });
-                        });
+                                    ui.end_row();
+                                }
+                            });
+                    };
+
+                    if estimated_grid_height <= available_grid_height {
+                        render_grid(ui);
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("progress_grid_zone_v5")
+                            .max_height(available_grid_height)
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, render_grid);
+                    }
                 }
             } else if starting {
                 ui.add_space(SPACING_XS);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.weak("Analizando origen y destinos…");
-                });
+                ui.weak("Analizando origen y destinos…");
             } else {
                 ui.add_space(SPACING_XS);
                 ui.weak("Selecciona un origen y uno o más destinos para comenzar.");
