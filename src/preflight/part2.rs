@@ -241,7 +241,7 @@ fn hash_path_with_buffer_for_job(
 ) -> Result<blake3::Hash, String> {
     #[cfg(windows)]
     {
-        return crate::windows_io::hash_file_cancelable(path, buf.len(), || {
+        crate::windows_io::hash_file_cancelable(path, buf.len(), || {
             state.is_some_and(|s| s.cancel.load(Ordering::Acquire))
         })
         .map_err(|e| {
@@ -250,7 +250,7 @@ fn hash_path_with_buffer_for_job(
             } else {
                 format!("No se pudo verificar {}: {e}", path.display())
             }
-        });
+        })
     }
 
     #[cfg(not(windows))]
@@ -278,16 +278,24 @@ fn final_source_hashes(
     source: &Path,
     files: &[PlannedFile],
     reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
-    state: &JobState,
+) -> Result<std::collections::HashMap<PathBuf, [u8; 32]>, String> {
+    final_source_hashes_for_job(source, files, reader_hashes, None)
+}
+
+fn final_source_hashes_for_job(
+    source: &Path,
+    files: &[PlannedFile],
+    reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
+    state: Option<&JobState>,
 ) -> Result<std::collections::HashMap<PathBuf, [u8; 32]>, String> {
     let mut final_hashes = std::collections::HashMap::with_capacity(files.len());
     let mut buf = vec![0u8; VERIFY_BUF];
     for info in files {
-        if state.cancel.load(Ordering::Acquire) {
+        if state.is_some_and(|s| s.cancel.load(Ordering::Acquire)) {
             return Err("Cancelado".to_owned());
         }
         let path = source.join(&info.rel);
-        let actual = hash_path_with_buffer_for_job(&path, &mut buf, Some(state))?;
+        let actual = hash_path_with_buffer_for_job(&path, &mut buf, state)?;
         if let Some(read_hash) = reader_hashes.get(&info.rel) {
             if actual.as_bytes() != read_hash {
                 return Err(format!(
