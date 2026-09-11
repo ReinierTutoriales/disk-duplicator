@@ -190,6 +190,34 @@ mod tests {
     }
 
     #[test]
+    fn critical_commit_error_is_never_retried() {
+        let root = temp_dir("critical-commit");
+        let state = worker_state(&root, 0);
+        let mut calls = 0usize;
+        let err = retry_commit(&state, 0, || {
+            calls += 1;
+            Err("CRÍTICO: restauración imposible".to_owned())
+        }).unwrap_err();
+        assert!(err.starts_with("CRÍTICO:"));
+        assert_eq!(calls, 1);
+        assert_eq!(state.snapshot()[0].retries, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn partial_write_reset_truncates_to_last_committed_offset() {
+        let root = temp_dir("partial-reset");
+        let tmp = root.join("file.part");
+        fs::write(&tmp, b"goodBAD").unwrap();
+        let mut file = Some(OpenOptions::new().append(true).open(&tmp).unwrap());
+        reset_part_after_partial_write(&mut file, &tmp, 4).unwrap();
+        file.as_mut().unwrap().write_all(b"next").unwrap();
+        file.take();
+        assert_eq!(fs::read(&tmp).unwrap(), b"goodnext");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn skip_same_does_not_trust_size_and_mtime_without_content_match() {
         let root = temp_dir("skip-same-hash");
         let source = root.join("src");
