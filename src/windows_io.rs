@@ -6,8 +6,9 @@ use std::fs::File;
 use std::io;
 use std::mem::zeroed;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -15,6 +16,7 @@ use std::time::Duration;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
@@ -90,22 +92,21 @@ extern "system" {
     fn CancelSynchronousIo(thread: Handle) -> i32;
 }
 
-pub(crate) struct CancelableFile {
+struct NativeWriter {
     handle: Handle,
     event: Handle,
     offset: u64,
+    path: PathBuf,
 }
 
-unsafe impl Send for CancelableFile {}
-
-impl CancelableFile {
-    pub(crate) fn reopen_at(path: &Path, offset: u64) -> io::Result<Self> {
+impl NativeWriter {
+    fn open(path: &Path, offset: u64) -> io::Result<Self> {
         let wide = wide_path(path);
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
                 GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
@@ -123,10 +124,19 @@ impl CancelableFile {
             return Err(err);
         }
 
-        Ok(Self { handle, event, offset })
+        Ok(Self {
+            handle,
+            event,
+            offset,
+            path: path.to_path_buf(),
+        })
     }
 
-    pub(crate) fn write_all_cancelable(
+    fn matches(&self, path: &Path, offset: u64) -> bool {
+        self.path == path && self.offset == offset
+    }
+
+    fn write_all_cancelable(
         &mut self,
         mut data: &[u8],
         mut cancelled: impl FnMut() -> bool,
@@ -202,7 +212,7 @@ impl CancelableFile {
     }
 }
 
-impl Drop for CancelableFile {
+impl Drop for NativeWriter {
     fn drop(&mut self) {
         unsafe {
             if !self.event.is_null() {
@@ -212,6 +222,39 @@ impl Drop for CancelableFile {
                 CloseHandle(self.handle);
             }
         }
+    }
+}
+
+pub(crate) struct CancelableFile {
+    inner: Rc<RefCell<NativeWriter>>,
+}
+
+impl CancelableFile {
+    pub(crate) fn reopen_at(path: &Path, offset: u64) -> io::Result<Self> {
+        WRITER_CACHE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if let Some(existing) = slot.as_ref() {
+                if existing.borrow().matches(path, offset) {
+                    return Ok(Self {
+                        inner: Rc::clone(existing),
+                    });
+                }
+            }
+
+            let writer = Rc::new(RefCell::new(NativeWriter::open(path, offset)?));
+            *slot = Some(Rc::clone(&writer));
+            Ok(Self { inner: writer })
+        })
+    }
+
+    pub(crate) fn write_all_cancelable(
+        &mut self,
+        data: &[u8],
+        cancelled: impl FnMut() -> bool,
+    ) -> io::Result<()> {
+        self.inner
+            .borrow_mut()
+            .write_all_cancelable(data, cancelled)
     }
 }
 
@@ -333,13 +376,21 @@ impl Drop for SyncWorker {
 }
 
 thread_local! {
+    static WRITER_CACHE: RefCell<Option<Rc<RefCell<NativeWriter>>>> = const { RefCell::new(None) };
     static SYNC_WORKER: RefCell<Option<SyncWorker>> = const { RefCell::new(None) };
+}
+
+fn clear_writer_cache() {
+    WRITER_CACHE.with(|slot| {
+        slot.borrow_mut().take();
+    });
 }
 
 pub(crate) fn sync_file_cancelable(
     file: File,
     cancelled: impl FnMut() -> bool,
 ) -> io::Result<()> {
+    clear_writer_cache();
     SYNC_WORKER.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
@@ -379,11 +430,13 @@ mod tests {
 
     #[test]
     fn overlapped_writer_coexists_with_std_file_handle() {
+        clear_writer_cache();
         let path = temp_file("overlapped");
         let owner = File::create(&path).unwrap();
         let mut writer = CancelableFile::reopen_at(&path, 0).unwrap();
         writer.write_all_cancelable(b"abcdef", || false).unwrap();
         drop(writer);
+        clear_writer_cache();
         owner.sync_data().unwrap();
         drop(owner);
         assert_eq!(fs::read(&path).unwrap(), b"abcdef");
@@ -392,16 +445,40 @@ mod tests {
 
     #[test]
     fn overlapped_writer_honors_pre_cancel() {
+        clear_writer_cache();
         let path = temp_file("cancel");
         let _owner = File::create(&path).unwrap();
         let mut writer = CancelableFile::reopen_at(&path, 0).unwrap();
         let err = writer.write_all_cancelable(b"data", || true).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        clear_writer_cache();
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn overlapped_writer_is_reused_at_expected_offset() {
+        clear_writer_cache();
+        let path = temp_file("reuse");
+        let owner = File::create(&path).unwrap();
+
+        let mut first = CancelableFile::reopen_at(&path, 0).unwrap();
+        first.write_all_cancelable(b"abc", || false).unwrap();
+        let mut second = CancelableFile::reopen_at(&path, 3).unwrap();
+        assert!(Rc::ptr_eq(&first.inner, &second.inner));
+        second.write_all_cancelable(b"def", || false).unwrap();
+
+        drop(second);
+        drop(first);
+        clear_writer_cache();
+        owner.sync_data().unwrap();
+        drop(owner);
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
         let _ = fs::remove_file(path);
     }
 
     #[test]
     fn thread_local_sync_worker_handles_multiple_files() {
+        clear_writer_cache();
         let path_a = temp_file("sync-a");
         let path_b = temp_file("sync-b");
         let mut a = File::create(&path_a).unwrap();
