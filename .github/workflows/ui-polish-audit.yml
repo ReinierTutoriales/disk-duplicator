@@ -1,0 +1,56 @@
+name: UI polish audit
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/ui_polish.py'
+      - '.github/workflows/ui-polish-audit.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ui-polish-audit-main
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          token: ${{ github.token }}
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+          components: clippy,rustfmt
+      - name: Apply UI polish
+        shell: pwsh
+        run: python .github/ui_polish.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Diff check
+        shell: pwsh
+        run: git diff --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests release
+        run: cargo test --locked --release
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Commit verified UI polish and clean helpers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Remove-Item .github/ui_polish.py -Force
+          Remove-Item .github/workflows/ui-polish-audit.yml -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/app/part1.rs src/app/part4.rs src/app/part5.rs .github/ui_polish.py .github/workflows/ui-polish-audit.yml
+          git commit -m "ui: polish hierarchy spacing and feedback"
+          git push origin HEAD:main
+          gh workflow run build.yml --ref main
