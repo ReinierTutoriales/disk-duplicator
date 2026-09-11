@@ -228,6 +228,7 @@ fn fanout_job(
     files: Arc<Vec<FileInfo>>,
     state: Arc<JobState>,
     opts: CopyOpts,
+    preflight_verified_skip_same: bool,
 ) -> Vec<JoinHandle<()>> {
     let q = queue_depth_for(dests.len());
     let max_buffers = (RESERVED_RAM / BLOCK).max(8);
@@ -265,7 +266,7 @@ fn fanout_job(
                 let dst = dests[slot].join(&info.rel);
                 let physically_valid = same_enough(&src, &dst);
                 let state_valid = state_cache[slot].contains(&key) && physically_valid;
-                if state_valid {
+                if state_valid || (preflight_verified_skip_same && opts.skip_same && physically_valid) {
                     skip_mask[slot] = true;
                     continue;
                 }
