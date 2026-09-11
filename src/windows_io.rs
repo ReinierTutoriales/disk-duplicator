@@ -8,7 +8,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -95,7 +95,6 @@ pub(crate) struct CancelableFile {
     offset: u64,
 }
 
-// Both handles are uniquely owned and only moved with this value. The type intentionally is not Sync.
 unsafe impl Send for CancelableFile {}
 
 impl CancelableFile {
@@ -215,76 +214,122 @@ impl Drop for CancelableFile {
     }
 }
 
-pub(crate) fn sync_file_cancelable(
-    file: File,
-    mut cancelled: impl FnMut() -> bool,
-) -> io::Result<()> {
-    let (thread_tx, thread_rx) = mpsc::sync_channel(1);
-    let (done_tx, done_rx) = mpsc::sync_channel(1);
+enum SyncCommand {
+    Sync(File),
+    Stop,
+}
 
-    let helper = thread::spawn(move || {
-        let thread_id = unsafe { GetCurrentThreadId() };
-        let thread_handle = unsafe { OpenThread(THREAD_TERMINATE, 0, thread_id) };
-        if thread_handle.is_null() {
-            let err = io::Error::last_os_error();
-            let _ = thread_tx.send(Err(err));
-            return;
-        }
-        if thread_tx.send(Ok(thread_handle as usize)).is_err() {
-            unsafe { CloseHandle(thread_handle) };
-            return;
-        }
+pub(crate) struct SyncWorker {
+    command_tx: mpsc::SyncSender<SyncCommand>,
+    done_rx: mpsc::Receiver<io::Result<()>>,
+    thread_handle: Handle,
+    helper: Option<JoinHandle<()>>,
+}
 
-        let result = file.sync_data();
-        let _ = done_tx.send(result);
-    });
+impl SyncWorker {
+    pub(crate) fn new() -> io::Result<Self> {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let (thread_tx, thread_rx) = mpsc::sync_channel(1);
 
-    let thread_handle = match thread_rx.recv() {
-        Ok(Ok(raw)) => raw as Handle,
-        Ok(Err(e)) => {
-            let _ = helper.join();
-            return Err(e);
-        }
-        Err(_) => {
-            let _ = helper.join();
-            return Err(io::Error::other("el thread de sincronización terminó antes de iniciar"));
-        }
-    };
+        let helper = thread::spawn(move || {
+            let thread_id = unsafe { GetCurrentThreadId() };
+            let thread_handle = unsafe { OpenThread(THREAD_TERMINATE, 0, thread_id) };
+            if thread_handle.is_null() {
+                let _ = thread_tx.send(Err(io::Error::last_os_error()));
+                return;
+            }
+            if thread_tx.send(Ok(thread_handle as usize)).is_err() {
+                unsafe { CloseHandle(thread_handle) };
+                return;
+            }
 
-    let mut cancel_requested = false;
-    let mut cancel_error = None;
-    let result = loop {
-        match done_rx.recv_timeout(Duration::from_millis(CANCEL_POLL_MS as u64)) {
-            Ok(result) => break result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if cancelled() {
-                    cancel_requested = true;
-                    if unsafe { CancelSynchronousIo(thread_handle) } == 0 {
-                        let code = unsafe { GetLastError() };
-                        if code != ERROR_NOT_FOUND {
-                            cancel_error = Some(io::Error::from_raw_os_error(code as i32));
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    SyncCommand::Sync(file) => {
+                        let result = file.sync_data();
+                        if done_tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    SyncCommand::Stop => break,
+                }
+            }
+        });
+
+        let thread_handle = match thread_rx.recv() {
+            Ok(Ok(raw)) => raw as Handle,
+            Ok(Err(e)) => {
+                let _ = helper.join();
+                return Err(e);
+            }
+            Err(_) => {
+                let _ = helper.join();
+                return Err(io::Error::other("el worker de sincronización terminó antes de iniciar"));
+            }
+        };
+
+        Ok(Self {
+            command_tx,
+            done_rx,
+            thread_handle,
+            helper: Some(helper),
+        })
+    }
+
+    pub(crate) fn sync(
+        &mut self,
+        file: File,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> io::Result<()> {
+        self.command_tx
+            .send(SyncCommand::Sync(file))
+            .map_err(|_| io::Error::other("el worker de sincronización no está disponible"))?;
+
+        let mut cancel_requested = false;
+        let mut cancel_error = None;
+        let result = loop {
+            match self.done_rx.recv_timeout(Duration::from_millis(CANCEL_POLL_MS as u64)) {
+                Ok(result) => break result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if cancelled() {
+                        cancel_requested = true;
+                        if unsafe { CancelSynchronousIo(self.thread_handle) } == 0 {
+                            let code = unsafe { GetLastError() };
+                            if code != ERROR_NOT_FOUND {
+                                cancel_error = Some(io::Error::from_raw_os_error(code as i32));
+                            }
                         }
                     }
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err(io::Error::other("el worker de sincronización terminó sin resultado"));
+                }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break Err(io::Error::other("el thread de sincronización terminó sin resultado"));
+        };
+
+        if let Some(err) = cancel_error {
+            return Err(err);
+        }
+        if cancel_requested {
+            return Err(cancelled_error());
+        }
+        result
+    }
+}
+
+impl Drop for SyncWorker {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(SyncCommand::Stop);
+        if let Some(helper) = self.helper.take() {
+            let _ = helper.join();
+        }
+        unsafe {
+            if !self.thread_handle.is_null() {
+                CloseHandle(self.thread_handle);
             }
         }
-    };
-
-    unsafe { CloseHandle(thread_handle) };
-    let join_result = helper.join();
-    if join_result.is_err() {
-        return Err(io::Error::other("panic en el thread de sincronización"));
     }
-    if let Some(err) = cancel_error {
-        return Err(err);
-    }
-    if cancel_requested {
-        return Err(cancelled_error());
-    }
-    result
 }
 
 fn cancelled_error() -> io::Error {
@@ -337,12 +382,22 @@ mod tests {
     }
 
     #[test]
-    fn cancelable_sync_completes_normally() {
-        let path = temp_file("sync");
-        let mut file = File::create(&path).unwrap();
-        file.write_all(b"durable-data").unwrap();
-        sync_file_cancelable(file, || false).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"durable-data");
-        let _ = fs::remove_file(path);
+    fn persistent_sync_worker_handles_multiple_files() {
+        let path_a = temp_file("sync-a");
+        let path_b = temp_file("sync-b");
+        let mut a = File::create(&path_a).unwrap();
+        let mut b = File::create(&path_b).unwrap();
+        a.write_all(b"alpha").unwrap();
+        b.write_all(b"beta").unwrap();
+
+        let mut worker = SyncWorker::new().unwrap();
+        worker.sync(a, || false).unwrap();
+        worker.sync(b, || false).unwrap();
+        drop(worker);
+
+        assert_eq!(fs::read(&path_a).unwrap(), b"alpha");
+        assert_eq!(fs::read(&path_b).unwrap(), b"beta");
+        let _ = fs::remove_file(path_a);
+        let _ = fs::remove_file(path_b);
     }
 }
