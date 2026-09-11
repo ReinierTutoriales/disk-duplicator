@@ -311,14 +311,20 @@ mod tests {
 
         let previous = previous_state_dir_for(&dest);
         let current = state_dir_for(&dest);
-        assert_ne!(previous, current, "la prueba necesita que ambos formatos difieran");
+        assert_ne!(
+            previous, current,
+            "la prueba necesita que ambos formatos difieran"
+        );
         std::fs::create_dir_all(&previous).unwrap();
         std::fs::write(previous.join("completed.jsonl"), b"resume-data").unwrap();
 
         let prepared = prepare_state_dir(&dest).unwrap();
         assert_eq!(prepared, current);
         assert!(!previous.exists());
-        assert_eq!(std::fs::read(current.join("completed.jsonl")).unwrap(), b"resume-data");
+        assert_eq!(
+            std::fs::read(current.join("completed.jsonl")).unwrap(),
+            b"resume-data"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

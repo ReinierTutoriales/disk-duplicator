@@ -1,4 +1,7 @@
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
@@ -59,8 +62,16 @@ fn largest_png_from_ico(ico: &[u8]) -> Result<&[u8], String> {
     let mut best: Option<(u32, &[u8])> = None;
     for i in 0..count {
         let entry = 6 + i * 16;
-        let width = if ico[entry] == 0 { 256 } else { ico[entry] as u32 };
-        let height = if ico[entry + 1] == 0 { 256 } else { ico[entry + 1] as u32 };
+        let width = if ico[entry] == 0 {
+            256
+        } else {
+            ico[entry] as u32
+        };
+        let height = if ico[entry + 1] == 0 {
+            256
+        } else {
+            ico[entry + 1] as u32
+        };
         let size = read_u32_le(&ico[entry + 8..entry + 12]) as usize;
         let offset = read_u32_le(&ico[entry + 12..entry + 16]) as usize;
         let end = offset.checked_add(size).ok_or("ICO image overflow")?;
@@ -86,7 +97,10 @@ fn rc_path(path: &Path) -> String {
 
 fn version_parts() -> (String, String, String) {
     let package_version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
-    let numeric = package_version.split('-').next().unwrap_or(&package_version);
+    let numeric = package_version
+        .split('-')
+        .next()
+        .unwrap_or(&package_version);
     let mut parts = numeric.split('.');
     let major = parts.next().unwrap_or("0");
     let minor = parts.next().unwrap_or("0");
@@ -177,7 +191,8 @@ fn main() {
     let runtime_png = largest_png_from_ico(&decoded).expect("extract runtime icon PNG from ICO");
     fs::write(&runtime_icon_path, runtime_png).expect("write runtime icon PNG to OUT_DIR");
 
-    let manifest_template = fs::read_to_string(MANIFEST_TEMPLATE).expect("read app.manifest template");
+    let manifest_template =
+        fs::read_to_string(MANIFEST_TEMPLATE).expect("read app.manifest template");
     let (_, _, manifest_version) = version_parts();
     let manifest = manifest_with_version(&manifest_template, &manifest_version)
         .expect("generate app.manifest version from Cargo package version");

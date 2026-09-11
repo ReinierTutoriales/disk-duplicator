@@ -265,10 +265,7 @@ impl CancelableReader {
                             WaitForSingleObject(pending.handles.event, INFINITE);
                         }
                         pending.mark_finished();
-                        return (
-                            std::mem::take(&mut pending.buffer),
-                            Err(cancelled_error()),
-                        );
+                        return (std::mem::take(&mut pending.buffer), Err(cancelled_error()));
                     }
                     if pending.started_at.elapsed() >= SOURCE_READ_STALL {
                         unsafe {
@@ -437,7 +434,8 @@ impl NativeWriter {
             }
 
             let mut transferred = 0u32;
-            if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) } == 0
+            if unsafe { GetOverlappedResult(self.handle, &mut overlapped, &mut transferred, 0) }
+                == 0
             {
                 return Err(io::Error::last_os_error());
             }
@@ -638,10 +636,7 @@ fn clear_writer_cache() {
     });
 }
 
-pub(crate) fn sync_file_cancelable(
-    file: File,
-    cancelled: impl FnMut() -> bool,
-) -> io::Result<()> {
+pub(crate) fn sync_file_cancelable(file: File, cancelled: impl FnMut() -> bool) -> io::Result<()> {
     clear_writer_cache();
     SYNC_WORKER.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -815,9 +810,7 @@ mod tests {
         let _owner = File::create(&path).unwrap();
         let mut first = CancelableFile::reopen_at(&path, 0).unwrap();
         let first_inner = Rc::clone(&first.inner);
-        let err = first
-            .write_all_cancelable(b"data", || true)
-            .unwrap_err();
+        let err = first.write_all_cancelable(b"data", || true).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
 
         let second = CancelableFile::reopen_at(&path, 0).unwrap();

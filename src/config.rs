@@ -123,7 +123,10 @@ mod tests {
 
     #[test]
     fn corrupt_or_unknown_theme_falls_back_to_system() {
-        assert_eq!(parse_settings("theme=neon\n").theme, ThemePreference::System);
+        assert_eq!(
+            parse_settings("theme=neon\n").theme,
+            ThemePreference::System
+        );
         assert_eq!(parse_settings("garbage\n").theme, ThemePreference::System);
     }
 }
