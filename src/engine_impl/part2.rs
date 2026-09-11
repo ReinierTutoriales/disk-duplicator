@@ -128,7 +128,7 @@ fn write_buffer_retrying(
     data: &[u8],
     ctx: &WriteRetryContext<'_>,
 ) -> Result<(), String> {
-    const WRITE_CHUNK: usize = 1024 * 1024;
+    const WRITE_CHUNK: usize = 4 * 1024 * 1024;
     let mut last_err = String::new();
 
     for attempt in 0..=RETRIES {
