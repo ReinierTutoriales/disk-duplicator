@@ -24,7 +24,7 @@ insert = '''pub(crate) fn prepare_runtime_state_tmp(dest: &Path) -> Result<PathB
 paths = one(paths, anchor, insert, 'runtime state tmp helper')
 
 old_import = '''use crate::paths::{backup_path, manifest_path, part_path, persisted_path_key, state_dir_for, state_path};'''
-new_import = '''use crate::paths::{\n    backup_path, manifest_path, part_path, persisted_path_key, prepare_runtime_state_tmp,\n    prepare_state_dir, state_path,\n};'''
+new_import = '''use crate::paths::{\n    backup_path, manifest_path, part_path, persisted_path_key, prepare_runtime_state_tmp,\n    prepare_state_dir, state_path,\n};\n#[cfg(test)]\nuse crate::paths::state_dir_for;'''
 part1 = one(part1, old_import, new_import, 'engine paths import')
 
 part1 = one(
