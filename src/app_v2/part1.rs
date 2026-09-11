@@ -39,22 +39,9 @@ mod system_theme {
     #[link(name = "advapi32")]
     extern "system" {
         #[link_name = "RegOpenKeyExW"]
-        fn reg_open_key_ex_w(
-            hkey: HKey,
-            sub_key: *const u16,
-            options: u32,
-            desired: u32,
-            result: *mut HKey,
-        ) -> i32;
+        fn reg_open_key_ex_w(hkey: HKey, sub_key: *const u16, options: u32, desired: u32, result: *mut HKey) -> i32;
         #[link_name = "RegQueryValueExW"]
-        fn reg_query_value_ex_w(
-            hkey: HKey,
-            value_name: *const u16,
-            reserved: *mut u32,
-            value_type: *mut u32,
-            data: *mut u8,
-            data_len: *mut u32,
-        ) -> i32;
+        fn reg_query_value_ex_w(hkey: HKey, value_name: *const u16, reserved: *mut u32, value_type: *mut u32, data: *mut u8, data_len: *mut u32) -> i32;
         #[link_name = "RegCloseKey"]
         fn reg_close_key(hkey: HKey) -> i32;
     }
@@ -66,40 +53,16 @@ mod system_theme {
     }
 
     pub fn is_light() -> bool {
-        let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let value_name: Vec<u16> = "AppsUseLightTheme"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
+        let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize".encode_utf16().chain(std::iter::once(0)).collect();
+        let value_name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain(std::iter::once(0)).collect();
         let mut key: HKey = std::ptr::null_mut();
-        let opened = unsafe {
-            reg_open_key_ex_w(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key)
-        };
-        if opened != 0 || key.is_null() {
-            return false;
-        }
-
+        let opened = unsafe { reg_open_key_ex_w(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) };
+        if opened != 0 || key.is_null() { return false; }
         let mut value_type = 0u32;
         let mut value = 0u32;
         let mut value_len = std::mem::size_of::<u32>() as u32;
-        let queried = unsafe {
-            reg_query_value_ex_w(
-                key,
-                value_name.as_ptr(),
-                std::ptr::null_mut(),
-                &mut value_type,
-                (&mut value as *mut u32).cast::<u8>(),
-                &mut value_len,
-            )
-        };
-        unsafe {
-            reg_close_key(key);
-        }
-
+        let queried = unsafe { reg_query_value_ex_w(key, value_name.as_ptr(), std::ptr::null_mut(), &mut value_type, (&mut value as *mut u32).cast::<u8>(), &mut value_len) };
+        unsafe { reg_close_key(key); }
         queried == 0 && value_type == REG_DWORD && value_len == 4 && value == 1
     }
 
@@ -107,28 +70,19 @@ mod system_theme {
         let mut color = 0u32;
         let mut opaque = 0i32;
         let result = unsafe { dwm_get_colorization_color(&mut color, &mut opaque) };
-        if result != 0 {
-            return None;
-        }
+        if result != 0 { return None; }
         Some(color & 0x00FF_FFFF)
     }
 }
 
 #[cfg(windows)]
-fn detect_system_theme() -> bool {
-    system_theme::is_light()
-}
-
+fn detect_system_theme() -> bool { system_theme::is_light() }
 #[cfg(not(windows))]
-fn detect_system_theme() -> bool {
-    false
-}
+fn detect_system_theme() -> bool { false }
 
 fn refresh_system_accent() {
     #[cfg(windows)]
-    if let Some(rgb) = system_theme::accent_rgb() {
-        SYSTEM_ACCENT_RGB.store(rgb, Ordering::Relaxed);
-    }
+    if let Some(rgb) = system_theme::accent_rgb() { SYSTEM_ACCENT_RGB.store(rgb, Ordering::Relaxed); }
 }
 
 fn resolve_theme(preference: ThemePreference) -> bool {
@@ -143,150 +97,46 @@ fn resolve_theme(preference: ThemePreference) -> bool {
 fn setup_fonts(ctx: &egui::Context) {
     let windows_dir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts_dir = PathBuf::from(windows_dir).join("Fonts");
-
     let mut fonts = egui::FontDefinitions::default();
-    for (name, file) in [
-        ("segoe_ui", "segoeui.ttf"),
-        ("segoe_symbols", "seguisym.ttf"),
-    ] {
-        if let Ok(bytes) = std::fs::read(fonts_dir.join(file)) {
-            fonts
-                .font_data
-                .insert(name.to_owned(), egui::FontData::from_owned(bytes));
-        }
+    for (name, file) in [("segoe_ui", "segoeui.ttf"), ("segoe_symbols", "seguisym.ttf")] {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join(file)) { fonts.font_data.insert(name.to_owned(), egui::FontData::from_owned(bytes)); }
     }
-
     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        if fonts.font_data.contains_key("segoe_symbols") {
-            family.push("segoe_symbols".to_owned());
-        }
-        if fonts.font_data.contains_key("segoe_ui") {
-            family.insert(0, "segoe_ui".to_owned());
-        }
+        if fonts.font_data.contains_key("segoe_symbols") { family.push("segoe_symbols".to_owned()); }
+        if fonts.font_data.contains_key("segoe_ui") { family.insert(0, "segoe_ui".to_owned()); }
     }
     ctx.set_fonts(fonts);
 }
-
 #[cfg(not(windows))]
 fn setup_fonts(_ctx: &egui::Context) {}
 
 struct Theme;
-
 impl Theme {
     fn accent(_light: bool) -> Color32 {
         let rgb = SYSTEM_ACCENT_RGB.load(Ordering::Relaxed);
-        Color32::from_rgb(
-            ((rgb >> 16) & 0xFF) as u8,
-            ((rgb >> 8) & 0xFF) as u8,
-            (rgb & 0xFF) as u8,
-        )
+        Color32::from_rgb(((rgb >> 16) & 0xFF) as u8, ((rgb >> 8) & 0xFF) as u8, (rgb & 0xFF) as u8)
     }
-
     fn blend(base: Color32, tint: Color32, tint_percent: u16) -> Color32 {
         let tint_percent = tint_percent.min(100);
         let base_percent = 100 - tint_percent;
-        let mix = |a: u8, b: u8| -> u8 {
-            (((u16::from(a) * base_percent) + (u16::from(b) * tint_percent)) / 100) as u8
-        };
-        Color32::from_rgb(
-            mix(base.r(), tint.r()),
-            mix(base.g(), tint.g()),
-            mix(base.b(), tint.b()),
-        )
+        let mix = |a: u8, b: u8| -> u8 { (((u16::from(a) * base_percent) + (u16::from(b) * tint_percent)) / 100) as u8 };
+        Color32::from_rgb(mix(base.r(), tint.r()), mix(base.g(), tint.g()), mix(base.b(), tint.b()))
     }
-
-    fn success(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(16, 124, 65)
-        } else {
-            Color32::from_rgb(95, 210, 145)
-        }
-    }
-
-    fn warning(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(157, 93, 0)
-        } else {
-            Color32::from_rgb(255, 185, 0)
-        }
-    }
-
-    fn error(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(196, 43, 28)
-        } else {
-            Color32::from_rgb(255, 153, 164)
-        }
-    }
-
-    fn verify(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(103, 74, 181)
-        } else {
-            Color32::from_rgb(194, 165, 255)
-        }
-    }
-
-    fn muted(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(96, 96, 96)
-        } else {
-            Color32::from_rgb(173, 173, 173)
-        }
-    }
-
-    fn text(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(27, 27, 27)
-        } else {
-            Color32::from_rgb(255, 255, 255)
-        }
-    }
-
-    fn panel(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(243, 243, 243)
-        } else {
-            Color32::from_rgb(32, 32, 32)
-        }
-    }
-
-    fn window(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(249, 249, 249)
-        } else {
-            Color32::from_rgb(39, 39, 39)
-        }
-    }
-
-    fn card(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(255, 255, 255)
-        } else {
-            Color32::from_rgb(45, 45, 45)
-        }
-    }
-
-    fn selected(light: bool) -> Color32 {
-        let percent = if light { 12 } else { 22 };
-        Self::blend(Self::card(light), Self::accent(light), percent)
-    }
-
-    fn border(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(229, 229, 229)
-        } else {
-            Color32::from_rgb(61, 61, 61)
-        }
-    }
+    fn success(light: bool) -> Color32 { if light { Color32::from_rgb(16, 124, 65) } else { Color32::from_rgb(95, 210, 145) } }
+    fn warning(light: bool) -> Color32 { if light { Color32::from_rgb(157, 93, 0) } else { Color32::from_rgb(255, 185, 0) } }
+    fn error(light: bool) -> Color32 { if light { Color32::from_rgb(196, 43, 28) } else { Color32::from_rgb(255, 153, 164) } }
+    fn verify(light: bool) -> Color32 { if light { Color32::from_rgb(103, 74, 181) } else { Color32::from_rgb(194, 165, 255) } }
+    fn muted(light: bool) -> Color32 { if light { Color32::from_rgb(96, 96, 96) } else { Color32::from_rgb(173, 173, 173) } }
+    fn text(light: bool) -> Color32 { if light { Color32::from_rgb(27, 27, 27) } else { Color32::from_rgb(255, 255, 255) } }
+    fn panel(light: bool) -> Color32 { if light { Color32::from_rgb(243, 243, 243) } else { Color32::from_rgb(32, 32, 32) } }
+    fn window(light: bool) -> Color32 { if light { Color32::from_rgb(249, 249, 249) } else { Color32::from_rgb(39, 39, 39) } }
+    fn card(light: bool) -> Color32 { if light { Color32::from_rgb(255, 255, 255) } else { Color32::from_rgb(45, 45, 45) } }
+    fn selected(light: bool) -> Color32 { let percent = if light { 12 } else { 22 }; Self::blend(Self::card(light), Self::accent(light), percent) }
+    fn border(light: bool) -> Color32 { if light { Color32::from_rgb(229, 229, 229) } else { Color32::from_rgb(61, 61, 61) } }
 }
 
 fn apply_theme(ctx: &egui::Context, light: bool) {
-    let mut visuals = if light {
-        egui::Visuals::light()
-    } else {
-        egui::Visuals::dark()
-    };
+    let mut visuals = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
     let accent = Theme::accent(light);
     visuals.panel_fill = Theme::panel(light);
     visuals.window_fill = Theme::window(light);
@@ -301,10 +151,9 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
     visuals.selection.stroke.color = accent;
     visuals.override_text_color = Some(Theme::text(light));
     ctx.set_visuals(visuals);
-
     ctx.style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(SPACING_SM, 7.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(SPACING_SM, 5.0);
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.visuals.window_rounding = egui::Rounding::same(10.0);
     });
 }
@@ -314,14 +163,11 @@ fn card_frame(light: bool) -> egui::Frame {
         .fill(Theme::card(light))
         .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
         .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
 }
 
 fn window_frame(ctx: &egui::Context, light: bool) -> egui::Frame {
-    egui::Frame::window(&ctx.style())
-        .fill(Theme::window(light))
-        .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
-        .rounding(egui::Rounding::same(10.0))
+    egui::Frame::window(&ctx.style()).fill(Theme::window(light)).stroke(egui::Stroke::new(1.0_f32, Theme::border(light))).rounding(egui::Rounding::same(10.0))
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -329,69 +175,35 @@ fn format_bytes(bytes: u64) -> String {
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
     let value = bytes as f64;
-    if value >= GIB {
-        format!("{:.2} GiB", value / GIB)
-    } else if value >= MIB {
-        format!("{:.1} MiB", value / MIB)
-    } else if value >= KIB {
-        format!("{:.1} KiB", value / KIB)
-    } else {
-        format!("{bytes} B")
-    }
+    if value >= GIB { format!("{:.2} GiB", value / GIB) } else if value >= MIB { format!("{:.1} MiB", value / MIB) } else if value >= KIB { format!("{:.1} KiB", value / KIB) } else { format!("{bytes} B") }
 }
 
-fn count_label(n: u64, singular: &str, plural: &str) -> String {
-    let word = if n == 1 { singular } else { plural };
-    format!("{n} {word}")
-}
+fn count_label(n: u64, singular: &str, plural: &str) -> String { let word = if n == 1 { singular } else { plural }; format!("{n} {word}") }
 
 fn format_duration(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return "—".to_owned();
-    }
+    if !secs.is_finite() || secs <= 0.0 { return "—".to_owned(); }
     let total = secs.round() as u64;
     let hours = total / 3600;
     let minutes = (total % 3600) / 60;
     let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
+    if hours > 0 { format!("{hours:02}:{minutes:02}:{seconds:02}") } else { format!("{minutes:02}:{seconds:02}") }
 }
 
 fn shown_bps(bps: f64, last_tick: Instant) -> f64 {
     let idle = last_tick.elapsed().as_secs_f64();
-    if idle <= SPEED_DECAY_GRACE_SECS {
-        bps
-    } else {
-        bps * (-(idle - SPEED_DECAY_GRACE_SECS) / SPEED_DECAY_TAU_SECS).exp()
-    }
+    if idle <= SPEED_DECAY_GRACE_SECS { bps } else { bps * (-(idle - SPEED_DECAY_GRACE_SECS) / SPEED_DECAY_TAU_SECS).exp() }
 }
 
 fn compact_path(path: &str, max_chars: usize) -> String {
     let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= max_chars || max_chars < 12 {
-        return path.to_owned();
-    }
+    if chars.len() <= max_chars || max_chars < 12 { return path.to_owned(); }
     let head = (max_chars * 2) / 5;
     let tail = max_chars.saturating_sub(head + 1);
-    format!(
-        "{}…{}",
-        chars[..head].iter().collect::<String>(),
-        chars[chars.len() - tail..].iter().collect::<String>()
-    )
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
 }
 
-fn phase_label(
-    phase: DestPhase,
-    errors: u64,
-    light: bool,
-    paused: bool,
-) -> (&'static str, Color32) {
-    if paused && matches!(phase, DestPhase::Copying | DestPhase::Verifying) {
-        return ("PAUSADO", Theme::warning(light));
-    }
+fn phase_label(phase: DestPhase, errors: u64, light: bool, paused: bool) -> (&'static str, Color32) {
+    if paused && matches!(phase, DestPhase::Copying | DestPhase::Verifying) { return ("PAUSADO", Theme::warning(light)); }
     match phase {
         DestPhase::Idle => ("EN ESPERA", Theme::muted(light)),
         DestPhase::Copying => ("COPIANDO", Theme::accent(light)),
@@ -404,13 +216,8 @@ fn phase_label(
 }
 
 fn theme_glyph(theme: ThemePreference) -> &'static str {
-    match theme {
-        ThemePreference::System => "⊞",
-        ThemePreference::Light => "☀",
-        ThemePreference::Dark => "☾",
-    }
+    match theme { ThemePreference::System => "⊞", ThemePreference::Light => "☀", ThemePreference::Dark => "☾" }
 }
-
 fn theme_description(theme: ThemePreference) -> &'static str {
     match theme {
         ThemePreference::System => "Usa automáticamente el tema y el color de énfasis de Windows.",
@@ -418,11 +225,6 @@ fn theme_description(theme: ThemePreference) -> &'static str {
         ThemePreference::Dark => "Mantiene la interfaz oscura usando el color de énfasis de Windows.",
     }
 }
-
 fn theme_card_caption(theme: ThemePreference) -> &'static str {
-    match theme {
-        ThemePreference::System => "Automático",
-        ThemePreference::Light => "Siempre claro",
-        ThemePreference::Dark => "Siempre oscuro",
-    }
+    match theme { ThemePreference::System => "Automático", ThemePreference::Light => "Siempre claro", ThemePreference::Dark => "Siempre oscuro" }
 }
