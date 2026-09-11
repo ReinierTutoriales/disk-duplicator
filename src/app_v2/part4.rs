@@ -156,9 +156,10 @@ impl eframe::App for CopierApp {
                                 if let Some(paths) = self.pick_destination_dirs() {
                                     let added = self.add_destinations(paths);
                                     if added > 0 {
-                                        self.status = format!(
-                                            "{}",
-                                            count_label(added as u64, "destino agregado", "destinos agregados")
+                                        self.status = count_label(
+                                            added as u64,
+                                            "destino agregado",
+                                            "destinos agregados",
                                         );
                                     }
                                 }
