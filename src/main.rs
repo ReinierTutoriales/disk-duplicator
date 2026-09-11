@@ -20,7 +20,6 @@ mod engine {
     }
 }
 
-const _: usize = std::mem::offset_of!(engine::JobState, max_buffers);
 use app::CopierApp;
 use eframe::egui;
 use std::sync::Arc;
