@@ -36,10 +36,77 @@ impl CopierApp {
             .is_some_and(|job| job.running.load(Ordering::Relaxed))
     }
 
-    fn pick_dir() -> Option<String> {
-        rfd::FileDialog::new()
+    fn normalized_path_key(path: &str) -> String {
+        let normalized = path.trim().replace('/', "\\");
+        let trimmed = normalized.trim_end_matches('\\');
+        let stable = if trimmed.is_empty() { normalized.as_str() } else { trimmed };
+        #[cfg(windows)]
+        {
+            stable.to_ascii_lowercase()
+        }
+        #[cfg(not(windows))]
+        {
+            stable.to_owned()
+        }
+    }
+
+    fn same_path(a: &str, b: &str) -> bool {
+        Self::normalized_path_key(a) == Self::normalized_path_key(b)
+    }
+
+    fn existing_dir(path: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(path.trim());
+        (path.is_dir()).then_some(path)
+    }
+
+    fn pick_source_dir(&self) -> Option<String> {
+        let mut dialog = rfd::FileDialog::new().set_title("Seleccionar carpeta de origen");
+        if let Some(start) = Self::existing_dir(&self.source)
+            .or_else(|| self.dests.last().and_then(|dest| Self::existing_dir(dest)))
+        {
+            dialog = dialog.set_directory(start);
+        }
+        dialog
             .pick_folder()
             .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn pick_destination_dirs(&self) -> Option<Vec<String>> {
+        let mut dialog = rfd::FileDialog::new().set_title("Seleccionar uno o más destinos");
+        let start = self
+            .dests
+            .last()
+            .and_then(|dest| Self::existing_dir(dest))
+            .or_else(|| {
+                Self::existing_dir(&self.source).and_then(|source| {
+                    source.parent().map(PathBuf::from).filter(|parent| parent.is_dir())
+                })
+            });
+        if let Some(start) = start {
+            dialog = dialog.set_directory(start);
+        }
+        dialog.pick_folders().map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        })
+    }
+
+    fn add_destinations(&mut self, selected: Vec<String>) -> usize {
+        let mut added = 0usize;
+        for path in selected {
+            let path = path.trim().to_owned();
+            if path.is_empty() || Self::same_path(&path, &self.source) {
+                continue;
+            }
+            if self.dests.iter().any(|existing| Self::same_path(existing, &path)) {
+                continue;
+            }
+            self.dests.push(path);
+            added += 1;
+        }
+        added
     }
 
     fn paths_key(&self) -> u64 {
