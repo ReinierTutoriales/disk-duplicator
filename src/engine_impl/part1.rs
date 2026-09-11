@@ -124,6 +124,17 @@ impl BufferPool {
         })
     }
 
+    fn take_buffer(&self) -> Vec<u8> {
+        let buf = self
+            .free
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| vec![0u8; BLOCK]);
+        debug_assert_eq!(buf.len(), BLOCK);
+        buf
+    }
+
     fn acquire(self: &Arc<Self>, state: &JobState) -> Option<Vec<u8>> {
         let mut count = self.in_flight.lock().unwrap();
         while *count >= self.max {
@@ -135,15 +146,17 @@ impl BufferPool {
         *count += 1;
         self.gauge.store(*count, Ordering::Relaxed);
         drop(count);
+        Some(self.take_buffer())
+    }
 
-        let buf = self
-            .free
-            .lock()
-            .unwrap()
-            .pop()
-            .unwrap_or_else(|| vec![0u8; BLOCK]);
-        debug_assert_eq!(buf.len(), BLOCK);
-        Some(buf)
+    fn try_acquire(&self, state: &JobState) -> Option<Vec<u8>> {
+        if state.cancel.load(Ordering::Relaxed) { return None; }
+        let mut count = self.in_flight.lock().unwrap();
+        if *count >= self.max { return None; }
+        *count += 1;
+        self.gauge.store(*count, Ordering::Relaxed);
+        drop(count);
+        Some(self.take_buffer())
     }
 
     fn release(&self, data: Vec<u8>) {
