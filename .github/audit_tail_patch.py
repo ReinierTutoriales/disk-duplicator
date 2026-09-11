@@ -1,36 +1,45 @@
 from pathlib import Path
+import re
 
 
-def replace_once(path: str, old: str, new: str) -> None:
-    p = Path(path)
-    text = p.read_text(encoding="utf-8")
+def read(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
+def write(path: str, text: str) -> None:
+    Path(path).write_text(text, encoding="utf-8")
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
     if count != 1:
-        raise SystemExit(f"{path}: expected exactly one match, found {count}")
-    p.write_text(text.replace(old, new, 1), encoding="utf-8")
+        raise RuntimeError(f"{label}: expected one match, found {count}")
+    return text.replace(old, new, 1)
 
 
-# Make worker-side verification cancellable by both global cancel and destination watchdog.
-replace_once(
-    "src/engine_impl/part2.rs",
-    '''fn hash_file_with_buffer(
-    path: &Path,
-    buf: &mut [u8],
-    state: Option<&JobState>,
-) -> Result<blake3::Hash, String> {
-    let mut f = File::open(path).map_err(|e| format!("verificar: {e}"))?;
-    let mut h = blake3::Hasher::new();
-    loop {
-        if let Some(s) = state {
-            if !wait_pause(s) { return Err("Cancelado".into()); }
-        }
-        let n = f.read(buf).map_err(|e| format!("verificar: {e}"))?;
-        if n == 0 { break; }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize())
-}
-''',
+def regex_once(text: str, pattern: str, replacement: str, label: str) -> str:
+    result, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one regex match, found {count}")
+    return result
+
+
+# Build every modified file in memory first. Nothing is written if any invariant fails.
+p1 = read("src/engine_impl/part1.rs")
+p2 = read("src/engine_impl/part2.rs")
+p3 = read("src/engine_impl/part3.rs")
+p4 = read("src/engine_impl/part4.rs")
+
+p1 = replace_once(
+    p1,
+    "use std::io::{BufWriter, Read, Write};",
+    "use std::io::{BufWriter, Write};\n#[cfg(not(windows))]\nuse std::io::Read;",
+    "cfg Read import",
+)
+
+p2 = regex_once(
+    p2,
+    r"fn hash_file_with_buffer\(.*?\n\}\n\nfn validate_part_size",
     '''fn hash_file_with_buffer(
     path: &Path,
     buf: &mut [u8],
@@ -88,25 +97,26 @@ fn hash_file_with_buffer_control(
         Ok(h.finalize())
     }
 }
-''',
+
+fn validate_part_size''',
+    "cancelable worker hash",
 )
 
-replace_once(
-    "src/engine_impl/part2.rs",
-    'let verify_result = hash_file_with_buffer(&tmp, buf, Some(&state));',
-    'let verify_result = hash_file_with_buffer_control(&tmp, buf, Some(&state), Some(&control));',
+p2 = replace_once(
+    p2,
+    "let verify_result = hash_file_with_buffer(&tmp, buf, Some(&state));",
+    "let verify_result = hash_file_with_buffer_control(&tmp, buf, Some(&state), Some(&control));",
+    "worker verify call",
 )
 
-# Do not overwrite the watchdog diagnostic after it deliberately kills a destination.
-replace_once(
-    "src/engine_impl/part2.rs",
+# Keep an existing watchdog failure message instead of replacing it with a secondary I/O error.
+p2 = replace_once(
+    p2,
     '''                    if let Err(e) = sync_result {
                         cur.file.take();
                         cleanup_part(&dest, &dst);
                         rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
                         if e != "Cancelado" {
-                            record_file_error(&state, slot, e);
-                        }
 ''',
     '''                    if let Err(e) = sync_result {
                         cur.file.take();
@@ -116,21 +126,16 @@ replace_once(
                             break;
                         }
                         if e != "Cancelado" {
-                            record_file_error(&state, slot, e);
-                        }
 ''',
+    "sync watchdog diagnostic",
 )
 
-replace_once(
-    "src/engine_impl/part2.rs",
+p2 = replace_once(
+    p2,
     '''                        Err(e) => {
                             cleanup_part(&dest, &dst);
                             rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
                             if e == "Cancelado" {
-                                control.alive.store(false, Ordering::Release);
-                                break;
-                            }
-                            record_file_error(&state, slot, e);
 ''',
     '''                        Err(e) => {
                             cleanup_part(&dest, &dst);
@@ -139,16 +144,12 @@ replace_once(
                                 break;
                             }
                             if e == "Cancelado" {
-                                control.alive.store(false, Ordering::Release);
-                                break;
-                            }
-                            record_file_error(&state, slot, e);
 ''',
+    "verify watchdog diagnostic",
 )
 
-# Make manifest/journal durability flushes use the same cancelable Win32 sync worker.
-replace_once(
-    "src/engine_impl/part1.rs",
+p1 = replace_once(
+    p1,
     "struct StateJournal {\n",
     '''fn sync_log_data(
     file: &File,
@@ -187,23 +188,16 @@ replace_once(
 
 struct StateJournal {
 ''',
+    "cancelable log sync helper",
 )
 
-replace_once(
-    "src/engine_impl/part1.rs",
-    '''    fn checkpoint(&mut self) -> Result<(), String> {
-        if self.pending == 0 { return Ok(()); }
-        self.writer.flush().map_err(|e| format!("state flush: {e}"))?;
-        self.writer.get_ref().sync_data().map_err(|e| format!("state sync: {e}"))?;
-        self.pending = 0;
-        self.last_sync = Instant::now();
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
-''',
+p1 = regex_once(
+    p1,
+    r"    fn checkpoint\(&mut self\) -> Result<\(\), String> \{.*?    fn finish\(&mut self\) -> Result<\(\), String> \{ self\.checkpoint\(\) \}\n",
     '''    fn checkpoint(&mut self, state: &JobState, control: &DestControl) -> Result<(), String> {
-        if self.pending == 0 { return Ok(()); }
+        if self.pending == 0 {
+            return Ok(());
+        }
         self.writer.flush().map_err(|e| format!("state flush: {e}"))?;
         sync_log_data(self.writer.get_ref(), state, control, "state")?;
         self.pending = 0;
@@ -215,25 +209,16 @@ replace_once(
         self.checkpoint(state, control)
     }
 ''',
+    "state journal sync",
 )
 
-replace_once(
-    "src/engine_impl/part1.rs",
-    '''    fn finish(&mut self) -> Result<(), String> {
-        if !self.dirty { return Ok(()); }
-        self.writer.flush().map_err(|e| format!("manifest flush: {e}"))?;
-        self.writer.get_ref().sync_data().map_err(|e| format!("manifest sync: {e}"))?;
-        self.dirty = false;
-        Ok(())
-    }
-}
-
-impl Drop for ManifestWriter {
-    fn drop(&mut self) { let _ = self.finish(); }
-}
-''',
+p1 = regex_once(
+    p1,
+    r"    fn finish\(&mut self\) -> Result<\(\), String> \{\n        if !self\.dirty.*?impl Drop for ManifestWriter \{\n    fn drop\(&mut self\) \{ let _ = self\.finish\(\); \}\n\}",
     '''    fn finish(&mut self, state: &JobState, control: &DestControl) -> Result<(), String> {
-        if !self.dirty { return Ok(()); }
+        if !self.dirty {
+            return Ok(());
+        }
         self.writer.flush().map_err(|e| format!("manifest flush: {e}"))?;
         sync_log_data(self.writer.get_ref(), state, control, "manifest")?;
         self.dirty = false;
@@ -245,22 +230,13 @@ impl Drop for ManifestWriter {
     fn drop(&mut self) {
         let _ = self.writer.flush();
     }
-}
-''',
+}''',
+    "manifest sync",
 )
 
-replace_once(
-    "src/engine_impl/part1.rs",
-    '''fn checkpoint_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    manifest.finish()?;
-    journal.checkpoint()
-}
-
-fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    manifest.finish()?;
-    journal.finish()
-}
-''',
+p1 = regex_once(
+    p1,
+    r"fn checkpoint_logs\(.*?\n\}\n\nfn finish_logs\(.*?\n\}",
     '''fn checkpoint_logs(
     manifest: &mut ManifestWriter,
     journal: &mut StateJournal,
@@ -279,31 +255,17 @@ fn finish_logs(
 ) -> Result<(), String> {
     manifest.finish(state, control)?;
     journal.finish(state, control)
-}
-''',
+}''',
+    "log helper signatures",
 )
 
-replace_once(
-    "src/engine_impl/part2.rs",
-    '''                if journal.needs_checkpoint() {
-                    if let Err(e) = checkpoint_logs(&mut manifest, &mut journal) {
-                        record_file_error(&state, slot, e);
-                        if !opts.keep_going {
-                            control.alive.store(false, Ordering::Release);
-                            break;
-                        }
-                        continue;
-                    }
-                }
-''',
+p2 = regex_once(
+    p2,
+    r"                if journal\.needs_checkpoint\(\) \{\n                    if let Err\(e\) = checkpoint_logs\(&mut manifest, &mut journal\) \{.*?                \}\n",
     '''                if journal.needs_checkpoint() {
                     control.enter_operation(OperationPhase::Sync);
-                    let checkpoint_result = checkpoint_logs(
-                        &mut manifest,
-                        &mut journal,
-                        &state,
-                        &control,
-                    );
+                    let checkpoint_result =
+                        checkpoint_logs(&mut manifest, &mut journal, &state, &control);
                     control.enter_operation(OperationPhase::Write);
                     if let Err(e) = checkpoint_result {
                         if !control.alive.load(Ordering::Acquire) {
@@ -318,69 +280,55 @@ replace_once(
                     }
                 }
 ''',
+    "checkpoint call",
 )
 
-replace_once(
-    "src/engine_impl/part2.rs",
-    '''    if let Err(e) = finish_logs(&mut manifest, &mut journal) {
-        set_phase(&state, slot, DestPhase::Failed, Some(e));
-        control.alive.store(false, Ordering::Release);
-        return;
-    }
+p2 = replace_once(
+    p2,
+    "    if let Err(e) = finish_logs(&mut manifest, &mut journal) {",
+    '''    control.enter_operation(OperationPhase::Sync);
+    let finish_result = finish_logs(&mut manifest, &mut journal, &state, &control);
+    control.enter_operation(OperationPhase::Write);
+    if let Err(e) = finish_result {''',
+    "final log call",
+)
 
-    if state.cancel.load(Ordering::Relaxed) {
+p2 = replace_once(
+    p2,
+    '''    if state.cancel.load(Ordering::Relaxed) {
         set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
         return;
     }
+''',
+    '''    if state.cancel.load(Ordering::Relaxed) {
+        set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        control.alive.store(false, Ordering::Release);
+        control.note_progress();
+        return;
+    }
+''',
+    "cancel final lifecycle",
+)
 
-    let errs = state.dests.lock().unwrap()[slot].files_err;
-    if !control.alive.load(Ordering::Acquire) {
-        set_phase(&state, slot, DestPhase::Failed, None);
-    } else if errs == 0 {
-        set_phase(&state, slot, DestPhase::Done, None);
-    } else {
+p2 = replace_once(
+    p2,
+    '''    } else {
         set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
     }
 }
 ''',
-    '''    control.enter_operation(OperationPhase::Sync);
-    let finish_result = finish_logs(&mut manifest, &mut journal, &state, &control);
-    control.enter_operation(OperationPhase::Write);
-    if let Err(e) = finish_result {
-        if control.alive.load(Ordering::Acquire) {
-            set_phase(&state, slot, DestPhase::Failed, Some(e));
-        } else {
-            set_phase(&state, slot, DestPhase::Failed, None);
-        }
-        control.alive.store(false, Ordering::Release);
-        control.note_progress();
-        return;
-    }
-
-    if state.cancel.load(Ordering::Relaxed) {
-        set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
-        control.alive.store(false, Ordering::Release);
-        control.note_progress();
-        return;
-    }
-
-    let errs = state.dests.lock().unwrap()[slot].files_err;
-    if !control.alive.load(Ordering::Acquire) {
-        set_phase(&state, slot, DestPhase::Failed, None);
-    } else if errs == 0 {
-        set_phase(&state, slot, DestPhase::Done, None);
-    } else {
+    '''    } else {
         set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
     }
     control.alive.store(false, Ordering::Release);
     control.note_progress();
 }
 ''',
+    "normal final lifecycle",
 )
 
-# Continue supervising workers after the reader has delivered its final End item.
-replace_once(
-    "src/engine_impl/part3.rs",
+p3 = replace_once(
+    p3,
     "fn mark_skipped_all(state: &JobState, info: &FileInfo, mask: &[bool]) {\n",
     '''fn watch_workers_after_input_closed(
     controls: &[Arc<DestControl>],
@@ -397,7 +345,6 @@ replace_once(
                 control.note_progress();
             }
         }
-
         for slot in 0..controls.len() {
             if !controls[slot].alive.load(Ordering::Acquire) {
                 continue;
@@ -417,34 +364,23 @@ replace_once(
 
 fn mark_skipped_all(state: &JobState, info: &FileInfo, mask: &[bool]) {
 ''',
+    "tail watchdog helper",
 )
 
-replace_once(
-    "src/engine_impl/part3.rs",
-    '''        drain_pending(
-            &mut all_active,
-            &senders,
-            &controls,
-            &state,
-            &mut pending,
-        );
+p3 = replace_once(
+    p3,
+    '''        );
         drop(senders);
 ''',
-    '''        drain_pending(
-            &mut all_active,
-            &senders,
-            &controls,
-            &state,
-            &mut pending,
-        );
+    '''        );
         drop(senders);
         watch_workers_after_input_closed(&controls, &state, &mut pending);
 ''',
+    "tail watchdog invocation",
 )
 
-# Regression: no pending queue is required for the tail watchdog to kill a stalled worker.
-replace_once(
-    "src/engine_impl/part4.rs",
+p4 = replace_once(
+    p4,
     '''    #[test]
     fn stall_thresholds_allow_slow_storage() {
 ''',
@@ -475,4 +411,11 @@ replace_once(
     #[test]
     fn stall_thresholds_allow_slow_storage() {
 ''',
+    "tail watchdog regression",
 )
+
+# Transactional write after all source-shape checks succeeded.
+write("src/engine_impl/part1.rs", p1)
+write("src/engine_impl/part2.rs", p2)
+write("src/engine_impl/part3.rs", p3)
+write("src/engine_impl/part4.rs", p4)
