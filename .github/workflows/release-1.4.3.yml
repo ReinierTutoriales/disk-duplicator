@@ -60,7 +60,9 @@ jobs:
           Set-Content .github/workflows/build.yml -Value $workflow -Encoding utf8 -NoNewline
 
           cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Clippy Rust 1.98.1
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -76,60 +78,27 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           rustup toolchain install stable --profile minimal --component clippy --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +stable clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +stable test --locked --release --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Commit clean 1.4.3 tree and publish release
+      - name: Commit verified 1.4.3 metadata to main
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-
-          Remove-Item .github/workflows/release-1.4.3.yml
-
-          $changed = git status --short
-          Write-Host $changed
           git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           git config user.name 'github-actions[bot]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.toml Cargo.lock .github/workflows/build.yml .github/workflows/release-1.4.3.yml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          git add Cargo.toml Cargo.lock .github/workflows/build.yml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git commit -m 'release: RepartoCopier 1.4.3'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git push origin HEAD:main
-
-          $sha = (git rev-parse HEAD).Trim()
-          $exe = 'target/release/RepartoCopier.exe'
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-
-          @"
-          ## RepartoCopier v1.4.3
-
-          Release de estabilidad y endurecimiento del motor FAN-OUT.
-
-          ### Cambios principales
-          - FAN-OUT como único motor de copia, conservando la carpeta raíz, toda la jerarquía y carpetas vacías.
-          - Reader y writer Win32 OVERLAPPED endurecidos, con cancelación real mediante CancelIoEx y drenaje seguro de I/O pendiente.
-          - Watchdogs de lectura, escritura, sync, verify y operaciones finales del último archivo.
-          - Verificación BLAKE3 y validación final cancelables.
-          - Reanudación, journal, manifest y temporales fuera del árbol copiado con validación runtime.
-          - Protección reforzada contra symlinks, junctions y reparse points, incluyendo mitigaciones TOCTOU antes de escribir y commit.
-          - Corrección de carreras concurrentes al crear estado compartido entre destinos hermanos.
-          - Aislamiento de destinos lentos o fallidos y backpressure con presupuesto global de memoria.
-          - Correcciones de lifecycle/UI para impedir trabajos superpuestos durante la verificación final.
-          - Batería Windows release y compatibilidad latest stable verificadas antes de publicar.
-
-          ### Plataforma
-          - Windows 10/11 x64
-          - Ejecutable autónomo: RepartoCopier.exe
-
-          ### Integridad del binario
-          SHA-256: $hash
-          "@ | Set-Content release-notes-1.4.3.md -Encoding utf8
-
-          gh release create v1.4.3 $exe `
-            --target $sha `
-            --title 'RepartoCopier v1.4.3' `
-            --notes-file release-notes-1.4.3.md
-
-          gh workflow run build.yml --ref main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
