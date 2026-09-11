@@ -145,8 +145,11 @@ mod tests {
         let pool = BufferPool::new(2, Arc::clone(&state.buffers_in_flight));
         let mut raw = pool.acquire(state).unwrap();
         raw[..data.len()].copy_from_slice(data);
-        raw.truncate(data.len());
-        FanoutItem::Data(Arc::new(Buffer { data: raw, pool }))
+        FanoutItem::Data(Arc::new(Buffer {
+            data: raw,
+            len: data.len(),
+            pool,
+        }))
     }
 
     #[test]
