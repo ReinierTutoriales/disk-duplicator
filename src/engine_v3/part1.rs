@@ -1,4 +1,4 @@
-use crate::paths::{backup_path, manifest_path, part_path, state_dir_for, state_path};
+use crate::paths::{backup_path, manifest_path, part_path, persisted_path_key, state_dir_for, state_path};
 use crossbeam_channel as mpsc;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -15,10 +15,6 @@ const MIN_QUEUE: usize = 2;
 const MAX_QUEUE: usize = 16;
 const MAX_FREE_BUFFERS: usize = 16;
 const RETRIES: usize = 2;
-// A 16 MiB synchronous write can legitimately take several seconds on slow USB,
-// SMR disks, or a device doing internal recovery. Six seconds produced false
-// positives. Thirty seconds still detects a genuinely stuck destination without
-// treating sub-MiB/s media as dead.
 const WRITE_STALL_THRESHOLD: Duration = Duration::from_secs(30);
 const LONG_OP_THRESHOLD: Duration = Duration::from_secs(120);
 const STATE_BATCH_FILES: usize = 128;
@@ -398,8 +394,8 @@ impl ManifestWriter {
     }
 
     fn append(&mut self, rel: &Path, hash: &blake3::Hash) -> Result<(), String> {
-        let name = rel.to_string_lossy().replace('\\', "/");
-        writeln!(self.writer, "{}  {name}", hash.to_hex())
+        let key = persisted_path_key(rel);
+        writeln!(self.writer, "{}  {key}", hash.to_hex())
             .map_err(|e| format!("manifest write: {e}"))?;
         self.dirty = true;
         Ok(())
