@@ -332,21 +332,23 @@ fn fanout_worker(
                             control: &control,
                             rel: &rel,
                         };
+                        let bytes = buf.bytes();
                         let result = write_buffer_retrying(
                             &mut cur.file,
                             &tmp,
                             cur.copied,
-                            &buf.data,
+                            bytes,
                             &ctx,
                         );
                         match result {
                             Ok(()) => {
-                                cur.hasher.update(&buf.data);
-                                cur.copied += buf.data.len() as u64;
+                                cur.hasher.update(bytes);
+                                let written = bytes.len() as u64;
+                                cur.copied += written;
                                 record_write_progress(
                                     &state,
                                     slot,
-                                    buf.data.len() as u64,
+                                    written,
                                     &mut effective_written,
                                     start,
                                 );
