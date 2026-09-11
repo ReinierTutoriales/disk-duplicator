@@ -41,12 +41,13 @@ jobs:
           Set-Content Cargo.toml -Value $cargo -Encoding utf8 -NoNewline
 
           $lock = Get-Content Cargo.lock -Raw
-          $oldRoot = "[[package]]`nname = `"disk-duplicator`"`nversion = `"1.4.2`""
-          $newRoot = "[[package]]`nname = `"disk-duplicator`"`nversion = `"1.4.3`""
-          if (-not $lock.Contains($oldRoot)) {
-            throw 'No se encontro el bloque raiz 1.4.2 en Cargo.lock'
+          $rootPattern = '(?ms)(\[\[package\]\]\r?\nname = "disk-duplicator"\r?\nversion = ")1\.4\.2(")'
+          $rootRegex = [regex]::new($rootPattern)
+          $rootMatches = $rootRegex.Matches($lock)
+          if ($rootMatches.Count -ne 1) {
+            throw "Cargo.lock debe contener exactamente un bloque raiz 1.4.2; encontrados: $($rootMatches.Count)"
           }
-          $lock = $lock.Replace($oldRoot, $newRoot)
+          $lock = $rootRegex.Replace($lock, { param($m) $m.Groups[1].Value + '1.4.3' + $m.Groups[2].Value }, 1)
           Set-Content Cargo.lock -Value $lock -Encoding utf8 -NoNewline
 
           $workflow = Get-Content .github/workflows/build.yml -Raw
