@@ -40,12 +40,23 @@ fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {
 }
 
 fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> {
+    let root_meta = fs::symlink_metadata(root)
+        .map_err(|e| format!("No se pudo inspeccionar el origen {}: {e}", root.display()))?;
+    if root_meta.file_type().is_symlink() || is_reparse_point(&root_meta) {
+        return Err(format!(
+            "No se permite usar un enlace simbólico, junction o reparse point como origen: {}.",
+            root.display()
+        ));
+    }
+
     let mut files = Vec::new();
     let mut dirs = Vec::new();
 
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry.map_err(|e| format!("origen: {e}"))?;
-        if entry.depth() == 0 { continue; }
+        if entry.depth() == 0 {
+            continue;
+        }
 
         let rel = entry
             .path()
@@ -53,10 +64,12 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
             .map_err(|e| e.to_string())?
             .to_path_buf();
         let ft = entry.file_type();
+        let entry_meta = fs::symlink_metadata(entry.path())
+            .map_err(|e| format!("metadata {}: {e}", entry.path().display()))?;
 
-        if ft.is_symlink() {
+        if ft.is_symlink() || is_reparse_point(&entry_meta) {
             return Err(format!(
-                "El origen contiene un enlace simbólico que no puede duplicarse 1:1 de forma segura: {}.",
+                "El origen contiene un enlace simbólico, junction o reparse point que no puede duplicarse 1:1 de forma segura: {}.",
                 entry.path().display()
             ));
         }
@@ -92,7 +105,12 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
 }
 
 fn state_key(info: &PlannedFile) -> String {
-    format!("{}|{}|{}", persisted_path_key(&info.rel), info.size, info.mtime_ns)
+    format!(
+        "{}|{}|{}",
+        persisted_path_key(&info.rel),
+        info.size,
+        info.mtime_ns
+    )
 }
 
 fn legacy_state_key(info: &PlannedFile) -> String {
@@ -115,12 +133,20 @@ fn recover_completed_rewrite(dest: &Path) -> Result<(), String> {
 
     if path.exists() {
         if backup.exists() {
-            fs::remove_file(&backup)
-                .map_err(|e| format!("No se pudo limpiar backup de estado {}: {e}", backup.display()))?;
+            fs::remove_file(&backup).map_err(|e| {
+                format!(
+                    "No se pudo limpiar backup de estado {}: {e}",
+                    backup.display()
+                )
+            })?;
         }
         if tmp.exists() {
-            fs::remove_file(&tmp)
-                .map_err(|e| format!("No se pudo limpiar temporal de estado {}: {e}", tmp.display()))?;
+            fs::remove_file(&tmp).map_err(|e| {
+                format!(
+                    "No se pudo limpiar temporal de estado {}: {e}",
+                    tmp.display()
+                )
+            })?;
         }
         return Ok(());
     }
@@ -158,8 +184,7 @@ fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> 
     let tmp = state_rewrite_tmp_path(dest);
     let backup = state_rewrite_backup_path(dest);
 
-    let mut f = File::create(&tmp)
-        .map_err(|e| format!("state temp {}: {e}", tmp.display()))?;
+    let mut f = File::create(&tmp).map_err(|e| format!("state temp {}: {e}", tmp.display()))?;
     let mut ordered: Vec<&String> = keys.iter().collect();
     ordered.sort();
     for key in ordered {
@@ -189,10 +214,14 @@ fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> 
         Err(commit_err) => {
             if backup.exists() {
                 match fs::rename(&backup, &path) {
-                    Ok(()) => Err(format!("state commit {}: {commit_err}; journal anterior restaurado", path.display())),
+                    Ok(()) => Err(format!(
+                        "state commit {}: {commit_err}; journal anterior restaurado",
+                        path.display()
+                    )),
                     Err(restore_err) => Err(format!(
                         "CRÍTICO: state commit {}: {commit_err}; tampoco se pudo restaurar {}: {restore_err}",
-                        path.display(), backup.display()
+                        path.display(),
+                        backup.display()
                     )),
                 }
             } else {
@@ -203,8 +232,12 @@ fn rewrite_completed(dest: &Path, keys: &HashSet<String>) -> Result<(), String> 
 }
 
 fn same_enough(src: &Path, dst: &Path) -> bool {
-    let (Ok(a), Ok(b)) = (fs::metadata(src), fs::metadata(dst)) else { return false; };
-    if !a.is_file() || !b.is_file() || a.len() != b.len() { return false; }
+    let (Ok(a), Ok(b)) = (fs::metadata(src), fs::metadata(dst)) else {
+        return false;
+    };
+    if !a.is_file() || !b.is_file() || a.len() != b.len() {
+        return false;
+    }
     match (a.modified(), b.modified()) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
@@ -244,14 +277,18 @@ fn normalize_completed_state(
 ) -> Result<HashSet<String>, String> {
     recover_completed_rewrite(dest)?;
     let loaded = load_completed(dest);
-    if loaded.is_empty() { return Ok(loaded); }
+    if loaded.is_empty() {
+        return Ok(loaded);
+    }
 
     let manifest_hashes = load_manifest_hashes(dest);
     let mut valid = HashSet::new();
     for info in files {
         let key = state_key(info);
         let old_key = legacy_state_key(info);
-        if !loaded.contains(&key) && !loaded.contains(&old_key) { continue; }
+        if !loaded.contains(&key) && !loaded.contains(&old_key) {
+            continue;
+        }
 
         let dst = dest.join(&info.rel);
         let expected = manifest_hashes
@@ -286,7 +323,10 @@ fn remove_owned_file(path: &Path, label: &str) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("No se pudo limpiar {label} {}: {e}", path.display())),
+        Err(e) => Err(format!(
+            "No se pudo limpiar {label} {}: {e}",
+            path.display()
+        )),
     }
 }
 
@@ -306,12 +346,15 @@ fn cleanup_owned_stale_files(dest: &Path, files: &[PlannedFile]) -> Result<(), S
             previous_backup_path(dest, &dst),
             legacy_backup_path(dest, &dst),
         ] {
-            if !backup.exists() { continue; }
+            if !backup.exists() {
+                continue;
+            }
             if dst.exists() {
                 remove_owned_file(&backup, "backup")?;
             } else {
-                fs::rename(&backup, &dst)
-                    .map_err(|e| format!("No se pudo restaurar backup {}: {e}", backup.display()))?;
+                fs::rename(&backup, &dst).map_err(|e| {
+                    format!("No se pudo restaurar backup {}: {e}", backup.display())
+                })?;
             }
         }
     }
@@ -323,7 +366,10 @@ fn writable_probe(dest: &Path) -> Result<(), String> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let probe = dest.join(format!(".disk-duplicator-write-test-{}-{stamp}", std::process::id()));
+    let probe = dest.join(format!(
+        ".disk-duplicator-write-test-{}-{stamp}",
+        std::process::id()
+    ));
     let result = (|| {
         let mut f = OpenOptions::new()
             .write(true)
@@ -341,7 +387,9 @@ fn writable_probe(dest: &Path) -> Result<(), String> {
 }
 
 fn round_up(value: u64, granularity: u64) -> u64 {
-    if value == 0 || granularity <= 1 { return value; }
+    if value == 0 || granularity <= 1 {
+        return value;
+    }
     value
         .saturating_add(granularity - 1)
         .checked_div(granularity)
@@ -371,12 +419,17 @@ fn validate_destination_layout(dest: &Path, rel: &Path) -> Result<(), String> {
         let meta = match fs::symlink_metadata(&current) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", current.display())),
+            Err(e) => {
+                return Err(format!(
+                    "No se pudo inspeccionar {}: {e}",
+                    current.display()
+                ))
+            }
         };
 
-        if meta.file_type().is_symlink() {
+        if meta.file_type().is_symlink() || is_reparse_point(&meta) {
             return Err(format!(
-                "No se permite escribir a través del enlace simbólico {}.",
+                "No se permite escribir a través del enlace simbólico, junction o reparse point {}.",
                 current.display()
             ));
         }
@@ -403,21 +456,34 @@ fn validate_destination_directories(dest: &Path, dirs: &[PathBuf]) -> Result<(),
     for rel in dirs {
         let path = dest.join(rel);
         match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-            Ok(_) => return Err(format!("Conflicto de carpeta en destino: {}.", path.display())),
+            Ok(meta)
+                if meta.is_dir()
+                    && !meta.file_type().is_symlink()
+                    && !is_reparse_point(&meta) => {}
+            Ok(_) => {
+                return Err(format!(
+                    "Conflicto de carpeta o reparse point en destino: {}.",
+                    path.display()
+                ))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", path.display())),
+            Err(e) => {
+                return Err(format!(
+                    "No se pudo inspeccionar {}: {e}",
+                    path.display()
+                ))
+            }
         }
     }
     Ok(())
 }
 
 fn destination_file_allocation(dst: &Path, granularity: u64) -> Result<Option<u64>, String> {
-    match fs::metadata(dst) {
+    match fs::symlink_metadata(dst) {
         Ok(meta) => {
-            if !meta.is_file() {
+            if meta.file_type().is_symlink() || is_reparse_point(&meta) || !meta.is_file() {
                 return Err(format!(
-                    "Conflicto en {}: el origen requiere un archivo, pero el destino contiene otro tipo de entrada.",
+                    "Conflicto en {}: el origen requiere un archivo normal, pero el destino contiene otro tipo de entrada.",
                     dst.display()
                 ));
             }
