@@ -284,7 +284,7 @@ fn fanout_job(
             let path = source.join(&info.rel);
             if let Err(e) = validate_source_snapshot(&path, info) {
                 for &slot in &active { set_error(&state, slot, e.clone()); }
-                state.cancel.store(true, Ordering::Release);
+                state.request_cancel();
                 break;
             }
 
@@ -293,7 +293,7 @@ fn fanout_job(
                 Err(e) => {
                     let msg = format!("origen {}: {e}", path.display());
                     for &slot in &active { set_error(&state, slot, msg.clone()); }
-                    state.cancel.store(true, Ordering::Release);
+                    state.request_cancel();
                     break;
                 }
             };
@@ -321,7 +321,7 @@ fn fanout_job(
                         pool.release(raw);
                         let msg = format!("lectura {}: {e}", path.display());
                         for &slot in &active { set_error(&state, slot, msg.clone()); }
-                        state.cancel.store(true, Ordering::Release);
+                        state.request_cancel();
                         read_ok = false;
                         break;
                     }
@@ -350,13 +350,13 @@ fn fanout_job(
             if copied != info.size {
                 let msg = format!("origen cambió: {}", path.display());
                 for &slot in &active { set_error(&state, slot, msg.clone()); }
-                state.cancel.store(true, Ordering::Release);
+                state.request_cancel();
                 break;
             }
 
             if let Err(e) = validate_source_snapshot(&path, info) {
                 for &slot in &active { set_error(&state, slot, e.clone()); }
-                state.cancel.store(true, Ordering::Release);
+                state.request_cancel();
                 break;
             }
 
