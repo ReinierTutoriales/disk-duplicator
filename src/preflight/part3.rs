@@ -50,11 +50,8 @@ fn supervise_job(
     opts: CopyOpts,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        loop {
-            state.running.store(true, Ordering::Release);
-            if handles.iter().all(JoinHandle::is_finished) {
-                break;
-            }
+        state.running.store(true, Ordering::Release);
+        while !handles.iter().all(JoinHandle::is_finished) {
             thread::sleep(Duration::from_millis(20));
         }
 
@@ -63,6 +60,19 @@ fn supervise_job(
             if handle.join().is_err() {
                 worker_panicked = true;
             }
+        }
+
+        if state.cancel.load(Ordering::Acquire) {
+            let mut progress = state.dests.lock().unwrap();
+            for dp in progress.iter_mut() {
+                if dp.phase != DestPhase::Failed {
+                    dp.phase = DestPhase::Cancelled;
+                    dp.error = Some("Cancelado".into());
+                }
+            }
+            drop(progress);
+            state.running.store(false, Ordering::Release);
+            return;
         }
 
         let source_problem = source_change(&source, &files, &dirs);
@@ -96,49 +106,39 @@ fn supervise_job(
             }
         }
 
-        if !state.cancel.load(Ordering::Relaxed) {
-            let reader_hashes = state.reader_hashes.lock().unwrap().clone();
-            let expected_hashes = if opts.verify {
-                match final_source_hashes(&source, &files, &reader_hashes) {
-                    Ok(hashes) => hashes,
-                    Err(e) => {
-                        for err in &mut final_errors {
-                            if err.is_none() {
-                                *err = Some(e.clone());
-                            }
+        let reader_hashes = state.reader_hashes.lock().unwrap().clone();
+        let expected_hashes = if opts.verify {
+            match final_source_hashes(&source, &files, &reader_hashes) {
+                Ok(hashes) => hashes,
+                Err(e) => {
+                    for err in &mut final_errors {
+                        if err.is_none() {
+                            *err = Some(e.clone());
                         }
-                        std::collections::HashMap::new()
                     }
+                    std::collections::HashMap::new()
                 }
-            } else {
-                reader_hashes
-            };
+            }
+        } else {
+            reader_hashes
+        };
 
-            for (slot, result) in validate_destinations_parallel(
-                &source,
-                &dest_paths,
-                &files,
-                &dirs,
-                opts.verify,
-                &expected_hashes,
-                &final_errors,
-            ) {
-                if let Err(e) = result {
-                    final_errors[slot] = Some(e);
-                }
+        for (slot, result) in validate_destinations_parallel(
+            &source,
+            &dest_paths,
+            &files,
+            &dirs,
+            opts.verify,
+            &expected_hashes,
+            &final_errors,
+        ) {
+            if let Err(e) = result {
+                final_errors[slot] = Some(e);
             }
         }
 
         let mut progress = state.dests.lock().unwrap();
         for (slot, dp) in progress.iter_mut().enumerate() {
-            if state.cancel.load(Ordering::Relaxed) {
-                if !matches!(dp.phase, DestPhase::Cancelled | DestPhase::Failed) {
-                    dp.phase = DestPhase::Cancelled;
-                    dp.error = Some("Cancelado".into());
-                }
-                continue;
-            }
-
             if dp.files_err > 0 && final_errors[slot].is_none() {
                 final_errors[slot] = Some(format!(
                     "La copia terminó con {} error(es); no se considera completa.",
@@ -158,6 +158,7 @@ fn supervise_job(
                 dp.written = dp.total;
             }
         }
+        drop(progress);
 
         state.running.store(false, Ordering::Release);
     })
