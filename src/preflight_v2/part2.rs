@@ -16,6 +16,7 @@ fn plan_destination(
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
     let completed = normalize_completed_state(source, dest, files)?;
     compact_manifest(dest, files)?;
+    let mut skip_verify_buf = opts.skip_same.then(|| vec![0u8; VERIFY_BUF]);
 
     let mut bytes_to_write = 0u64;
     let mut committed_delta: i128 = 0;
@@ -28,7 +29,8 @@ fn plan_destination(
         let key = state_key(info);
         let physically_valid = same_enough(&src, &dst);
         let skip_same_valid = if opts.skip_same && physically_valid && !completed.contains(&key) {
-            hash_path(&src)? == hash_path(&dst)?
+            let buf = skip_verify_buf.as_mut().expect("skip_same buffer");
+            hash_path_with_buffer(&src, buf)? == hash_path_with_buffer(&dst, buf)?
         } else {
             false
         };
@@ -161,16 +163,20 @@ fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Opti
     None
 }
 
-fn hash_path(path: &Path) -> Result<blake3::Hash, String> {
+fn hash_path_with_buffer(path: &Path, buf: &mut [u8]) -> Result<blake3::Hash, String> {
     let mut f = File::open(path).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
-    let mut buf = vec![0u8; VERIFY_BUF];
     let mut h = blake3::Hasher::new();
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
+        let n = f.read(buf).map_err(|e| format!("No se pudo verificar {}: {e}", path.display()))?;
         if n == 0 { break; }
         h.update(&buf[..n]);
     }
     Ok(h.finalize())
+}
+
+fn hash_path(path: &Path) -> Result<blake3::Hash, String> {
+    let mut buf = vec![0u8; VERIFY_BUF];
+    hash_path_with_buffer(path, &mut buf)
 }
 
 fn final_source_hashes(
@@ -179,9 +185,10 @@ fn final_source_hashes(
     reader_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
 ) -> Result<std::collections::HashMap<PathBuf, [u8; 32]>, String> {
     let mut final_hashes = std::collections::HashMap::with_capacity(files.len());
+    let mut buf = vec![0u8; VERIFY_BUF];
     for info in files {
         let path = source.join(&info.rel);
-        let actual = hash_path(&path)?;
+        let actual = hash_path_with_buffer(&path, &mut buf)?;
         if let Some(read_hash) = reader_hashes.get(&info.rel) {
             if actual.as_bytes() != read_hash {
                 return Err(format!(
@@ -321,6 +328,7 @@ fn validate_destination_result_with_hashes(
     } else {
         std::collections::HashMap::new()
     };
+    let mut verify_buf = verify.then(|| vec![0u8; VERIFY_BUF]);
 
     let mut total_bytes = 0u64;
     for info in files {
@@ -339,7 +347,8 @@ fn validate_destination_result_with_hashes(
         total_bytes = total_bytes.saturating_add(meta.len());
 
         if verify {
-            let dst_hash = hash_path(&dst)?;
+            let buf = verify_buf.as_mut().expect("verify buffer");
+            let dst_hash = hash_path_with_buffer(&dst, buf)?;
             if let Some(expected) = expected_hashes.get(&info.rel) {
                 if dst_hash.as_bytes() != expected {
                     return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
@@ -354,7 +363,7 @@ fn validate_destination_result_with_hashes(
                     }
                 } else {
                     let src = source.join(&info.rel);
-                    if hash_path(&src)? != dst_hash {
+                    if hash_path_with_buffer(&src, buf)? != dst_hash {
                         return Err(format!("BLAKE3 final no coincide: {}", dst.display()));
                     }
                 }
