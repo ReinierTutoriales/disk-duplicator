@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
@@ -219,7 +220,7 @@ enum SyncCommand {
     Stop,
 }
 
-pub(crate) struct SyncWorker {
+struct SyncWorker {
     command_tx: mpsc::SyncSender<SyncCommand>,
     done_rx: mpsc::Receiver<io::Result<()>>,
     thread_handle: Handle,
@@ -227,7 +228,7 @@ pub(crate) struct SyncWorker {
 }
 
 impl SyncWorker {
-    pub(crate) fn new() -> io::Result<Self> {
+    fn new() -> io::Result<Self> {
         let (command_tx, command_rx) = mpsc::sync_channel(1);
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let (thread_tx, thread_rx) = mpsc::sync_channel(1);
@@ -247,8 +248,7 @@ impl SyncWorker {
             while let Ok(command) = command_rx.recv() {
                 match command {
                     SyncCommand::Sync(file) => {
-                        let result = file.sync_data();
-                        if done_tx.send(result).is_err() {
+                        if done_tx.send(file.sync_data()).is_err() {
                             break;
                         }
                     }
@@ -277,7 +277,7 @@ impl SyncWorker {
         })
     }
 
-    pub(crate) fn sync(
+    fn sync(
         &mut self,
         file: File,
         mut cancelled: impl FnMut() -> bool,
@@ -332,6 +332,25 @@ impl Drop for SyncWorker {
     }
 }
 
+thread_local! {
+    static SYNC_WORKER: RefCell<Option<SyncWorker>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn sync_file_cancelable(
+    file: File,
+    cancelled: impl FnMut() -> bool,
+) -> io::Result<()> {
+    SYNC_WORKER.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(SyncWorker::new()?);
+        }
+        slot.as_mut()
+            .expect("sync worker initialized")
+            .sync(file, cancelled)
+    })
+}
+
 fn cancelled_error() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelado")
 }
@@ -382,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_sync_worker_handles_multiple_files() {
+    fn thread_local_sync_worker_handles_multiple_files() {
         let path_a = temp_file("sync-a");
         let path_b = temp_file("sync-b");
         let mut a = File::create(&path_a).unwrap();
@@ -390,10 +409,8 @@ mod tests {
         a.write_all(b"alpha").unwrap();
         b.write_all(b"beta").unwrap();
 
-        let mut worker = SyncWorker::new().unwrap();
-        worker.sync(a, || false).unwrap();
-        worker.sync(b, || false).unwrap();
-        drop(worker);
+        sync_file_cancelable(a, || false).unwrap();
+        sync_file_cancelable(b, || false).unwrap();
 
         assert_eq!(fs::read(&path_a).unwrap(), b"alpha");
         assert_eq!(fs::read(&path_b).unwrap(), b"beta");
