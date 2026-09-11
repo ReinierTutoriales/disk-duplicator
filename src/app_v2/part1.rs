@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, RichText};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,10 +19,13 @@ const RUNNING_REPAINT: Duration = Duration::from_millis(200);
 const PAUSED_REPAINT: Duration = Duration::from_millis(500);
 const STARTING_REPAINT: Duration = Duration::from_millis(80);
 const ERROR_FLASH: Duration = Duration::from_secs(5);
-const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const SPEED_DECAY_GRACE_SECS: f64 = 0.5;
 const SPEED_DECAY_TAU_SECS: f64 = 2.0;
+const DEFAULT_ACCENT_RGB: u32 = 0x0078_D4;
+
+static SYSTEM_ACCENT_RGB: AtomicU32 = AtomicU32::new(DEFAULT_ACCENT_RGB);
 
 #[cfg(windows)]
 mod system_theme {
@@ -54,6 +57,12 @@ mod system_theme {
         ) -> i32;
         #[link_name = "RegCloseKey"]
         fn reg_close_key(hkey: HKey) -> i32;
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        #[link_name = "DwmGetColorizationColor"]
+        fn dwm_get_colorization_color(colorization: *mut u32, opaque_blend: *mut i32) -> i32;
     }
 
     pub fn is_light() -> bool {
@@ -93,6 +102,16 @@ mod system_theme {
 
         queried == 0 && value_type == REG_DWORD && value_len == 4 && value == 1
     }
+
+    pub fn accent_rgb() -> Option<u32> {
+        let mut color = 0u32;
+        let mut opaque = 0i32;
+        let result = unsafe { dwm_get_colorization_color(&mut color, &mut opaque) };
+        if result != 0 {
+            return None;
+        }
+        Some(color & 0x00FF_FFFF)
+    }
 }
 
 #[cfg(windows)]
@@ -103,6 +122,13 @@ fn detect_system_theme() -> bool {
 #[cfg(not(windows))]
 fn detect_system_theme() -> bool {
     false
+}
+
+fn refresh_system_accent() {
+    #[cfg(windows)]
+    if let Some(rgb) = system_theme::accent_rgb() {
+        SYSTEM_ACCENT_RGB.store(rgb, Ordering::Relaxed);
+    }
 }
 
 fn resolve_theme(preference: ThemePreference) -> bool {
@@ -116,17 +142,27 @@ fn resolve_theme(preference: ThemePreference) -> bool {
 #[cfg(windows)]
 fn setup_fonts(ctx: &egui::Context) {
     let windows_dir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-    let path = PathBuf::from(windows_dir).join("Fonts").join("segoeui.ttf");
-    let Ok(bytes) = std::fs::read(path) else {
-        return;
-    };
+    let fonts_dir = PathBuf::from(windows_dir).join("Fonts");
 
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("segoe_ui".to_owned(), egui::FontData::from_owned(bytes));
+    for (name, file) in [
+        ("segoe_ui", "segoeui.ttf"),
+        ("segoe_symbols", "seguisym.ttf"),
+    ] {
+        if let Ok(bytes) = std::fs::read(fonts_dir.join(file)) {
+            fonts
+                .font_data
+                .insert(name.to_owned(), egui::FontData::from_owned(bytes));
+        }
+    }
+
     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        family.insert(0, "segoe_ui".to_owned());
+        if fonts.font_data.contains_key("segoe_symbols") {
+            family.push("segoe_symbols".to_owned());
+        }
+        if fonts.font_data.contains_key("segoe_ui") {
+            family.insert(0, "segoe_ui".to_owned());
+        }
     }
     ctx.set_fonts(fonts);
 }
@@ -137,27 +173,41 @@ fn setup_fonts(_ctx: &egui::Context) {}
 struct Theme;
 
 impl Theme {
-    fn accent(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(0, 112, 200)
-        } else {
-            Color32::from_rgb(86, 200, 255)
-        }
+    fn accent(_light: bool) -> Color32 {
+        let rgb = SYSTEM_ACCENT_RGB.load(Ordering::Relaxed);
+        Color32::from_rgb(
+            ((rgb >> 16) & 0xFF) as u8,
+            ((rgb >> 8) & 0xFF) as u8,
+            (rgb & 0xFF) as u8,
+        )
+    }
+
+    fn blend(base: Color32, tint: Color32, tint_percent: u16) -> Color32 {
+        let tint_percent = tint_percent.min(100);
+        let base_percent = 100 - tint_percent;
+        let mix = |a: u8, b: u8| -> u8 {
+            (((u16::from(a) * base_percent) + (u16::from(b) * tint_percent)) / 100) as u8
+        };
+        Color32::from_rgb(
+            mix(base.r(), tint.r()),
+            mix(base.g(), tint.g()),
+            mix(base.b(), tint.b()),
+        )
     }
 
     fn success(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(18, 128, 74)
+            Color32::from_rgb(16, 124, 65)
         } else {
-            Color32::from_rgb(92, 210, 145)
+            Color32::from_rgb(95, 210, 145)
         }
     }
 
     fn warning(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(170, 96, 0)
+            Color32::from_rgb(157, 93, 0)
         } else {
-            Color32::from_rgb(255, 190, 64)
+            Color32::from_rgb(255, 185, 0)
         }
     }
 
@@ -165,63 +215,68 @@ impl Theme {
         if light {
             Color32::from_rgb(196, 43, 28)
         } else {
-            Color32::from_rgb(255, 135, 145)
+            Color32::from_rgb(255, 153, 164)
         }
     }
 
     fn verify(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(111, 66, 193)
+            Color32::from_rgb(103, 74, 181)
         } else {
-            Color32::from_rgb(190, 155, 255)
+            Color32::from_rgb(194, 165, 255)
         }
     }
 
     fn muted(light: bool) -> Color32 {
         if light {
-            Color32::from_gray(96)
+            Color32::from_rgb(96, 96, 96)
         } else {
-            Color32::from_gray(168)
+            Color32::from_rgb(173, 173, 173)
         }
     }
 
     fn text(light: bool) -> Color32 {
         if light {
-            Color32::from_gray(24)
+            Color32::from_rgb(27, 27, 27)
         } else {
-            Color32::from_gray(244)
+            Color32::from_rgb(255, 255, 255)
         }
     }
 
     fn panel(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(248, 250, 252)
+            Color32::from_rgb(243, 243, 243)
         } else {
-            Color32::from_rgb(28, 29, 32)
+            Color32::from_rgb(32, 32, 32)
+        }
+    }
+
+    fn window(light: bool) -> Color32 {
+        if light {
+            Color32::from_rgb(249, 249, 249)
+        } else {
+            Color32::from_rgb(39, 39, 39)
         }
     }
 
     fn card(light: bool) -> Color32 {
         if light {
-            Color32::WHITE
+            Color32::from_rgb(255, 255, 255)
         } else {
-            Color32::from_rgb(36, 38, 42)
+            Color32::from_rgb(45, 45, 45)
         }
     }
 
     fn selected(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(231, 245, 255)
-        } else {
-            Color32::from_rgb(24, 52, 70)
-        }
+        let percent = if light { 12 } else { 22 };
+        Self::blend(Self::card(light), Self::accent(light), percent)
     }
 
     fn border(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(216, 221, 228)
+            Color32::from_rgb(229, 229, 229)
         } else {
-            Color32::from_rgb(62, 66, 73)
+            Color32::from_rgb(61, 61, 61)
         }
     }
 }
@@ -232,13 +287,18 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
     } else {
         egui::Visuals::dark()
     };
+    let accent = Theme::accent(light);
     visuals.panel_fill = Theme::panel(light);
-    visuals.window_fill = Theme::panel(light);
+    visuals.window_fill = Theme::window(light);
     visuals.extreme_bg_color = Theme::card(light);
     visuals.widgets.noninteractive.bg_fill = Theme::panel(light);
     visuals.widgets.inactive.bg_fill = Theme::card(light);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, Theme::accent(light));
-    visuals.selection.bg_fill = Theme::accent(light);
+    visuals.widgets.hovered.bg_fill = Theme::selected(light);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    visuals.widgets.active.bg_fill = Theme::selected(light);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    visuals.selection.bg_fill = accent;
+    visuals.selection.stroke.color = accent;
     visuals.override_text_color = Some(Theme::text(light));
     ctx.set_visuals(visuals);
 
@@ -255,6 +315,13 @@ fn card_frame(light: bool) -> egui::Frame {
         .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+}
+
+fn window_frame(ctx: &egui::Context, light: bool) -> egui::Frame {
+    egui::Frame::window(&ctx.style())
+        .fill(Theme::window(light))
+        .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
+        .rounding(egui::Rounding::same(10.0))
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -338,16 +405,24 @@ fn phase_label(
 
 fn theme_glyph(theme: ThemePreference) -> &'static str {
     match theme {
-        ThemePreference::System => "◐",
+        ThemePreference::System => "⊞",
         ThemePreference::Light => "☀",
-        ThemePreference::Dark => "●",
+        ThemePreference::Dark => "☾",
     }
 }
 
 fn theme_description(theme: ThemePreference) -> &'static str {
     match theme {
-        ThemePreference::System => "Sigue automáticamente la apariencia de Windows.",
-        ThemePreference::Light => "Interfaz clara para ambientes luminosos.",
-        ThemePreference::Dark => "Interfaz oscura con menor brillo visual.",
+        ThemePreference::System => "Usa automáticamente el tema y el color de énfasis de Windows.",
+        ThemePreference::Light => "Mantiene la interfaz clara usando el color de énfasis de Windows.",
+        ThemePreference::Dark => "Mantiene la interfaz oscura usando el color de énfasis de Windows.",
+    }
+}
+
+fn theme_card_caption(theme: ThemePreference) -> &'static str {
+    match theme {
+        ThemePreference::System => "Automático",
+        ThemePreference::Light => "Siempre claro",
+        ThemePreference::Dark => "Siempre oscuro",
     }
 }
