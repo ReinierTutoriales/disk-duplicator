@@ -1,17 +1,21 @@
+struct FinalValidationContext<'a> {
+    expected_hashes: &'a std::collections::HashMap<PathBuf, [u8; 32]>,
+    current_errors: &'a [Option<String>],
+    state: &'a JobState,
+}
+
 fn validate_destinations_parallel(
     source: &Path,
     dest_paths: &[PathBuf],
     files: &[PlannedFile],
     dirs: &[PathBuf],
     verify: bool,
-    expected_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
-    current_errors: &[Option<String>],
-    state: &JobState,
+    ctx: FinalValidationContext<'_>,
 ) -> Vec<(usize, Result<(), String>)> {
     thread::scope(|scope| {
         let mut checks = Vec::new();
         for (slot, dest) in dest_paths.iter().enumerate() {
-            if current_errors[slot].is_some() {
+            if ctx.current_errors[slot].is_some() {
                 continue;
             }
             checks.push((
@@ -23,8 +27,8 @@ fn validate_destinations_parallel(
                         files,
                         dirs,
                         verify,
-                        expected_hashes,
-                        Some(state),
+                        ctx.expected_hashes,
+                        Some(ctx.state),
                     )
                 }),
             ));
@@ -110,7 +114,7 @@ fn supervise_job(
 
         let reader_hashes = state.reader_hashes.lock().unwrap().clone();
         let expected_hashes = if opts.verify {
-            match final_source_hashes(&source, &files, &reader_hashes, &state) {
+            match final_source_hashes_for_job(&source, &files, &reader_hashes, Some(&state)) {
                 Ok(hashes) => hashes,
                 Err(e) => {
                     if state.cancel.load(Ordering::Acquire) {
@@ -143,9 +147,11 @@ fn supervise_job(
             &files,
             &dirs,
             opts.verify,
-            &expected_hashes,
-            &final_errors,
-            &state,
+            FinalValidationContext {
+                expected_hashes: &expected_hashes,
+                current_errors: &final_errors,
+                state: &state,
+            },
         ) {
             if let Err(e) = result {
                 if e != "Cancelado" {
