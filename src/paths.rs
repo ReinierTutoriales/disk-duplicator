@@ -30,6 +30,17 @@ fn ensure_normal_dir(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn create_normal_dir_if_missing(path: &Path, label: &str) -> Result<(), String> {
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(format!("No se pudo crear {label} {}: {e}", path.display()));
+        }
+    }
+    ensure_normal_dir(path, label)
+}
+
 fn exact_path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(windows)]
     {
@@ -164,17 +175,7 @@ pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "La ruta del directorio de estado no tiene padre.".to_owned())?;
 
-    if container.exists() {
-        ensure_normal_dir(container, "El contenedor de estado")?;
-    } else {
-        std::fs::create_dir(container).map_err(|e| {
-            format!(
-                "No se pudo crear el contenedor de estado {}: {e}",
-                container.display()
-            )
-        })?;
-        ensure_normal_dir(container, "El contenedor de estado")?;
-    }
+    create_normal_dir_if_missing(container, "El contenedor de estado")?;
 
     if current.exists() {
         ensure_normal_dir(&current, "El directorio de estado")?;
@@ -196,16 +197,15 @@ pub(crate) fn prepare_state_dir(dest: &Path) -> Result<PathBuf, String> {
         break;
     }
 
-    if !current.exists() {
-        std::fs::create_dir(&current).map_err(|e| {
-            format!(
-                "No se pudo crear el directorio de estado {}: {e}",
-                current.display()
-            )
-        })?;
-    }
-    ensure_normal_dir(&current, "El directorio de estado")?;
+    create_normal_dir_if_missing(&current, "El directorio de estado")?;
     Ok(current)
+}
+
+pub(crate) fn prepare_runtime_state_tmp(dest: &Path) -> Result<PathBuf, String> {
+    let current = prepare_state_dir(dest)?;
+    let tmp = current.join("tmp");
+    create_normal_dir_if_missing(&tmp, "El directorio temporal de estado")?;
+    Ok(tmp)
 }
 
 pub(crate) fn state_path(dest: &Path) -> PathBuf {
