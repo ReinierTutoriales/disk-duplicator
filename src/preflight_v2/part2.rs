@@ -4,6 +4,8 @@ fn plan_destination(
     files: &[PlannedFile],
     dirs: &[PathBuf],
     opts: CopyOpts,
+    source_hashes: &mut SourceHashCache,
+    verify_buf: &mut [u8],
 ) -> Result<HashSet<PathBuf>, String> {
     prepare_state_dir(dest)?;
     cleanup_owned_stale_files(dest, files)?;
@@ -14,9 +16,14 @@ fn plan_destination(
     let total = fs2::total_space(dest)
         .map_err(|e| format!("No se pudo consultar capacidad de {}: {e}", dest.display()))?;
     let granularity = fs2::allocation_granularity(dest).unwrap_or(4096).max(1);
-    let completed = normalize_completed_state(source, dest, files)?;
+    let completed = normalize_completed_state(
+        source,
+        dest,
+        files,
+        source_hashes,
+        verify_buf,
+    )?;
     compact_manifest(dest, files)?;
-    let mut skip_verify_buf = opts.skip_same.then(|| vec![0u8; VERIFY_BUF]);
     let mut verified_skips = HashSet::new();
 
     let mut bytes_to_write = 0u64;
@@ -35,8 +42,9 @@ fn plan_destination(
         }
 
         if opts.skip_same && physically_valid {
-            let buf = skip_verify_buf.as_mut().expect("skip_same buffer");
-            if hash_path_with_buffer(&src, buf)? == hash_path_with_buffer(&dst, buf)? {
+            let source_hash = cached_source_hash(source, info, source_hashes, verify_buf)?;
+            let dest_hash = hash_path_with_buffer(&dst, verify_buf)?;
+            if dest_hash.as_bytes() == &source_hash {
                 verified_skips.insert(info.rel.clone());
                 continue;
             }
@@ -131,9 +139,19 @@ fn run_preflight(
     let files = Arc::new(files);
     let dirs = Arc::new(dirs);
     let mut verified_skips = Vec::with_capacity(canonical_dests.len());
+    let mut source_hashes = SourceHashCache::with_capacity(files.len());
+    let mut verify_buf = vec![0u8; VERIFY_BUF];
 
     for dest in &canonical_dests {
-        verified_skips.push(plan_destination(&canonical_source, dest, &files, &dirs, opts)?);
+        verified_skips.push(plan_destination(
+            &canonical_source,
+            dest,
+            &files,
+            &dirs,
+            opts,
+            &mut source_hashes,
+            &mut verify_buf,
+        )?);
     }
 
     Ok((
