@@ -363,10 +363,13 @@ fn fanout_job(
                         break;
                     }
                 };
-                raw.truncate(n);
-                hasher.update(&raw);
+                hasher.update(&raw[..n]);
                 copied += n as u64;
-                let buf = Arc::new(Buffer { data: raw, pool: Arc::clone(&pool) });
+                let buf = Arc::new(Buffer {
+                    data: raw,
+                    len: n,
+                    pool: Arc::clone(&pool),
+                });
                 deliver_to_active(
                     &mut active,
                     &senders,
