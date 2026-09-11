@@ -169,7 +169,7 @@ impl eframe::App for CopierApp {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui
                                     .add_sized([88.0, 28.0], egui::Button::new("Quitar todos"))
-                                    .on_hover_text("Eliminar todos los destinos de la lista")
+                                    .on_hover_text("Eliminar todos los destinos")
                                     .clicked()
                                 {
                                     self.dests.clear();
@@ -180,62 +180,54 @@ impl eframe::App for CopierApp {
                     });
 
                     if !self.dests.is_empty() {
-                        let visible_rows = self.dests.len().min(6) as f32;
-                        let list_height = (visible_rows * 45.0 + 2.0).clamp(47.0, 272.0);
-                        egui::ScrollArea::vertical()
-                            .id_salt("destinations_v2")
-                            .max_height(list_height)
-                            .auto_shrink([false, true])
-                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                            .show(ui, |ui| {
-                                let mut remove = None;
-                                for (index, dest) in self.dests.iter().enumerate() {
-                                    card_frame(self.use_light_theme).show(ui, |ui| {
-                                        ui.set_min_height(30.0);
+                        ui.add_space(SPACING_XS);
+                        let mut remove = None;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                            for (index, dest) in self.dests.iter().enumerate() {
+                                let progress = snaps.get(index);
+                                let (state_label, state_color) = progress
+                                    .map(|p| phase_label(p.phase, p.files_err, self.use_light_theme, paused))
+                                    .unwrap_or(("LISTO", Theme::muted(self.use_light_theme)));
+                                let short = PathBuf::from(dest)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .filter(|name| !name.is_empty())
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| dest.trim_end_matches(['\\', '/']).to_owned());
+                                let short = if short.is_empty() { dest.clone() } else { short };
+
+                                let chip = egui::Frame::none()
+                                    .fill(Theme::card(self.use_light_theme))
+                                    .stroke(egui::Stroke::new(1.0_f32, Theme::border(self.use_light_theme)))
+                                    .rounding(egui::Rounding::same(7.0))
+                                    .inner_margin(egui::Margin::symmetric(9.0, 5.0))
+                                    .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label(
                                                 RichText::new(format!("{:02}", index + 1))
-                                                    .size(11.5)
+                                                    .size(10.5)
                                                     .color(Theme::muted(self.use_light_theme)),
                                             );
-                                            let max_chars = ((ui.available_width() / 7.2) as usize)
-                                                .clamp(18, 72);
-                                            ui.label(
-                                                RichText::new(compact_path(dest, max_chars)).strong(),
-                                            )
-                                            .on_hover_text(dest);
-
-                                            if let Some(progress) = snaps.get(index) {
-                                                let (label, color) = phase_label(
-                                                    progress.phase,
-                                                    progress.files_err,
-                                                    self.use_light_theme,
-                                                    paused,
-                                                );
-                                                ui.colored_label(color, RichText::new(label).strong());
+                                            ui.label(RichText::new(compact_path(&short, 22)).strong())
+                                                .on_hover_text(dest);
+                                            ui.colored_label(state_color, RichText::new(state_label).size(10.5).strong());
+                                            if !busy
+                                                && ui
+                                                    .add(egui::Button::new(RichText::new("×").size(14.0)).frame(false))
+                                                    .on_hover_text("Quitar destino")
+                                                    .clicked()
+                                            {
+                                                remove = Some(index);
                                             }
-
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if !busy
-                                                        && ui
-                                                            .add_sized([30.0, 24.0], egui::Button::new("×"))
-                                                            .on_hover_text("Quitar destino")
-                                                            .clicked()
-                                                    {
-                                                        remove = Some(index);
-                                                    }
-                                                },
-                                            );
                                         });
                                     });
-                                    ui.add_space(SPACING_XS);
-                                }
-                                if let Some(index) = remove {
-                                    self.dests.remove(index);
-                                }
-                            });
+                                chip.response.on_hover_text(dest);
+                            }
+                        });
+                        if let Some(index) = remove {
+                            self.dests.remove(index);
+                        }
                     }
 
                     if path_error_count > 0 {
@@ -266,10 +258,7 @@ impl eframe::App for CopierApp {
                                     job.request_cancel();
                                 }
                                 let pause_label = if paused { "Continuar" } else { "Pausar" };
-                                if ui
-                                    .add_sized([88.0, 30.0], egui::Button::new(pause_label))
-                                    .clicked()
-                                {
+                                if ui.add_sized([88.0, 30.0], egui::Button::new(pause_label)).clicked() {
                                     job.set_paused(!paused);
                                 }
                             }
@@ -339,7 +328,7 @@ impl eframe::App for CopierApp {
 
                             ui.add_space(SPACING_MD);
                             card_frame(self.use_light_theme).show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
+                                ui.horizontal(|ui| {
                                     ui.label(RichText::new("Progreso general").strong());
                                     let (label, color) = if paused {
                                         ("PAUSADO", Theme::warning(self.use_light_theme))
@@ -355,10 +344,14 @@ impl eframe::App for CopierApp {
                                         ("COPIANDO", Theme::accent(self.use_light_theme))
                                     };
                                     ui.colored_label(color, RichText::new(label).strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.weak(format!("{} · {eta}", format_bytes(job.bytes_total.load(Ordering::Relaxed))));
+                                        ui.label(RichText::new(format_bps(total_bps)).strong());
+                                    });
                                 });
                                 ui.add(
                                     egui::ProgressBar::new(average as f32)
-                                        .desired_height(20.0)
+                                        .desired_height(16.0)
                                         .fill(if all_terminal && !terminal_errors && !terminal_cancelled {
                                             Theme::success(self.use_light_theme)
                                         } else {
@@ -366,62 +359,81 @@ impl eframe::App for CopierApp {
                                         })
                                         .show_percentage(),
                                 );
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(RichText::new(format_bps(total_bps)).strong().size(18.0));
-                                    ui.weak(format!(
-                                        "{} · Tiempo restante {eta}",
-                                        format_bytes(job.bytes_total.load(Ordering::Relaxed))
-                                    ));
-                                });
                             });
 
                             ui.add_space(SPACING_SM);
-                            for progress in &snaps {
-                                let fraction = if progress.total == 0 {
-                                    if progress.phase == DestPhase::Done { 1.0 } else { 0.0 }
-                                } else {
-                                    (progress.written as f32 / progress.total as f32).clamp(0.0, 1.0)
-                                };
-                                let (label, color) = phase_label(
-                                    progress.phase,
-                                    progress.files_err,
-                                    self.use_light_theme,
-                                    paused,
-                                );
-
-                                card_frame(self.use_light_theme).show(ui, |ui| {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            RichText::new(compact_path(&progress.label, 54)).strong(),
-                                        )
-                                        .on_hover_text(&progress.label);
-                                        ui.colored_label(color, RichText::new(label).strong());
-                                    });
-                                    ui.add(
-                                        egui::ProgressBar::new(fraction)
-                                            .desired_height(16.0)
-                                            .fill(if progress.phase == DestPhase::Done && progress.files_err == 0 {
-                                                Theme::success(self.use_light_theme)
-                                            } else {
-                                                Theme::accent(self.use_light_theme)
-                                            })
-                                            .show_percentage(),
-                                    );
-                                    ui.horizontal_wrapped(|ui| {
-                                        let speed = if paused || matches!(progress.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled) {
-                                            0.0
+                            let columns = if ui.available_width() >= 760.0 && snaps.len() > 1 { 2 } else { 1 };
+                            egui::Grid::new("progress_grid_v3")
+                                .num_columns(columns)
+                                .spacing(egui::vec2(SPACING_SM, SPACING_SM))
+                                .show(ui, |ui| {
+                                    for (index, progress) in snaps.iter().enumerate() {
+                                        let fraction = if progress.total == 0 {
+                                            if progress.phase == DestPhase::Done { 1.0 } else { 0.0 }
                                         } else {
-                                            shown_bps(progress.bps_recent, progress.last_tick)
+                                            (progress.written as f32 / progress.total as f32).clamp(0.0, 1.0)
                                         };
-                                        ui.weak(format_bps(speed));
-                                        ui.weak(format!(
-                                            "{} completados · {} omitidos · {} errores",
-                                            progress.files_done, progress.files_skip, progress.files_err
-                                        ));
-                                    });
+                                        let (label, color) = phase_label(
+                                            progress.phase,
+                                            progress.files_err,
+                                            self.use_light_theme,
+                                            paused,
+                                        );
+                                        let cell_width = if columns == 2 {
+                                            ((ui.available_width() - SPACING_SM) / 2.0).max(300.0)
+                                        } else {
+                                            ui.available_width().max(300.0)
+                                        };
+
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(cell_width, 72.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                card_frame(self.use_light_theme).show(ui, |ui| {
+                                                    ui.set_width((cell_width - 20.0).max(260.0));
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new(compact_path(&progress.label, 34)).strong())
+                                                            .on_hover_text(&progress.label);
+                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            ui.colored_label(color, RichText::new(label).size(10.5).strong());
+                                                        });
+                                                    });
+                                                    ui.add(
+                                                        egui::ProgressBar::new(fraction)
+                                                            .desired_height(12.0)
+                                                            .fill(if progress.phase == DestPhase::Done && progress.files_err == 0 {
+                                                                Theme::success(self.use_light_theme)
+                                                            } else {
+                                                                Theme::accent(self.use_light_theme)
+                                                            })
+                                                            .show_percentage(),
+                                                    );
+                                                    let speed = if paused || matches!(progress.phase, DestPhase::Done | DestPhase::Failed | DestPhase::Cancelled) {
+                                                        0.0
+                                                    } else {
+                                                        shown_bps(progress.bps_recent, progress.last_tick)
+                                                    };
+                                                    ui.horizontal(|ui| {
+                                                        ui.weak(format_bps(speed));
+                                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            ui.weak(format!(
+                                                                "{} ✓  ·  {} omit.  ·  {} err.",
+                                                                progress.files_done, progress.files_skip, progress.files_err
+                                                            ));
+                                                        });
+                                                    });
+                                                });
+                                            },
+                                        );
+
+                                        if (index + 1) % columns == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                    if snaps.len() % columns != 0 {
+                                        ui.end_row();
+                                    }
                                 });
-                                ui.add_space(SPACING_XS);
-                            }
                         }
                     } else {
                         ui.add_space(SPACING_LG);
