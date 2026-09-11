@@ -1,0 +1,394 @@
+name: One-time audit hardening patch
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/audit-hardening.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - name: Apply audited runtime hardening
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace_once(
+              'src/engine_impl/part1.rs',
+              'use std::path::{Path, PathBuf};',
+              'use std::path::{Component, Path, PathBuf};'
+          )
+
+          replace_once(
+              'src/engine_impl/part1.rs',
+              '''fn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {
+    for dest in dests {
+        fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
+        for rel in dirs {
+            let path = dest.join(rel);
+            fs::create_dir_all(&path)
+                .map_err(|e| format!("No se pudo crear la carpeta {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+''',
+              '''#[cfg(windows)]
+fn runtime_is_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn runtime_is_reparse_point(_meta: &fs::Metadata) -> bool {
+    false
+}
+
+fn validate_runtime_root(dest: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(dest)
+        .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", dest.display()))?;
+    if !meta.is_dir() || meta.file_type().is_symlink() || runtime_is_reparse_point(&meta) {
+        return Err(format!(
+            "El destino cambió durante la copia o ahora es un enlace/junction/reparse point: {}.",
+            dest.display()
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_runtime_directory(dest: &Path, rel: &Path) -> Result<(), String> {
+    validate_runtime_root(dest)?;
+    let mut current = dest.to_path_buf();
+    for component in rel.components() {
+        let Component::Normal(name) = component else {
+            return Err(format!("Ruta relativa no segura: {}", rel.display()));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if !meta.is_dir()
+                    || meta.file_type().is_symlink()
+                    || runtime_is_reparse_point(&meta)
+                {
+                    return Err(format!(
+                        "La ruta de destino cambió o contiene un enlace/junction/reparse point: {}.",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|create_err| {
+                    format!("No se pudo crear la carpeta {}: {create_err}", current.display())
+                })?;
+                let meta = fs::symlink_metadata(&current).map_err(|inspect_err| {
+                    format!("No se pudo reinspeccionar {}: {inspect_err}", current.display())
+                })?;
+                if !meta.is_dir()
+                    || meta.file_type().is_symlink()
+                    || runtime_is_reparse_point(&meta)
+                {
+                    return Err(format!(
+                        "La carpeta recién creada no es un directorio normal: {}.",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!("No se pudo inspeccionar {}: {e}", current.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_destination_target(dest: &Path, rel: &Path) -> Result<(), String> {
+    validate_runtime_root(dest)?;
+    let components: Vec<Component<'_>> = rel.components().collect();
+    if components.is_empty() {
+        return Err("Ruta relativa vacía en el FAN-OUT.".into());
+    }
+
+    let mut current = dest.to_path_buf();
+    for (index, component) in components.into_iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(format!("Ruta relativa no segura: {}", rel.display()));
+        };
+        current.push(name);
+        let is_last = index + 1 == rel.components().count();
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || runtime_is_reparse_point(&meta) {
+                    return Err(format!(
+                        "La ruta de destino cambió y ahora contiene un enlace/junction/reparse point: {}.",
+                        current.display()
+                    ));
+                }
+                if is_last {
+                    if !meta.is_file() {
+                        return Err(format!(
+                            "Conflicto de destino: {} dejó de ser un archivo normal.",
+                            current.display()
+                        ));
+                    }
+                } else if !meta.is_dir() {
+                    return Err(format!(
+                        "Conflicto de destino: {} dejó de ser una carpeta.",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !is_last {
+                    return Err(format!(
+                        "La carpeta de destino desapareció durante la copia: {}.",
+                        current.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!("No se pudo inspeccionar {}: {e}", current.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_directory_layout(dests: &[PathBuf], dirs: &[PathBuf]) -> Result<(), String> {
+    for dest in dests {
+        if !dest.exists() {
+            fs::create_dir_all(dest).map_err(|e| format!("destino {}: {e}", dest.display()))?;
+        }
+        validate_runtime_root(dest)?;
+        for rel in dirs {
+            ensure_runtime_directory(dest, rel)?;
+        }
+    }
+    Ok(())
+}
+'''
+          )
+
+          replace_once(
+              'src/engine_impl/part2.rs',
+              '''                control.enter_operation(OperationPhase::Commit);
+                let commit_result = retry_commit(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
+                control.enter_operation(OperationPhase::Write);
+''',
+              '''                control.enter_operation(OperationPhase::Commit);
+                let commit_result = retry_commit(&state, slot, || {
+                    validate_runtime_destination_target(&dest, &cur.info.rel)?;
+                    commit_part_fast(&dest, &tmp, &dst)
+                });
+                control.enter_operation(OperationPhase::Write);
+'''
+          )
+
+          replace_once(
+              'src/engine_impl/part2.rs',
+              '''    if state.cancel.load(Ordering::Relaxed) {
+        set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        return;
+    }
+
+    let errs = state.dests.lock().unwrap()[slot].files_err;
+    if !control.alive.load(Ordering::Acquire) {
+        set_phase(&state, slot, DestPhase::Failed, None);
+    } else if errs == 0 {
+        set_phase(&state, slot, DestPhase::Done, None);
+    } else {
+        set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
+    }
+}
+''',
+              '''    if state.cancel.load(Ordering::Relaxed) {
+        set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        control.alive.store(false, Ordering::Release);
+        control.note_progress();
+        return;
+    }
+
+    let errs = state.dests.lock().unwrap()[slot].files_err;
+    if !control.alive.load(Ordering::Acquire) {
+        set_phase(&state, slot, DestPhase::Failed, None);
+    } else if errs == 0 {
+        set_phase(&state, slot, DestPhase::Done, None);
+    } else {
+        set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
+    }
+    control.alive.store(false, Ordering::Release);
+    control.note_progress();
+}
+'''
+          )
+
+          replace_once(
+              'src/engine_impl/part3.rs',
+              '''fn mark_skipped_all(state: &JobState, info: &FileInfo, mask: &[bool]) {
+''',
+              '''fn watchdog_workers_after_input_closed(
+    controls: &[Arc<DestControl>],
+    state: &JobState,
+    pending: &mut PendingQueues,
+) {
+    let mut seen_progress: Vec<u64> = controls.iter().map(|c| c.progress_seq()).collect();
+    let mut last_progress: Vec<Instant> = (0..controls.len()).map(|_| Instant::now()).collect();
+
+    while controls.iter().any(|control| control.alive.load(Ordering::Acquire)) {
+        if state.cancel.load(Ordering::Acquire) {
+            for control in controls {
+                control.alive.store(false, Ordering::Release);
+            }
+            break;
+        }
+
+        for slot in 0..controls.len() {
+            if !controls[slot].alive.load(Ordering::Acquire) {
+                continue;
+            }
+            let current = controls[slot].progress_seq();
+            if current != seen_progress[slot] {
+                seen_progress[slot] = current;
+                last_progress[slot] = Instant::now();
+            }
+            if controls[slot].stall_timed_out(last_progress[slot]) {
+                fail_stalled_destination(slot, pending, controls, state);
+            }
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn mark_skipped_all(state: &JobState, info: &FileInfo, mask: &[bool]) {
+'''
+          )
+
+          replace_once(
+              'src/engine_impl/part3.rs',
+              '''        drain_pending(
+            &mut all_active,
+            &senders,
+            &controls,
+            &state,
+            &mut pending,
+        );
+        drop(senders);
+''',
+              '''        drain_pending(
+            &mut all_active,
+            &senders,
+            &controls,
+            &state,
+            &mut pending,
+        );
+        drop(senders);
+        watchdog_workers_after_input_closed(&controls, &state, &mut pending);
+'''
+          )
+
+          replace_once(
+              'src/preflight/part3.rs',
+              '''        let mut progress = state.dests.lock().unwrap();
+        for (slot, dp) in progress.iter_mut().enumerate() {
+''',
+              '''        if state.cancel.load(Ordering::Acquire) {
+            let mut progress = state.dests.lock().unwrap();
+            for dp in progress.iter_mut() {
+                if dp.phase != DestPhase::Failed {
+                    dp.phase = DestPhase::Cancelled;
+                    dp.error = Some("Cancelado".into());
+                }
+            }
+            drop(progress);
+            state.running.store(false, Ordering::Release);
+            return;
+        }
+
+        let mut progress = state.dests.lock().unwrap();
+        for (slot, dp) in progress.iter_mut().enumerate() {
+'''
+          )
+
+          replace_once(
+              'src/engine_impl/part4.rs',
+              '''    #[test]
+    fn stall_thresholds_allow_slow_storage() {
+''',
+              '''    #[test]
+    fn tail_watchdog_fails_a_stalled_final_operation_without_pending_data() {
+        let root = temp_dir("tail-watchdog");
+        let state = worker_state(&root, 0);
+        let control = Arc::new(DestControl::new());
+        *control.operation.lock().unwrap() = (
+            OperationPhase::Sync,
+            Instant::now() - LONG_OP_THRESHOLD - Duration::from_secs(1),
+        );
+        let controls = vec![Arc::clone(&control)];
+        let mut pending: PendingQueues = vec![std::collections::VecDeque::new()];
+
+        watchdog_workers_after_input_closed(&controls, &state, &mut pending);
+
+        assert!(!control.alive.load(Ordering::Acquire));
+        let snap = state.snapshot();
+        assert_eq!(snap[0].phase, DestPhase::Failed);
+        assert!(snap[0]
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("Destino atascado")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_destination_guard_accepts_missing_final_file_but_rejects_bad_parent() {
+        let root = temp_dir("runtime-dest-guard");
+        let dest = root.join("dest");
+        fs::create_dir_all(dest.join("good")).unwrap();
+        assert!(validate_runtime_destination_target(&dest, Path::new("good/new.bin")).is_ok());
+
+        fs::write(dest.join("bad-parent"), b"not a directory").unwrap();
+        assert!(validate_runtime_destination_target(&dest, Path::new("bad-parent/new.bin")).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stall_thresholds_allow_slow_storage() {
+'''
+          )
+      - name: Format and verify patch scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          changed="$(git diff --name-only | sort)"
+          expected=$'src/engine_impl/part1.rs\nsrc/engine_impl/part2.rs\nsrc/engine_impl/part3.rs\nsrc/engine_impl/part4.rs\nsrc/preflight/part3.rs'
+          printf '%s\n' "$changed"
+          test "$changed" = "$expected"
+          git diff --check
+      - name: Commit audited hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/engine_impl/part1.rs src/engine_impl/part2.rs src/engine_impl/part3.rs src/engine_impl/part4.rs src/preflight/part3.rs
+          git commit -m "fix: harden final fanout lifecycle"
+          git push origin HEAD:main
