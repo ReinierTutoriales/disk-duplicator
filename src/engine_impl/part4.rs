@@ -214,6 +214,30 @@ mod tests {
     }
 
     #[test]
+    fn tail_watchdog_marks_stalled_final_operation_failed() {
+        let root = temp_dir("tail-watchdog");
+        let state = worker_state(&root, 0);
+        let control = Arc::new(DestControl::new());
+        *control.operation.lock().unwrap() = (OperationPhase::Verify, Instant::now() - LONG_OP_THRESHOLD - Duration::from_secs(1));
+        let controls = vec![Arc::clone(&control)];
+        let mut pending: PendingQueues = vec![std::collections::VecDeque::new()];
+        watch_workers_after_input_closed(&controls, &state, &mut pending);
+        assert!(!control.alive.load(Ordering::Acquire));
+        let snap=state.snapshot();
+        assert_eq!(snap[0].phase, DestPhase::Failed);
+        assert!(snap[0].error.as_deref().is_some_and(|e| e.contains("Destino atascado")));
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_destination_validation_rejects_directory_at_file_path() {
+        let root=temp_dir("runtime-path");
+        fs::create_dir_all(root.join("a.bin")).unwrap();
+        assert!(validate_runtime_destination_path(&root, Path::new("a.bin")).is_err());
+        let _=fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stall_thresholds_allow_slow_storage() {
         let control = DestControl::new();
         assert_eq!(control.stall_limit_secs(), 30);

@@ -23,7 +23,10 @@ mod engine {
             "El origen debe ser una carpeta con nombre; no se puede duplicar una raíz completa."
                 .to_owned()
         })?;
-        let effective_dests = dests.into_iter().map(|base| base.join(folder_name)).collect();
+        let effective_dests = dests
+            .into_iter()
+            .map(|base| base.join(folder_name))
+            .collect();
         crate::preflight::start_job(source, effective_dests, opts)
     }
 }

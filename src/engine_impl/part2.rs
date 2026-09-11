@@ -7,17 +7,43 @@ fn hash_file_with_buffer(
     buf: &mut [u8],
     state: Option<&JobState>,
 ) -> Result<blake3::Hash, String> {
-    let mut f = File::open(path).map_err(|e| format!("verificar: {e}"))?;
-    let mut h = blake3::Hasher::new();
-    loop {
-        if let Some(s) = state {
-            if !wait_pause(s) { return Err("Cancelado".into()); }
-        }
-        let n = f.read(buf).map_err(|e| format!("verificar: {e}"))?;
-        if n == 0 { break; }
-        h.update(&buf[..n]);
+    hash_file_with_buffer_control(path, buf, state, None)
+}
+
+fn hash_file_with_buffer_control(
+    path: &Path,
+    buf: &mut [u8],
+    state: Option<&JobState>,
+    control: Option<&DestControl>,
+) -> Result<blake3::Hash, String> {
+    #[cfg(windows)]
+    {
+        crate::windows_io::hash_file_cancelable(path, buf.len(), || {
+            state.is_some_and(|s| s.cancel.load(Ordering::Acquire))
+                || control.is_some_and(|c| !c.alive.load(Ordering::Acquire))
+        }).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted && state.is_some_and(|s| s.cancel.load(Ordering::Acquire)) {
+                "Cancelado".to_owned()
+            } else if e.kind() == std::io::ErrorKind::Interrupted && control.is_some_and(|c| !c.alive.load(Ordering::Acquire)) {
+                "Destino detenido".to_owned()
+            } else {
+                format!("verificar: {e}")
+            }
+        })
     }
-    Ok(h.finalize())
+    #[cfg(not(windows))]
+    {
+        let mut f = File::open(path).map_err(|e| format!("verificar: {e}"))?;
+        let mut h = blake3::Hasher::new();
+        loop {
+            if let Some(s) = state { if !wait_pause(s) { return Err("Cancelado".into()); } }
+            if control.is_some_and(|c| !c.alive.load(Ordering::Acquire)) { return Err("Destino detenido".into()); }
+            let n = f.read(buf).map_err(|e| format!("verificar: {e}"))?;
+            if n == 0 { break; }
+            h.update(&buf[..n]);
+        }
+        Ok(h.finalize())
+    }
 }
 
 fn validate_part_size(part: &Path, expected: u64) -> Result<(), String> {
@@ -293,6 +319,11 @@ fn fanout_worker(
             FanoutItem::Begin(info) => {
                 state.dests.lock().unwrap()[slot].last_file = info.rel.to_string_lossy().into_owned();
                 let dst = dest.join(&info.rel);
+                if let Err(e) = validate_runtime_destination_path(&dest, &info.rel) {
+                    record_file_error(&state, slot, e);
+                    if !opts.keep_going { control.alive.store(false, Ordering::Release); break; }
+                    continue;
+                }
                 cleanup_part(&dest, &dst);
                 let tmp = part_path(&dest, &dst);
 
@@ -435,6 +466,7 @@ fn fanout_worker(
                         cur.file.take();
                         cleanup_part(&dest, &dst);
                         rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                        if !control.alive.load(Ordering::Acquire) { break; }
                         if e != "Cancelado" {
                             record_file_error(&state, slot, e);
                         }
@@ -493,7 +525,7 @@ fn fanout_worker(
                 if let Some(buf) = verify_buf.as_mut() {
                     set_phase(&state, slot, DestPhase::Verifying, None);
                     control.enter_operation(OperationPhase::Verify);
-                    let verify_result = hash_file_with_buffer(&tmp, buf, Some(&state));
+                    let verify_result = hash_file_with_buffer_control(&tmp, buf, Some(&state), Some(&control));
                     control.enter_operation(OperationPhase::Write);
                     match verify_result {
                         Ok(actual) if actual == expected => {}
@@ -515,6 +547,7 @@ fn fanout_worker(
                         Err(e) => {
                             cleanup_part(&dest, &dst);
                             rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                            if !control.alive.load(Ordering::Acquire) { break; }
                             if e == "Cancelado" {
                                 control.alive.store(false, Ordering::Release);
                                 break;
@@ -542,6 +575,13 @@ fn fanout_worker(
                     break;
                 }
 
+                if let Err(e) = validate_runtime_destination_path(&dest, &cur.info.rel) {
+                    cleanup_part(&dest, &dst);
+                    rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
+                    record_file_error(&state, slot, e);
+                    if !opts.keep_going { control.alive.store(false, Ordering::Release); break; }
+                    continue;
+                }
                 control.enter_operation(OperationPhase::Commit);
                 let commit_result = retry_commit(&state, slot, || commit_part_fast(&dest, &tmp, &dst));
                 control.enter_operation(OperationPhase::Write);
@@ -595,12 +635,14 @@ fn fanout_worker(
                 }
 
                 if journal.needs_checkpoint() {
-                    if let Err(e) = checkpoint_logs(&mut manifest, &mut journal) {
+                    control.enter_operation(OperationPhase::Sync);
+                    let checkpoint_result = checkpoint_logs(&mut manifest, &mut journal, &state, &control);
+                    control.enter_operation(OperationPhase::Write);
+                    if let Err(e) = checkpoint_result {
+                        if state.cancel.load(Ordering::Acquire) { break; }
+                        if !control.alive.load(Ordering::Acquire) { break; }
                         record_file_error(&state, slot, e);
-                        if !opts.keep_going {
-                            control.alive.store(false, Ordering::Release);
-                            break;
-                        }
+                        if !opts.keep_going { control.alive.store(false, Ordering::Release); break; }
                         continue;
                     }
                 }
@@ -618,14 +660,24 @@ fn fanout_worker(
         }
     }
 
-    if let Err(e) = finish_logs(&mut manifest, &mut journal) {
-        set_phase(&state, slot, DestPhase::Failed, Some(e));
+    control.enter_operation(OperationPhase::Sync);
+    let finish_result = finish_logs(&mut manifest, &mut journal, &state, &control);
+    control.enter_operation(OperationPhase::Write);
+    if let Err(e) = finish_result {
+        if state.cancel.load(Ordering::Acquire) {
+            set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        } else {
+            set_phase(&state, slot, DestPhase::Failed, Some(e));
+        }
         control.alive.store(false, Ordering::Release);
+        control.note_progress();
         return;
     }
 
-    if state.cancel.load(Ordering::Relaxed) {
+    if state.cancel.load(Ordering::Acquire) {
         set_phase(&state, slot, DestPhase::Cancelled, Some("Cancelado".into()));
+        control.alive.store(false, Ordering::Release);
+        control.note_progress();
         return;
     }
 
@@ -637,4 +689,6 @@ fn fanout_worker(
     } else {
         set_phase(&state, slot, DestPhase::Done, Some(format!("Terminado con {errs} error(es).")));
     }
+    control.alive.store(false, Ordering::Release);
+    control.note_progress();
 }

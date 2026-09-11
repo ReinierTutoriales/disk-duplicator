@@ -2,8 +2,10 @@ use crate::paths::{backup_path, manifest_path, part_path, persisted_path_key, st
 use crossbeam_channel as mpsc;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufWriter, Write};
+#[cfg(not(windows))]
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -318,6 +320,49 @@ fn dest_inside_source(src: &Path, dst: &Path) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn runtime_is_reparse(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_attributes() & 0x0000_0400 != 0
+}
+
+#[cfg(not(windows))]
+fn runtime_is_reparse(_: &fs::Metadata) -> bool { false }
+
+fn validate_runtime_destination_path(root: &Path, rel: &Path) -> Result<(), String> {
+    let root_meta = fs::symlink_metadata(root)
+        .map_err(|e| format!("No se pudo inspeccionar destino {}: {e}", root.display()))?;
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink() || runtime_is_reparse(&root_meta) {
+        return Err(format!("Destino inseguro o reemplazado durante la copia: {}", root.display()));
+    }
+    let components: Vec<Component<'_>> = rel.components().collect();
+    if components.is_empty() { return Err("Ruta relativa vacía".into()); }
+    let mut current = root.to_path_buf();
+    for (idx, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(format!("Ruta relativa insegura: {}", rel.display()));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || runtime_is_reparse(&meta) {
+                    return Err(format!("La ruta de destino cambió a symlink/junction/reparse point durante la copia: {}", current.display()));
+                }
+                let last = idx + 1 == components.len();
+                if !last && !meta.is_dir() {
+                    return Err(format!("Componente de destino ya no es carpeta: {}", current.display()));
+                }
+                if last && meta.is_dir() {
+                    return Err(format!("El destino final cambió a carpeta: {}", current.display()));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("No se pudo inspeccionar {}: {e}", current.display())),
+        }
+    }
+    Ok(())
+}
+
 fn wait_pause(state: &JobState) -> bool {
     let mut guard = state.pause_mutex.lock().unwrap();
     while state.pause.load(Ordering::Acquire) && !state.cancel.load(Ordering::Acquire) {
@@ -360,6 +405,28 @@ fn load_state(dest: &Path) -> HashSet<String> {
     }).collect()
 }
 
+fn sync_log_data(file: &File, state: &JobState, control: &DestControl, label: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let clone = file.try_clone().map_err(|e| format!("{label} sync clone: {e}"))?;
+        crate::windows_io::sync_file_cancelable(clone, || {
+            state.cancel.load(Ordering::Acquire) || !control.alive.load(Ordering::Acquire)
+        }).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted && state.cancel.load(Ordering::Acquire) {
+                "Cancelado".to_owned()
+            } else if e.kind() == std::io::ErrorKind::Interrupted && !control.alive.load(Ordering::Acquire) {
+                format!("{label} interrumpido porque el destino dejó de responder")
+            } else {
+                format!("{label} sync: {e}")
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        file.sync_data().map_err(|e| format!("{label} sync: {e}"))
+    }
+}
+
 struct StateJournal {
     writer: BufWriter<File>,
     pending: usize,
@@ -390,16 +457,18 @@ impl StateJournal {
         self.pending >= STATE_BATCH_FILES || self.last_sync.elapsed() >= STATE_BATCH_INTERVAL
     }
 
-    fn checkpoint(&mut self) -> Result<(), String> {
+    fn checkpoint(&mut self, state: &JobState, control: &DestControl) -> Result<(), String> {
         if self.pending == 0 { return Ok(()); }
         self.writer.flush().map_err(|e| format!("state flush: {e}"))?;
-        self.writer.get_ref().sync_data().map_err(|e| format!("state sync: {e}"))?;
+        sync_log_data(self.writer.get_ref(), state, control, "state")?;
         self.pending = 0;
         self.last_sync = Instant::now();
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<(), String> { self.checkpoint() }
+    fn finish(&mut self, state: &JobState, control: &DestControl) -> Result<(), String> {
+        self.checkpoint(state, control)
+    }
 }
 
 struct ManifestWriter {
@@ -424,17 +493,17 @@ impl ManifestWriter {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<(), String> {
+    fn finish(&mut self, state: &JobState, control: &DestControl) -> Result<(), String> {
         if !self.dirty { return Ok(()); }
         self.writer.flush().map_err(|e| format!("manifest flush: {e}"))?;
-        self.writer.get_ref().sync_data().map_err(|e| format!("manifest sync: {e}"))?;
+        sync_log_data(self.writer.get_ref(), state, control, "manifest")?;
         self.dirty = false;
         Ok(())
     }
 }
 
 impl Drop for ManifestWriter {
-    fn drop(&mut self) { let _ = self.finish(); }
+    fn drop(&mut self) { let _ = self.writer.flush(); }
 }
 
 fn cleanup_part(dest_root: &Path, dst: &Path) {
@@ -518,12 +587,12 @@ fn record_done(state: &JobState, slot: usize) {
     state.dests.lock().unwrap()[slot].files_done += 1;
 }
 
-fn checkpoint_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    manifest.finish()?;
-    journal.checkpoint()
+fn checkpoint_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal, state: &JobState, control: &DestControl) -> Result<(), String> {
+    manifest.finish(state, control)?;
+    journal.checkpoint(state, control)
 }
 
-fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal) -> Result<(), String> {
-    manifest.finish()?;
-    journal.finish()
+fn finish_logs(manifest: &mut ManifestWriter, journal: &mut StateJournal, state: &JobState, control: &DestControl) -> Result<(), String> {
+    manifest.finish(state, control)?;
+    journal.finish(state, control)
 }

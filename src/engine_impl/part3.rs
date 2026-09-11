@@ -211,6 +211,26 @@ fn drain_pending(
     }
 }
 
+fn watch_workers_after_input_closed(controls: &[Arc<DestControl>], state: &JobState, pending: &mut PendingQueues) {
+    let mut seen: Vec<u64> = controls.iter().map(|c| c.progress_seq()).collect();
+    let mut last: Vec<Instant> = controls.iter().map(|_| Instant::now()).collect();
+    while controls.iter().any(|c| c.alive.load(Ordering::Acquire)) {
+        if state.cancel.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        for slot in 0..controls.len() {
+            if !controls[slot].alive.load(Ordering::Acquire) { continue; }
+            let seq=controls[slot].progress_seq();
+            if seq != seen[slot] { seen[slot]=seq; last[slot]=Instant::now(); }
+            if controls[slot].stall_timed_out(last[slot]) {
+                fail_stalled_destination(slot, pending, controls, state);
+            }
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn mark_skipped_all(state: &JobState, info: &FileInfo, mask: &[bool]) {
     let mut g = state.dests.lock().unwrap();
     for (slot, skip) in mask.iter().enumerate() {
@@ -512,6 +532,7 @@ fn fanout_job(
             &mut pending,
         );
         drop(senders);
+        watch_workers_after_input_closed(&controls, &state, &mut pending);
     });
 
     handles.push(reader);
