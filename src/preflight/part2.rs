@@ -274,6 +274,7 @@ fn hash_path_with_buffer_for_job(
     }
 }
 
+#[cfg(test)]
 fn final_source_hashes(
     source: &Path,
     files: &[PlannedFile],
