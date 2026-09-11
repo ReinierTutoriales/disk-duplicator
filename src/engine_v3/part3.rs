@@ -228,7 +228,7 @@ fn fanout_job(
     files: Arc<Vec<FileInfo>>,
     state: Arc<JobState>,
     opts: CopyOpts,
-    preflight_verified_skip_same: bool,
+    preflight_verified_skips: Option<Arc<Vec<HashSet<PathBuf>>>>,
 ) -> Vec<JoinHandle<()>> {
     let q = queue_depth_for(dests.len());
     let max_buffers = (RESERVED_RAM / BLOCK).max(8);
@@ -266,7 +266,12 @@ fn fanout_job(
                 let dst = dests[slot].join(&info.rel);
                 let physically_valid = same_enough(&src, &dst);
                 let state_valid = state_cache[slot].contains(&key) && physically_valid;
-                if state_valid || (preflight_verified_skip_same && opts.skip_same && physically_valid) {
+                let preflight_valid = preflight_verified_skips
+                    .as_ref()
+                    .and_then(|sets| sets.get(slot))
+                    .is_some_and(|set| set.contains(&info.rel));
+
+                if state_valid || (preflight_valid && physically_valid) {
                     skip_mask[slot] = true;
                     continue;
                 }
