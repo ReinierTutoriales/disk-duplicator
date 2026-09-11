@@ -136,16 +136,20 @@ impl BufferPool {
         self.gauge.store(*count, Ordering::Relaxed);
         drop(count);
 
-        let mut buf = self.free.lock().unwrap().pop().unwrap_or_else(|| Vec::with_capacity(BLOCK));
-        buf.resize(BLOCK, 0);
+        let buf = self
+            .free
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| vec![0u8; BLOCK]);
+        debug_assert_eq!(buf.len(), BLOCK);
         Some(buf)
     }
 
-    fn release(&self, mut data: Vec<u8>) {
-        data.clear();
+    fn release(&self, data: Vec<u8>) {
         {
             let mut free = self.free.lock().unwrap();
-            if free.len() < MAX_FREE_BUFFERS && data.capacity() >= BLOCK {
+            if free.len() < MAX_FREE_BUFFERS && data.len() == BLOCK {
                 free.push(data);
             }
         }
@@ -158,7 +162,14 @@ impl BufferPool {
 
 struct Buffer {
     data: Vec<u8>,
+    len: usize,
     pool: Arc<BufferPool>,
+}
+
+impl Buffer {
+    fn bytes(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
 }
 
 type BufferRef = Arc<Buffer>;
