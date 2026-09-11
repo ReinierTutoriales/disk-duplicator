@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "disk-duplicator"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "blake3",
  "crossbeam-channel",
