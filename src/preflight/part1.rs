@@ -7,7 +7,9 @@ use crate::paths::{
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+#[cfg(not(windows))]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
