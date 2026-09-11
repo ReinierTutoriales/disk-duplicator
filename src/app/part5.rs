@@ -20,6 +20,38 @@ mod tests {
     }
 
     #[test]
+    fn progress_fraction_is_bounded_and_terminal_zero_is_complete() {
+        assert_eq!(progress_fraction(0, 0, DestPhase::Done), 1.0_f32);
+        assert_eq!(progress_fraction(0, 0, DestPhase::Copying), 0.0_f32);
+        assert_eq!(progress_fraction(50, 100, DestPhase::Copying), 0.5_f32);
+        assert_eq!(progress_fraction(150, 100, DestPhase::Copying), 1.0_f32);
+    }
+
+    #[test]
+    fn accent_foreground_keeps_readable_contrast() {
+        let previous = SYSTEM_ACCENT_RGB.load(Ordering::Relaxed);
+        SYSTEM_ACCENT_RGB.store(0x00FF_FFFF, Ordering::Relaxed);
+        assert_eq!(Theme::on_accent(true), Color32::from_rgb(18, 18, 18));
+        SYSTEM_ACCENT_RGB.store(0x0000_0000, Ordering::Relaxed);
+        assert_eq!(Theme::on_accent(false), Color32::WHITE);
+        SYSTEM_ACCENT_RGB.store(previous, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn compact_path_preserves_both_ends() {
+        let value = compact_path(r"C:\very\long\folder\tree\important-file.bin", 24);
+        assert!(value.starts_with("C:"));
+        assert!(value.ends_with("file.bin"));
+        assert!(value.contains('…'));
+    }
+
+    #[test]
+    fn effective_destination_shows_selected_source_root() {
+        let shown = effective_destination_label(r"C:\Input\Package", r"D:\Copies");
+        assert!(shown.ends_with(r"Copies\Package"));
+    }
+
+    #[test]
     fn destination_batch_skips_source_and_duplicates() {
         let mut app = CopierApp::new();
         app.source = r"E:\source".to_owned();

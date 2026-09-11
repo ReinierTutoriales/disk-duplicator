@@ -182,6 +182,19 @@ impl Theme {
         )
     }
 
+    fn on_accent(light: bool) -> Color32 {
+        let accent = Self::accent(light);
+        let luminance = (u32::from(accent.r()) * 299
+            + u32::from(accent.g()) * 587
+            + u32::from(accent.b()) * 114)
+            / 1000;
+        if luminance >= 150 {
+            Color32::from_rgb(18, 18, 18)
+        } else {
+            Color32::WHITE
+        }
+    }
+
     fn blend(base: Color32, tint: Color32, tint_percent: u16) -> Color32 {
         let tint_percent = tint_percent.min(100);
         let base_percent = 100 - tint_percent;
@@ -303,8 +316,8 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
     ctx.set_visuals(visuals);
 
     ctx.style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(SPACING_SM, 5.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.item_spacing = egui::vec2(SPACING_SM, 6.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
         style.visuals.window_rounding = egui::Rounding::same(10.0);
     });
 }
@@ -314,7 +327,7 @@ fn card_frame(light: bool) -> egui::Frame {
         .fill(Theme::card(light))
         .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
         .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 9.0))
 }
 
 fn window_frame(ctx: &egui::Context, light: bool) -> egui::Frame {
@@ -358,6 +371,13 @@ fn format_duration(secs: f64) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
+}
+
+fn progress_fraction(written: u64, total: u64, phase: DestPhase) -> f32 {
+    if total == 0 {
+        return if phase == DestPhase::Done { 1.0_f32 } else { 0.0_f32 };
+    }
+    (written as f64 / total as f64).clamp(0.0, 1.0) as f32
 }
 
 fn shown_bps(bps: f64, last_tick: Instant) -> f64 {
