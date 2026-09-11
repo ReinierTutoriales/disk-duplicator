@@ -260,6 +260,37 @@ mod tests {
     }
 
     #[test]
+    fn stale_backup_directory_is_rejected_instead_of_restored() {
+        let root = temp_dir("backup-directory-reject");
+        let dest = root.join("dst");
+        fs::create_dir_all(&dest).unwrap();
+        prepare_state_dir(&dest).unwrap();
+        let info = FileInfo { rel: PathBuf::from("a.bin"), size: 3, mtime_ns: 0 };
+        let dst = dest.join(&info.rel);
+        let backup = backup_path(&dest, &dst);
+        fs::create_dir_all(&backup).unwrap();
+
+        let err = cleanup_owned_stale_files(&dest, std::slice::from_ref(&info)).unwrap_err();
+        assert!(err.contains("Entrada de estado no segura"));
+        assert!(!dst.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn state_rewrite_backup_directory_is_rejected() {
+        let root = temp_dir("state-backup-directory-reject");
+        let dest = root.join("dst");
+        fs::create_dir_all(&dest).unwrap();
+        prepare_state_dir(&dest).unwrap();
+        let backup = state_rewrite_backup_path(&dest);
+        fs::create_dir_all(&backup).unwrap();
+
+        let err = recover_completed_rewrite(&dest).unwrap_err();
+        assert!(err.contains("Entrada de estado no segura"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn backup_is_restored_after_interrupted_commit() {
         let root = temp_dir("backup-recovery");
         let dest = root.join("dst");
