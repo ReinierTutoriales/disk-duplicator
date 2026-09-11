@@ -6,6 +6,7 @@ fn validate_destinations_parallel(
     verify: bool,
     expected_hashes: &std::collections::HashMap<PathBuf, [u8; 32]>,
     current_errors: &[Option<String>],
+    state: &JobState,
 ) -> Vec<(usize, Result<(), String>)> {
     thread::scope(|scope| {
         let mut checks = Vec::new();
@@ -23,6 +24,7 @@ fn validate_destinations_parallel(
                         dirs,
                         verify,
                         expected_hashes,
+                        Some(state),
                     )
                 }),
             ));
@@ -108,9 +110,21 @@ fn supervise_job(
 
         let reader_hashes = state.reader_hashes.lock().unwrap().clone();
         let expected_hashes = if opts.verify {
-            match final_source_hashes(&source, &files, &reader_hashes) {
+            match final_source_hashes(&source, &files, &reader_hashes, &state) {
                 Ok(hashes) => hashes,
                 Err(e) => {
+                    if state.cancel.load(Ordering::Acquire) {
+                        let mut progress = state.dests.lock().unwrap();
+                        for dp in progress.iter_mut() {
+                            if dp.phase != DestPhase::Failed {
+                                dp.phase = DestPhase::Cancelled;
+                                dp.error = Some("Cancelado".into());
+                            }
+                        }
+                        drop(progress);
+                        state.running.store(false, Ordering::Release);
+                        return;
+                    }
                     for err in &mut final_errors {
                         if err.is_none() {
                             *err = Some(e.clone());
@@ -131,9 +145,12 @@ fn supervise_job(
             opts.verify,
             &expected_hashes,
             &final_errors,
+            &state,
         ) {
             if let Err(e) = result {
-                final_errors[slot] = Some(e);
+                if e != "Cancelado" {
+                    final_errors[slot] = Some(e);
+                }
             }
         }
 
