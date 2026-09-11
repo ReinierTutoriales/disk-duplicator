@@ -325,61 +325,153 @@ fn fanout_job(
                 break;
             }
 
-            let mut input = match File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    let msg = format!("origen {}: {e}", path.display());
-                    for &slot in &active { set_error(&state, slot, msg.clone()); }
-                    state.request_cancel();
-                    break;
-                }
-            };
-
             let mut hasher = blake3::Hasher::new();
             let mut copied = 0u64;
             let mut read_ok = true;
 
-            loop {
-                if !wait_pause(&state) {
-                    read_ok = false;
-                    break;
-                }
-                let Some(mut raw) = pool.acquire(&state) else {
-                    read_ok = false;
-                    break;
-                };
-                let n = match input.read(&mut raw) {
-                    Ok(0) => {
-                        pool.release(raw);
-                        break;
-                    }
-                    Ok(n) => n,
+            #[cfg(windows)]
+            {
+                let mut input = match crate::windows_io::CancelableReader::open(&path) {
+                    Ok(reader) => reader,
                     Err(e) => {
-                        pool.release(raw);
-                        let msg = format!("lectura {}: {e}", path.display());
+                        let msg = format!("origen {}: {e}", path.display());
                         for &slot in &active { set_error(&state, slot, msg.clone()); }
                         state.request_cancel();
+                        break 'files;
+                    }
+                };
+
+                let Some(first_raw) = pool.acquire(&state) else {
+                    read_ok = false;
+                    if state.cancel.load(Ordering::Relaxed) { break 'files; }
+                    continue;
+                };
+                let mut pending_read = input.start_read(first_raw);
+
+                loop {
+                    if !wait_pause(&state) {
+                        let raw = input.cancel_read(pending_read);
+                        pool.release(raw);
                         read_ok = false;
                         break;
                     }
+
+                    let (raw, read_result) = input.finish_read(pending_read, || {
+                        state.cancel.load(Ordering::Acquire)
+                    });
+                    let n = match read_result {
+                        Ok(0) => {
+                            pool.release(raw);
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(e) => {
+                            pool.release(raw);
+                            let msg = format!("lectura {}: {e}", path.display());
+                            for &slot in &active { set_error(&state, slot, msg.clone()); }
+                            if e.kind() != std::io::ErrorKind::Interrupted {
+                                state.request_cancel();
+                            }
+                            read_ok = false;
+                            break;
+                        }
+                    };
+
+                    let mut next_pending = pool
+                        .try_acquire(&state)
+                        .map(|next_raw| input.start_read(next_raw));
+
+                    hasher.update(&raw[..n]);
+                    copied += n as u64;
+                    let buf = Arc::new(Buffer {
+                        data: raw,
+                        len: n,
+                        pool: Arc::clone(&pool),
+                    });
+                    deliver_to_active(
+                        &mut active,
+                        &senders,
+                        &controls,
+                        &state,
+                        true,
+                        || FanoutItem::Data(Arc::clone(&buf)),
+                        &mut pending,
+                    );
+
+                    if active.is_empty() {
+                        if let Some(next) = next_pending.take() {
+                            let raw = input.cancel_read(next);
+                            pool.release(raw);
+                        }
+                        break;
+                    }
+
+                    pending_read = if let Some(next) = next_pending {
+                        next
+                    } else {
+                        let Some(next_raw) = pool.acquire(&state) else {
+                            read_ok = false;
+                            break;
+                        };
+                        input.start_read(next_raw)
+                    };
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                let mut input = match File::open(&path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let msg = format!("origen {}: {e}", path.display());
+                        for &slot in &active { set_error(&state, slot, msg.clone()); }
+                        state.request_cancel();
+                        break 'files;
+                    }
                 };
-                hasher.update(&raw[..n]);
-                copied += n as u64;
-                let buf = Arc::new(Buffer {
-                    data: raw,
-                    len: n,
-                    pool: Arc::clone(&pool),
-                });
-                deliver_to_active(
-                    &mut active,
-                    &senders,
-                    &controls,
-                    &state,
-                    true,
-                    || FanoutItem::Data(Arc::clone(&buf)),
-                    &mut pending,
-                );
-                if active.is_empty() { break; }
+
+                loop {
+                    if !wait_pause(&state) {
+                        read_ok = false;
+                        break;
+                    }
+                    let Some(mut raw) = pool.acquire(&state) else {
+                        read_ok = false;
+                        break;
+                    };
+                    let n = match input.read(&mut raw) {
+                        Ok(0) => {
+                            pool.release(raw);
+                            break;
+                        }
+                        Ok(n) => n,
+                        Err(e) => {
+                            pool.release(raw);
+                            let msg = format!("lectura {}: {e}", path.display());
+                            for &slot in &active { set_error(&state, slot, msg.clone()); }
+                            state.request_cancel();
+                            read_ok = false;
+                            break;
+                        }
+                    };
+                    hasher.update(&raw[..n]);
+                    copied += n as u64;
+                    let buf = Arc::new(Buffer {
+                        data: raw,
+                        len: n,
+                        pool: Arc::clone(&pool),
+                    });
+                    deliver_to_active(
+                        &mut active,
+                        &senders,
+                        &controls,
+                        &state,
+                        true,
+                        || FanoutItem::Data(Arc::clone(&buf)),
+                        &mut pending,
+                    );
+                    if active.is_empty() { break; }
+                }
             }
 
             if !read_ok || active.is_empty() {
