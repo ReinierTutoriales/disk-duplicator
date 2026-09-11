@@ -263,7 +263,6 @@ pub(crate) fn sync_file_cancelable(
                         let code = unsafe { GetLastError() };
                         if code != ERROR_NOT_FOUND {
                             cancel_error = Some(io::Error::from_raw_os_error(code as i32));
-                            break Err(io::Error::other("no se pudo cancelar la sincronización"));
                         }
                     }
                 }
@@ -274,9 +273,6 @@ pub(crate) fn sync_file_cancelable(
         }
     };
 
-    if cancel_error.is_some() {
-        let _ = unsafe { CancelSynchronousIo(thread_handle) };
-    }
     unsafe { CloseHandle(thread_handle) };
     let join_result = helper.join();
     if join_result.is_err() {
@@ -300,4 +296,53 @@ fn wide_path(path: &Path) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file(name: &str) -> std::path::PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("disk-duplicator-win-io-{name}-{stamp}.bin"))
+    }
+
+    #[test]
+    fn overlapped_writer_coexists_with_std_file_handle() {
+        let path = temp_file("overlapped");
+        let owner = File::create(&path).unwrap();
+        let mut writer = CancelableFile::reopen_at(&path, 0).unwrap();
+        writer.write_all_cancelable(b"abcdef", || false).unwrap();
+        drop(writer);
+        owner.sync_data().unwrap();
+        drop(owner);
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn overlapped_writer_honors_pre_cancel() {
+        let path = temp_file("cancel");
+        let _owner = File::create(&path).unwrap();
+        let mut writer = CancelableFile::reopen_at(&path, 0).unwrap();
+        let err = writer.write_all_cancelable(b"data", || true).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelable_sync_completes_normally() {
+        let path = temp_file("sync");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"durable-data").unwrap();
+        sync_file_cancelable(file, || false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"durable-data");
+        let _ = fs::remove_file(path);
+    }
 }
