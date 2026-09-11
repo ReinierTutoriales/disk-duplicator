@@ -129,9 +129,10 @@ impl eframe::App for CopierApp {
                             );
                             if ui
                                 .add_sized([button_width, 32.0], egui::Button::new("Examinar"))
+                                .on_hover_text("Seleccionar carpeta de origen")
                                 .clicked()
                             {
-                                if let Some(path) = Self::pick_dir() {
+                                if let Some(path) = self.pick_source_dir() {
                                     self.source = path;
                                 }
                             }
@@ -148,16 +149,33 @@ impl eframe::App for CopierApp {
                         );
                         ui.add_enabled_ui(!busy, |ui| {
                             if ui
-                                .add_sized([88.0, 28.0], egui::Button::new("+ Agregar"))
+                                .add_sized([132.0, 28.0], egui::Button::new("+ Agregar destinos"))
+                                .on_hover_text("Selecciona uno o varios destinos. Usa Ctrl o Shift para selección múltiple.")
                                 .clicked()
                             {
-                                if let Some(path) = Self::pick_dir() {
-                                    if !self.dests.contains(&path) {
-                                        self.dests.push(path);
+                                if let Some(paths) = self.pick_destination_dirs() {
+                                    let added = self.add_destinations(paths);
+                                    if added > 0 {
+                                        self.status = format!(
+                                            "{}",
+                                            count_label(added as u64, "destino agregado", "destinos agregados")
+                                        );
                                     }
                                 }
                             }
                         });
+                        if self.dests.len() > 1 && !busy {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .add_sized([88.0, 28.0], egui::Button::new("Quitar todos"))
+                                    .on_hover_text("Eliminar todos los destinos de la lista")
+                                    .clicked()
+                                {
+                                    self.dests.clear();
+                                    self.status = "Se eliminaron todos los destinos".to_owned();
+                                }
+                            });
+                        }
                     });
 
                     if !self.dests.is_empty() {
