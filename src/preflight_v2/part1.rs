@@ -1,7 +1,8 @@
 use crate::engine_impl::{self, CopyOpts, DestPhase, FileInfo, JobState};
 use crate::paths::{
     backup_path, legacy_backup_path, legacy_part_path, manifest_path, part_path, prepare_state_dir,
-    state_dir_for, state_path, state_rewrite_backup_path, state_rewrite_tmp_path,
+    previous_backup_path, previous_part_path, state_dir_for, state_path, state_rewrite_backup_path,
+    state_rewrite_tmp_path,
 };
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
@@ -71,9 +72,6 @@ fn scan_source(root: &Path) -> Result<(Vec<PlannedFile>, Vec<PathBuf>), String> 
             ));
         }
 
-        // Open first and read metadata from the exact handle we proved readable. The engine
-        // still re-validates the snapshot around the actual copy, so this narrows the initial
-        // TOCTOU window without pretending the filesystem stays immutable afterwards.
         let file = File::open(entry.path())
             .map_err(|e| format!("No se puede leer {}: {e}", entry.path().display()))?;
         let meta = file
@@ -264,10 +262,19 @@ fn remove_owned_file(path: &Path, label: &str) -> Result<(), String> {
 fn cleanup_owned_stale_files(dest: &Path, files: &[PlannedFile]) -> Result<(), String> {
     for info in files {
         let dst = dest.join(&info.rel);
-        remove_owned_file(&part_path(dest, &dst), "temporal")?;
-        remove_owned_file(&legacy_part_path(dest, &dst), "temporal heredado")?;
+        for part in [
+            part_path(dest, &dst),
+            previous_part_path(dest, &dst),
+            legacy_part_path(dest, &dst),
+        ] {
+            remove_owned_file(&part, "temporal")?;
+        }
 
-        for backup in [backup_path(dest, &dst), legacy_backup_path(dest, &dst)] {
+        for backup in [
+            backup_path(dest, &dst),
+            previous_backup_path(dest, &dst),
+            legacy_backup_path(dest, &dst),
+        ] {
             if !backup.exists() { continue; }
             if dst.exists() {
                 remove_owned_file(&backup, "backup")?;
