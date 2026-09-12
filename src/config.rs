@@ -85,24 +85,11 @@ pub fn save_settings(settings: AppSettings) -> Result<(), String> {
         .ok_or_else(|| "Ruta de configuración inválida.".to_owned())?;
     fs::create_dir_all(parent)
         .map_err(|e| format!("No se pudo crear la carpeta de ajustes: {e}"))?;
-
-    let tmp = path.with_extension("conf.tmp");
-    fs::write(&tmp, render_settings(settings))
-        .map_err(|e| format!("No se pudieron guardar los ajustes: {e}"))?;
-
-    match fs::rename(&tmp, &path) {
-        Ok(()) => Ok(()),
-        Err(rename_err) if path.exists() => {
-            fs::remove_file(&path).map_err(|remove_err| {
-                format!(
-                    "No se pudo reemplazar la configuración ({rename_err}); tampoco se pudo retirar la anterior ({remove_err})."
-                )
-            })?;
-            fs::rename(&tmp, &path)
-                .map_err(|e| format!("No se pudo finalizar el guardado de ajustes: {e}"))
-        }
-        Err(e) => Err(format!("No se pudo finalizar el guardado de ajustes: {e}")),
-    }
+    crate::storage::atomic_write(
+        &path,
+        render_settings(settings).as_bytes(),
+        "la configuración",
+    )
 }
 
 #[cfg(test)]

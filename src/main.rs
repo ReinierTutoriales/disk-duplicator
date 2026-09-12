@@ -5,6 +5,8 @@ mod config;
 mod engine_impl;
 mod paths;
 mod preflight;
+mod session;
+mod storage;
 #[cfg(windows)]
 mod windows_io;
 
