@@ -150,3 +150,61 @@ if helper_anchor not in text:
 helper = '''    private static void AssertHealthy(CopyJob job)\n    {\n        var snapshots = job.Snapshot();\n        var bad = snapshots.Where(item => item.Phase != DestinationPhase.Done).ToArray();\n        if (bad.Length == 0) return;\n        Assert.Fail(string.Join(" | ", bad.Select(item => $"{item.Label}: {item.Phase}: {item.Error}")));\n    }\n\n'''
 text = text.replace(helper_anchor, helper + helper_anchor, 1)
 tests.write_text(text, encoding="utf-8")
+
+winui = Path("dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs")
+text = winui.read_text(encoding="utf-8")
+old = "!args[1].StartsWith('-', StringComparison.Ordinal)"
+new = "!args[1].StartsWith(\"-\", StringComparison.Ordinal)"
+if text.count(old) != 1:
+    raise SystemExit("expected one command-line StartsWith anchor")
+text = text.replace(old, new, 1)
+old = '''        finally
+        {
+            if (!ReferenceEquals(_job, observed)) return;
+            RefreshProgress();
+            _progressTimer.Stop();
+            var snapshots = observed.Snapshot();
+            var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+            var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+            StatusText.Text = cancelled
+                ? "Copia cancelada"
+                : failed > 0
+                    ? $"Finalizado con {failed} destino(s) fallido(s)"
+                    : "Copia completada y verificada";
+            await observed.DisposeAsync();
+            _job = null;
+            SetEditingEnabled(true);
+            StartButton.IsEnabled = true;
+            PauseButton.IsEnabled = false;
+            CancelButton.IsEnabled = false;
+            PauseButton.Content = "Pausar";
+        }
+'''
+new = '''        finally
+        {
+            if (ReferenceEquals(_job, observed))
+            {
+                RefreshProgress();
+                _progressTimer.Stop();
+                var snapshots = observed.Snapshot();
+                var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+                var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+                StatusText.Text = cancelled
+                    ? "Copia cancelada"
+                    : failed > 0
+                        ? $"Finalizado con {failed} destino(s) fallido(s)"
+                        : "Copia completada y verificada";
+                await observed.DisposeAsync();
+                _job = null;
+                SetEditingEnabled(true);
+                StartButton.IsEnabled = true;
+                PauseButton.IsEnabled = false;
+                CancelButton.IsEnabled = false;
+                PauseButton.Content = "Pausar";
+            }
+        }
+'''
+if text.count(old) != 1:
+    raise SystemExit("expected one ObserveJobCompletionAsync finally anchor")
+text = text.replace(old, new, 1)
+winui.write_text(text, encoding="utf-8")
