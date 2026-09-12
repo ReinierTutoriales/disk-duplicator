@@ -23,7 +23,7 @@ main = replace_one(
 )
 
 needle = '''fn app_icon() -> Option<Arc<egui::IconData>> {\n    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/RepartoCopier-runtime.png"));\n    eframe::icon_data::from_png_bytes(bytes).ok().map(Arc::new)\n}\n'''
-addition = needle + '''\nfn launch_source_from_args<I>(args: I) -> Option<PathBuf>\nwhere\n    I: IntoIterator<Item = OsString>,\n{\n    let mut args = args.into_iter();\n    let _exe = args.next();\n    let Some(first) = args.next() else {\n        return None;\n    };\n\n    if first == "--source" {\n        let source = args.next()?;\n        return args.next().is_none().then(|| PathBuf::from(source));\n    }\n\n    if first.to_string_lossy().starts_with('-') {\n        return None;\n    }\n\n    args.next().is_none().then(|| PathBuf::from(first))\n}\n'''
+addition = needle + '''\nfn launch_source_from_args<I>(args: I) -> Option<PathBuf>\nwhere\n    I: IntoIterator<Item = OsString>,\n{\n    let mut args = args.into_iter();\n    let _exe = args.next();\n    let first = args.next()?;\n\n    if first == "--source" {\n        let source = args.next()?;\n        return args.next().is_none().then(|| PathBuf::from(source));\n    }\n\n    if first.to_string_lossy().starts_with('-') {\n        return None;\n    }\n\n    args.next().is_none().then(|| PathBuf::from(first))\n}\n'''
 main = replace_one(main, needle, addition, 'launch source parser')
 
 main = replace_one(
@@ -41,7 +41,7 @@ main = replace_one(
 )
 
 old_new = '''    pub fn new() -> Self {\n        refresh_system_accent();\n        let settings = load_settings();\n        let use_light_theme = resolve_theme(settings.theme);\n        Self {\n            source: String::new(),\n'''
-new_new = '''    pub fn new() -> Self {\n        Self::new_with_source(None)\n    }\n\n    pub fn new_with_source(launch_source: Option<PathBuf>) -> Self {\n        refresh_system_accent();\n        let settings = load_settings();\n        let use_light_theme = resolve_theme(settings.theme);\n        let source = launch_source\n            .map(|path| path.to_string_lossy().into_owned())\n            .unwrap_or_default();\n        let status = if source.is_empty() {\n            "Listo para copiar una carpeta a múltiples destinos".to_owned()\n        } else {\n            "Origen precargado · agrega uno o más destinos".to_owned()\n        };\n        Self {\n            source,\n'''
+new_new = '''    pub fn new_with_source(launch_source: Option<PathBuf>) -> Self {\n        refresh_system_accent();\n        let settings = load_settings();\n        let use_light_theme = resolve_theme(settings.theme);\n        let source = launch_source\n            .map(|path| path.to_string_lossy().into_owned())\n            .unwrap_or_default();\n        let status = if source.is_empty() {\n            "Listo para copiar una carpeta a múltiples destinos".to_owned()\n        } else {\n            "Origen precargado · agrega uno o más destinos".to_owned()\n        };\n        Self {\n            source,\n'''
 part3 = replace_one(part3, old_new, new_new, 'source-aware constructor')
 part3 = replace_one(
     part3,
