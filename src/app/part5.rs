@@ -80,6 +80,14 @@ mod tests {
     }
 
     #[test]
+    fn fluent_metrics_keep_windows_control_density() {
+        assert_eq!(FLUENT_CONTROL_HEIGHT, 32.0);
+        assert_eq!(FLUENT_RADIUS_SM, 6.0);
+        assert_eq!(FLUENT_RADIUS_MD, 8.0);
+        assert_eq!(FLUENT_RADIUS_LG, 12.0);
+    }
+
+    #[test]
     fn source_layout_stacks_at_narrow_widths() {
         assert!(source_layout_stacked(680.0));
         assert!(source_layout_stacked(719.0));
