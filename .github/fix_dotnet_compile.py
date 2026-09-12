@@ -97,6 +97,28 @@ new_deliver = '''    private static async Task DeliverAsync(
 if text.count(old_deliver) != 1:
     raise SystemExit("expected one DeliverAsync anchor")
 text = text.replace(old_deliver, new_deliver, 1)
+
+old_budget_dispose = '''        finally
+        {
+            bufferBudget.Dispose();
+        }
+    }
+
+    private static async Task DeliverAsync'''
+new_budget_dispose = '''        finally
+        {
+            // SharedBlock instances can outlive the producer while destination writers
+            // drain their bounded channels. Disposing the semaphore here races with the
+            // final SharedBlock.Release() calls and can abort otherwise valid copies.
+            // The semaphore is intentionally left for GC once the last shared block and
+            // this producer scope release their references.
+        }
+    }
+
+    private static async Task DeliverAsync'''
+if text.count(old_budget_dispose) != 1:
+    raise SystemExit("expected one buffer budget lifetime anchor")
+text = text.replace(old_budget_dispose, new_budget_dispose, 1)
 engine.write_text(text, encoding="utf-8")
 
 tests = Path("dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs")
