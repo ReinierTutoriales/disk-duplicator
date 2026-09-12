@@ -124,6 +124,26 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void SourceTreeSnapshotDetectsStructuralAndMetadataMutation()
+    {
+        using var temp = new TempDirectory("source-tree-snapshot");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var file = Path.Combine(source, "a.bin");
+        File.WriteAllBytes(file, [1, 2, 3]);
+        Directory.CreateDirectory(Path.Combine(source, "empty"));
+        var baseline = PreflightSafety.ScanDirectory(source);
+
+        File.WriteAllText(Path.Combine(source, "added.txt"), "new");
+        Assert.ThrowsExactly<IOException>(() =>
+            PreflightSafety.ValidateSourceTreeSnapshot(source, baseline));
+        File.Delete(Path.Combine(source, "added.txt"));
+
+        File.WriteAllBytes(file, [1, 2, 3, 4]);
+        Assert.ThrowsExactly<IOException>(() =>
+            PreflightSafety.ValidateSourceTreeSnapshot(source, baseline));
+    }
+
+    [TestMethod]
     public void PreflightSpaceMathMatchesRustRules()
     {
         Assert.AreEqual(0UL, PreflightSafety.RoundUp(0, 4096));

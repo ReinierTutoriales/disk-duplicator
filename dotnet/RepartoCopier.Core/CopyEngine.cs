@@ -179,7 +179,8 @@ public static class CopyEngine
             files,
             directories,
             totalBytes,
-            preverifiedSkips);
+            preverifiedSkips,
+            sourceIsDirectory ? scan : null);
     }
 
     private static async Task RunAsync(
@@ -321,6 +322,9 @@ public static class CopyEngine
                 expectedHashes[key] = hash;
                 await DeliverAsync(active.Where(worker => worker.IsActive).ToArray(), new EndMessage(hash), countsData: false, job).ConfigureAwait(false);
             }
+
+            if (copy.SourceScan is not null)
+                PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan);
         }
         finally
         {
@@ -1128,7 +1132,8 @@ public static class CopyEngine
         IReadOnlyList<FileEntry> Files,
         IReadOnlyList<string> Directories,
         ulong TotalBytes,
-        bool[][] PreverifiedSkips);
+        bool[][] PreverifiedSkips,
+        SourceTreeScan? SourceScan);
 
     private sealed record FileEntry(
         string SourcePath,

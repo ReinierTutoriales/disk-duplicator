@@ -132,6 +132,41 @@ internal static class PreflightSafety
         return new SourceTreeScan(files, directories);
     }
 
+    internal static void ValidateSourceTreeSnapshot(string sourceRoot, SourceTreeScan expected)
+    {
+        WindowsPath.EnsureNormalDirectory(sourceRoot, "El origen");
+        var current = ScanDirectory(sourceRoot);
+
+        if (current.Directories.Count != expected.Directories.Count ||
+            current.Files.Count != expected.Files.Count)
+        {
+            throw new IOException("La estructura del origen cambió durante la copia.");
+        }
+
+        for (var index = 0; index < expected.Directories.Count; index++)
+        {
+            if (!string.Equals(
+                    expected.Directories[index],
+                    current.Directories[index],
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("La estructura de carpetas del origen cambió durante la copia.");
+            }
+        }
+
+        for (var index = 0; index < expected.Files.Count; index++)
+        {
+            var before = expected.Files[index];
+            var after = current.Files[index];
+            if (!string.Equals(before.RelativePath, after.RelativePath, StringComparison.OrdinalIgnoreCase) ||
+                before.Size != after.Size ||
+                before.LastWriteTimeUtc != after.LastWriteTimeUtc)
+            {
+                throw new IOException($"El árbol de archivos del origen cambió durante la copia: {before.RelativePath}.");
+            }
+        }
+    }
+
     internal static void ValidateDestinationLayout(
         string destinationRoot,
         IEnumerable<string> directories,
