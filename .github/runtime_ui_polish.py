@@ -8,8 +8,6 @@ def replace_one(text, old, new, label):
     return text.replace(old, new, 1)
 
 
-# Shared UI rules: terminal snapshots end the visual copy immediately, while
-# engine_running may remain true briefly to finish supervisor cleanup.
 p = Path('src/app/part1.rs')
 t = p.read_text(encoding='utf-8')
 anchor = '''fn shown_bps(bps: f64, last_tick: Instant) -> f64 {
@@ -45,10 +43,12 @@ fn drop_action_button(
         egui::Button::new(RichText::new(label).strong().color(Theme::on_accent(light)))
             .fill(accent)
             .stroke(egui::Stroke::NONE)
+            .rounding(egui::Rounding::same(10.0))
     } else {
         egui::Button::new(RichText::new(label).strong().color(accent))
             .fill(Theme::selected(light))
             .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
+            .rounding(egui::Rounding::same(10.0))
     };
     ui.add_sized([ui.available_width(), 40.0], button)
 }
@@ -57,8 +57,6 @@ t = replace_one(t, anchor, replacement, 'shared terminal and action helpers')
 p.write_text(t, encoding='utf-8')
 
 
-# Make the smart-drop prompt more deliberate and Material-like without adding
-# another UI dependency.
 p = Path('src/app/part3.rs')
 t = p.read_text(encoding='utf-8')
 t = replace_one(
@@ -94,8 +92,6 @@ t = replace_one(
 p.write_text(t, encoding='utf-8')
 
 
-# Main UI: separate engine cleanup from the visual active-copy state, zero all
-# terminal metrics, clear stale current-file text, and add a strong drop target.
 p = Path('src/app/part4.rs')
 t = p.read_text(encoding='utf-8')
 t = t.replace('Una carpeta · múltiples destinos', 'Archivo o carpeta · múltiples destinos')
@@ -215,7 +211,6 @@ new = '''        } else if running {
                 RUNNING_REPAINT
             });
         } else if engine_running {
-            // Destinations are terminal but the supervisor is still releasing resources.
             ctx.request_repaint_after(STARTING_REPAINT);
         } else {
             ctx.request_repaint_after(THEME_CHECK_INTERVAL);
@@ -257,7 +252,8 @@ new = '''                        .add_sized(
                             .stroke(egui::Stroke::new(
                                 1.0_f32,
                                 Theme::border(self.use_light_theme),
-                            )),
+                            ))
+                            .rounding(egui::Rounding::same(10.0)),
                         )
 '''
 t = replace_one(t, old, new, 'material destination add button')
@@ -268,6 +264,37 @@ t = replace_one(
     '''                    let total_bps = if all_terminal || paused {\n''',
     'terminal aggregate speed',
 )
+
+old = '''                                                    let speed = if paused
+                                                        || matches!(
+                                                            progress.phase,
+                                                            DestPhase::Done
+                                                                | DestPhase::Failed
+                                                                | DestPhase::Cancelled
+                                                        )
+                                                    {
+                                                        0.0
+                                                    } else {
+                                                        shown_bps(
+                                                            progress.bps_recent,
+                                                            progress.last_tick,
+                                                        )
+                                                    };
+'''
+new = '''                                                    let terminal = matches!(
+                                                        progress.phase,
+                                                        DestPhase::Done
+                                                            | DestPhase::Failed
+                                                            | DestPhase::Cancelled
+                                                    );
+                                                    let speed = visible_bps(
+                                                        progress.bps_recent,
+                                                        progress.last_tick,
+                                                        terminal,
+                                                        paused,
+                                                    );
+'''
+t = replace_one(t, old, new, 'centralized destination speed')
 
 old = '''                                                    let last_file = if progress.last_file.is_empty() {
                                                         None
@@ -293,7 +320,6 @@ t = replace_one(t, old, new, 'clear terminal last file')
 p.write_text(t, encoding='utf-8')
 
 
-# Regression tests for the exact race seen in the UI screenshots.
 p = Path('src/app/part5.rs')
 t = p.read_text(encoding='utf-8')
 anchor = '''    #[test]
