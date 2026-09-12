@@ -40,7 +40,14 @@ public sealed class GlobalControlBacklogBudgetTests
         var waiting = budget.AcquireAsync(cancel.Token).AsTask();
         cancel.Cancel();
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await waiting);
+        try
+        {
+            await waiting;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
         Assert.AreEqual(1, budget.Used);
 
         budget.Release();
@@ -69,7 +76,14 @@ public sealed class GlobalControlBacklogBudgetTests
         var follower = budget.AcquireAsync(CancellationToken.None).AsTask();
         cancel.Cancel();
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await cancelled);
+        try
+        {
+            await cancelled;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
         Assert.IsFalse(follower.IsCompleted);
 
         budget.Release();
