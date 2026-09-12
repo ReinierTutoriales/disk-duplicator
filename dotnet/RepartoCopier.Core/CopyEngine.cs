@@ -51,10 +51,20 @@ public static class CopyEngine
 {
     private const int BlockSize = 16 * 1024 * 1024;
     private const int WriteChunkSize = 4 * 1024 * 1024;
+    private const int SmallBufferSize = 64 * 1024;
+    private const int MediumBufferSize = 1024 * 1024;
+    private const int LargeBufferSize = 4 * 1024 * 1024;
+    private const int PreallocationThreshold = 4 * 1024 * 1024;
     private const int ReservedRam = 512 * 1024 * 1024;
-    private const int QueueDepth = 16;
+    private const int ChannelCapacity = 16;
+    private const int AdaptiveInitialQueue = 4;
+    private const int AdaptiveMinQueue = 2;
+    private const int AdaptiveMaxQueue = 8;
+    private const int FastSamplesToGrow = 8;
     private const int Retries = 2;
     private const int MaxVerificationParallelism = 8;
+    private static readonly TimeSpan FastBlockWrite = TimeSpan.FromMilliseconds(40);
+    private static readonly TimeSpan SlowBlockWrite = TimeSpan.FromMilliseconds(250);
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
@@ -186,7 +196,7 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
-            var queueDepth = QueueDepth;
+            var queueDepth = ChannelCapacity;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(root, index, progress[index], queueDepth))
                 .ToArray();
@@ -299,17 +309,18 @@ public static class CopyEngine
                     BufferSize = 1,
                 });
 
+                var readBufferSize = ReadBufferSizeFor(entry.Size);
                 long totalRead = 0;
                 while (true)
                 {
                     token.ThrowIfCancellationRequested();
                     job.WaitIfPaused(token);
                     await bufferBudget.WaitAsync(token).ConfigureAwait(false);
-                    var rented = ArrayPool<byte>.Shared.Rent(BlockSize);
+                    var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
                     int read;
                     try
                     {
-                        read = await source.ReadAsync(rented.AsMemory(0, BlockSize), token).ConfigureAwait(false);
+                        read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -368,44 +379,63 @@ public static class CopyEngine
         bool countsData,
         CopyJob job)
     {
-        var targets = recipients as DestinationWorker[] ?? recipients.ToArray();
-        for (var index = 0; index < targets.Length; index++)
+        if (recipients.Count == 0)
+            return;
+
+        var deliveries = recipients
+            .Select(worker => DeliverOneAsync(worker, message, countsData, job))
+            .ToArray();
+        await Task.WhenAll(deliveries).ConfigureAwait(false);
+    }
+
+    private static async Task DeliverOneAsync(
+        DestinationWorker worker,
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job)
+    {
+        if (!worker.IsActive)
         {
-            var worker = targets[index];
-            if (!worker.IsActive)
+            ReleaseIfData(message);
+            return;
+        }
+
+        job.Token.ThrowIfCancellationRequested();
+        job.WaitIfPaused(job.Token);
+        var queued = false;
+        try
+        {
+            if (countsData)
             {
-                ReleaseIfData(message);
-                continue;
+                if (!await worker.WaitForAdaptiveWindowAsync(job.Token).ConfigureAwait(false))
+                {
+                    ReleaseIfData(message);
+                    return;
+                }
+                worker.IncrementQueueDepth();
+                queued = true;
             }
 
-            job.Token.ThrowIfCancellationRequested();
-            job.WaitIfPaused(job.Token);
-            if (countsData) worker.IncrementQueueDepth();
-            try
-            {
-                await worker.Channel.Writer.WriteAsync(message, job.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                if (countsData) worker.DecrementQueueDepth();
-                ReleaseIfData(message);
-                ReleaseUndeliveredData(message, targets.Length - index - 1);
-                throw;
-            }
-            catch (ChannelClosedException)
-            {
-                if (countsData) worker.DecrementQueueDepth();
-                ReleaseIfData(message);
-                if (worker.IsActive)
-                    worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
-            }
-            catch
-            {
-                if (countsData) worker.DecrementQueueDepth();
-                ReleaseIfData(message);
-                ReleaseUndeliveredData(message, targets.Length - index - 1);
-                throw;
-            }
+            await worker.Channel.Writer.WriteAsync(message, job.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            if (queued) worker.DecrementQueueDepth();
+            ReleaseIfData(message);
+            throw;
+        }
+        catch (ChannelClosedException)
+        {
+            if (queued) worker.DecrementQueueDepth();
+            ReleaseIfData(message);
+            if (worker.IsActive)
+                worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+        }
+        catch
+        {
+            if (queued) worker.DecrementQueueDepth();
+            ReleaseIfData(message);
+            throw;
         }
     }
 
@@ -442,7 +472,11 @@ public static class CopyEngine
                         {
                             if (!current.Failed)
                             {
+                                var started = System.Diagnostics.Stopwatch.GetTimestamp();
                                 await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
+                                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                                if (chunkData.Block.Length >= WriteChunkSize)
+                                    worker.RecordBlockWrite(elapsed);
                                 current.Copied += chunkData.Block.Length;
                                 worker.Progress.AddWritten(chunkData.Block.Length);
                             }
@@ -517,7 +551,7 @@ public static class CopyEngine
             Share = FileShare.None,
             Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
             BufferSize = 1,
-            PreallocationSize = entry.Size,
+            PreallocationSize = entry.Size >= PreallocationThreshold ? entry.Size : 0,
         });
         return new CurrentFile(entry, destination, part, stream);
     }
@@ -814,6 +848,12 @@ public static class CopyEngine
     private static long ToUnixNanoseconds(DateTime utc) =>
         checked((utc.ToUniversalTime().Ticks - DateTime.UnixEpoch.Ticks) * 100L);
 
+    private static int ReadBufferSizeFor(long fileSize) =>
+        fileSize <= SmallBufferSize ? SmallBufferSize :
+        fileSize <= MediumBufferSize ? MediumBufferSize :
+        fileSize <= LargeBufferSize ? LargeBufferSize :
+        BlockSize;
+
     private static FileStream ReopenPart(string path, long offset)
     {
         var stream = new FileStream(path, new FileStreamOptions
@@ -843,13 +883,6 @@ public static class CopyEngine
     private static void ReleaseIfData(FanoutMessage message)
     {
         if (message is DataMessage data) data.Block.Release();
-    }
-
-    private static void ReleaseUndeliveredData(FanoutMessage message, int count)
-    {
-        if (message is not DataMessage data) return;
-        for (var index = 0; index < count; index++)
-            data.Block.Release();
     }
 
     private static void TryDelete(string path)
@@ -906,8 +939,11 @@ public static class CopyEngine
 
     private sealed class DestinationWorker
     {
+        private readonly SemaphoreSlim _queueDrained = new(0, 1);
         private int _active = 1;
         private int _queueDepth;
+        private int _adaptiveQueueLimit = AdaptiveInitialQueue;
+        private int _fastSamples;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
 
         public DestinationWorker(string root, int slot, DestinationProgress progress, int capacity)
@@ -918,7 +954,7 @@ public static class CopyEngine
             Channel = System.Threading.Channels.Channel.CreateBounded<FanoutMessage>(new BoundedChannelOptions(capacity)
             {
                 SingleReader = true,
-                SingleWriter = true,
+                SingleWriter = false,
                 FullMode = BoundedChannelFullMode.Wait,
             });
         }
@@ -929,8 +965,39 @@ public static class CopyEngine
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
+        private int QueueDepth => Math.Max(0, Volatile.Read(ref _queueDepth));
+        private int AdaptiveQueueLimit => Volatile.Read(ref _adaptiveQueueLimit);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
+
+        public async ValueTask<bool> WaitForAdaptiveWindowAsync(CancellationToken token)
+        {
+            while (IsActive && QueueDepth >= AdaptiveQueueLimit)
+                await _queueDrained.WaitAsync(token).ConfigureAwait(false);
+            return IsActive;
+        }
+
+        public void RecordBlockWrite(TimeSpan elapsed)
+        {
+            if (elapsed >= SlowBlockWrite)
+            {
+                Interlocked.Exchange(ref _fastSamples, 0);
+                AdjustQueueLimit(-1);
+                return;
+            }
+
+            if (elapsed <= FastBlockWrite)
+            {
+                if (Interlocked.Increment(ref _fastSamples) >= FastSamplesToGrow)
+                {
+                    Interlocked.Exchange(ref _fastSamples, 0);
+                    AdjustQueueLimit(1);
+                }
+                return;
+            }
+
+            Interlocked.Exchange(ref _fastSamples, 0);
+        }
 
         public void IncrementQueueDepth()
         {
@@ -940,8 +1007,14 @@ public static class CopyEngine
 
         public void DecrementQueueDepth()
         {
-            var depth = Math.Max(0, Interlocked.Decrement(ref _queueDepth));
+            var depth = Interlocked.Decrement(ref _queueDepth);
+            if (depth < 0)
+            {
+                Interlocked.Exchange(ref _queueDepth, 0);
+                depth = 0;
+            }
             Progress.SetQueueDepth(depth);
+            PulseQueueDrained();
         }
 
         public void Fail(string error)
@@ -950,6 +1023,32 @@ public static class CopyEngine
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
             Channel.Writer.TryComplete();
+            PulseQueueDrained();
+        }
+
+        private void AdjustQueueLimit(int delta)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _adaptiveQueueLimit);
+                var next = Math.Clamp(current + delta, AdaptiveMinQueue, AdaptiveMaxQueue);
+                if (next == current)
+                    return;
+                if (Interlocked.CompareExchange(ref _adaptiveQueueLimit, next, current) == current)
+                {
+                    if (next > current)
+                        PulseQueueDrained();
+                    return;
+                }
+            }
+        }
+
+        private void PulseQueueDrained()
+        {
+            if (_queueDrained.CurrentCount != 0)
+                return;
+            try { _queueDrained.Release(); }
+            catch (SemaphoreFullException) { }
         }
     }
 
