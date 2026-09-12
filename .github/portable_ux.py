@@ -10,10 +10,12 @@ def replace_one(text, old, new, label):
 main_p = Path('src/main.rs')
 p3 = Path('src/app/part3.rs')
 p4 = Path('src/app/part4.rs')
+p5 = Path('src/app/part5.rs')
 
 main = main_p.read_text(encoding='utf-8')
 part3 = p3.read_text(encoding='utf-8')
 part4 = p4.read_text(encoding='utf-8')
+part5 = p5.read_text(encoding='utf-8')
 
 main = replace_one(
     main,
@@ -63,6 +65,9 @@ part4 = part4.replace(
     '"Selecciona uno o varios destinos · Ctrl+D. Usa Ctrl o Shift para selección múltiple.",',
 )
 
+part5 = part5.replace('CopierApp::new()', 'CopierApp::new_with_source(None)')
+
 main_p.write_text(main, encoding='utf-8')
 p3.write_text(part3, encoding='utf-8')
 p4.write_text(part4, encoding='utf-8')
+p5.write_text(part5, encoding='utf-8')
