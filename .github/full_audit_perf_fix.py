@@ -72,6 +72,25 @@ t = replace_one(
 ''',
     'remove obsolete Verify watchdog assertion',
 )
+
+# This engine-only test intentionally stops before the supervisor. With physical
+# destination verification deferred to the supervisor, the worker must finish in
+# Verifying rather than Done even when skip_same correctly detects mismatched data.
+needle = '''    fn skip_same_does_not_trust_size_and_mtime_without_content_match() {'''
+start = t.find(needle)
+if start < 0:
+    raise RuntimeError('skip_same test not found')
+end = t.find('\n    #[test]', start + len(needle))
+if end < 0:
+    raise RuntimeError('skip_same test end not found')
+block = t[start:end]
+block = replace_one(
+    block,
+    'assert_eq!(state.snapshot()[0].phase, DestPhase::Done);',
+    'assert_eq!(state.snapshot()[0].phase, DestPhase::Verifying);',
+    'skip_same deferred verification expectation',
+)
+t = t[:start] + block + t[end:]
 p.write_text(t, encoding='utf-8')
 
-print('dead verification phase removed')
+print('dead verification phase and stale test expectation removed')
