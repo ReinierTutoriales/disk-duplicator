@@ -66,6 +66,7 @@ impl eframe::App for CopierApp {
         let paused = running && self.job.as_ref().is_some_and(|job| job.is_paused());
         let verifying = running && snaps.iter().any(|dest| dest.phase == DestPhase::Verifying);
         let busy = starting || engine_running;
+        let drop_locked = drop_input_locked(starting, running);
         let all_successful = all_terminal
             && snaps
                 .iter()
@@ -83,10 +84,10 @@ impl eframe::App for CopierApp {
             )
         });
         if !dropped_paths.is_empty() {
-            self.accept_drop(dropped_paths, busy);
+            self.accept_drop(dropped_paths, drop_locked);
         }
         if hovering_drop {
-            let (title, subtitle) = if busy {
+            let (title, subtitle) = if drop_locked {
                 (
                     "Copia activa",
                     "No se puede cambiar el origen o los destinos ahora",
