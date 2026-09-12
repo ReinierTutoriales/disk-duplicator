@@ -61,21 +61,72 @@ impl eframe::App for CopierApp {
                 )
             });
         let starting = self.starting();
-        let running = self.running_job();
+        let engine_running = self.running_job();
+        let running = ui_copy_active(engine_running, all_terminal);
         let paused = running && self.job.as_ref().is_some_and(|job| job.is_paused());
         let verifying = running && snaps.iter().any(|dest| dest.phase == DestPhase::Verifying);
-        let busy = starting || running;
-        let now = Instant::now();
-        let dropped_paths: Vec<PathBuf> = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
+        let busy = starting || engine_running;
+        let all_successful = all_terminal
+            && snaps
                 .iter()
-                .filter_map(|file| file.path.clone())
-                .collect()
+                .all(|dest| dest.phase == DestPhase::Done && dest.files_err == 0);
+        let now = Instant::now();
+        let (dropped_paths, hovering_drop): (Vec<PathBuf>, bool) = ctx.input(|input| {
+            (
+                input
+                    .raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|file| file.path.clone())
+                    .collect(),
+                !input.raw.hovered_files.is_empty(),
+            )
         });
         if !dropped_paths.is_empty() {
             self.accept_drop(dropped_paths, busy);
+        }
+        if hovering_drop {
+            let (title, subtitle) = if busy {
+                (
+                    "Copia activa",
+                    "No se puede cambiar el origen o los destinos ahora",
+                )
+            } else {
+                (
+                    "Suelta el archivo o carpeta",
+                    "RepartoCopier te mostrará las opciones de copia",
+                )
+            };
+            egui::Area::new(egui::Id::new("drop_affordance"))
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(Theme::card(self.use_light_theme))
+                        .stroke(egui::Stroke::new(
+                            2.0_f32,
+                            Theme::accent(self.use_light_theme),
+                        ))
+                        .rounding(egui::Rounding::same(14.0))
+                        .inner_margin(egui::Margin::symmetric(26.0, 20.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(360.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("+")
+                                        .size(30.0)
+                                        .strong()
+                                        .color(Theme::accent(self.use_light_theme)),
+                                );
+                                ui.label(RichText::new(title).size(16.0).strong());
+                                ui.label(
+                                    RichText::new(subtitle)
+                                        .size(11.5)
+                                        .color(Theme::muted(self.use_light_theme)),
+                                );
+                            });
+                        });
+                });
         }
         self.draw_drop_prompt(ctx);
 
@@ -96,6 +147,8 @@ impl eframe::App for CopierApp {
             } else {
                 RUNNING_REPAINT
             });
+        } else if engine_running {
+            ctx.request_repaint_after(STARTING_REPAINT);
         } else {
             ctx.request_repaint_after(THEME_CHECK_INTERVAL);
         }
@@ -168,7 +221,7 @@ impl eframe::App for CopierApp {
                 ui.heading(RichText::new("RepartoCopier").strong());
                 if ui.available_width() > 430.0 {
                     ui.label(
-                        RichText::new("Una carpeta · múltiples destinos")
+                        RichText::new("Archivo o carpeta · múltiples destinos")
                             .color(Theme::muted(self.use_light_theme)),
                     );
                 }
@@ -209,6 +262,13 @@ impl eframe::App for CopierApp {
             ui.horizontal(|ui| {
                 let (status, color): (&str, Color32) = if self.error_flash_until.is_some() {
                     (self.status.as_str(), Theme::error(self.use_light_theme))
+                } else if all_successful {
+                    ("Copia completada", Theme::success(self.use_light_theme))
+                } else if all_terminal {
+                    (
+                        "Copia finalizada con incidencias",
+                        Theme::warning(self.use_light_theme),
+                    )
                 } else if paused {
                     ("Copia en pausa", Theme::warning(self.use_light_theme))
                 } else if verifying {
@@ -252,11 +312,11 @@ impl eframe::App for CopierApp {
                             ui.add_sized(
                                 [field_width, 28.0],
                                 egui::TextEdit::singleline(&mut self.source)
-                                    .hint_text("Carpeta que quieres copiar"),
+                                    .hint_text("Archivo o carpeta que quieres copiar"),
                             );
                             if ui
                                 .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                                .on_hover_text("Seleccionar carpeta de origen · Ctrl+O")
+                                .on_hover_text("Seleccionar carpeta de origen · Ctrl+O · también puedes arrastrar un archivo")
                                 .clicked()
                             {
                                 if let Some(path) = self.pick_source_dir() {
@@ -282,11 +342,11 @@ impl eframe::App for CopierApp {
                         ui.add_sized(
                             [field_width, 28.0],
                             egui::TextEdit::singleline(&mut self.source)
-                                .hint_text("Carpeta que quieres copiar"),
+                                .hint_text("Archivo o carpeta que quieres copiar"),
                         );
                         if ui
                             .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                            .on_hover_text("Seleccionar carpeta de origen · Ctrl+O")
+                            .on_hover_text("Seleccionar carpeta de origen · Ctrl+O · también puedes arrastrar un archivo")
                             .clicked()
                         {
                             if let Some(path) = self.pick_source_dir() {
@@ -308,7 +368,20 @@ impl eframe::App for CopierApp {
                 );
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
-                        .add_sized([126.0, 26.0], egui::Button::new("+ Agregar destinos"))
+                        .add_sized(
+                            [146.0, 32.0],
+                            egui::Button::new(
+                                RichText::new("+  Agregar destinos")
+                                    .strong()
+                                    .color(Theme::accent(self.use_light_theme)),
+                            )
+                            .fill(Theme::selected(self.use_light_theme))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                Theme::border(self.use_light_theme),
+                            ))
+                            .rounding(egui::Rounding::same(10.0)),
+                        )
                         .on_hover_text(
                             "Selecciona uno o varios destinos · Ctrl+D. Usa Ctrl o Shift para selección múltiple.",
                         )
@@ -509,7 +582,7 @@ impl eframe::App for CopierApp {
                         .sum::<f64>()
                         / snaps.len() as f64;
 
-                    let total_bps = if paused {
+                    let total_bps = if all_terminal || paused {
                         0.0
                     } else {
                         snaps
@@ -710,21 +783,18 @@ impl eframe::App for CopierApp {
                                                             )
                                                             .show_percentage(),
                                                     );
-                                                    let speed = if paused
-                                                        || matches!(
-                                                            progress.phase,
-                                                            DestPhase::Done
-                                                                | DestPhase::Failed
-                                                                | DestPhase::Cancelled
-                                                        )
-                                                    {
-                                                        0.0
-                                                    } else {
-                                                        shown_bps(
-                                                            progress.bps_recent,
-                                                            progress.last_tick,
-                                                        )
-                                                    };
+                                                    let terminal = matches!(
+                                                        progress.phase,
+                                                        DestPhase::Done
+                                                            | DestPhase::Failed
+                                                            | DestPhase::Cancelled
+                                                    );
+                                                    let speed = visible_bps(
+                                                        progress.bps_recent,
+                                                        progress.last_tick,
+                                                        terminal,
+                                                        paused,
+                                                    );
                                                     ui.horizontal(|ui| {
                                                         ui.weak(format_bps(speed));
                                                         ui.with_layout(
@@ -742,7 +812,15 @@ impl eframe::App for CopierApp {
                                                         );
                                                     });
 
-                                                    let last_file = if progress.last_file.is_empty() {
+                                                    let terminal = matches!(
+                                                        progress.phase,
+                                                        DestPhase::Done
+                                                            | DestPhase::Failed
+                                                            | DestPhase::Cancelled
+                                                    );
+                                                    let last_file = if terminal
+                                                        || progress.last_file.is_empty()
+                                                    {
                                                         None
                                                     } else {
                                                         Some(display_path(&progress.last_file))

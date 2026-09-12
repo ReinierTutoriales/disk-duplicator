@@ -430,6 +430,39 @@ fn shown_bps(bps: f64, last_tick: Instant) -> f64 {
     }
 }
 
+fn ui_copy_active(engine_running: bool, all_terminal: bool) -> bool {
+    engine_running && !all_terminal
+}
+
+fn visible_bps(bps: f64, last_tick: Instant, terminal: bool, paused: bool) -> f64 {
+    if terminal || paused {
+        0.0
+    } else {
+        shown_bps(bps, last_tick)
+    }
+}
+
+fn drop_action_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    primary: bool,
+    light: bool,
+) -> egui::Response {
+    let accent = Theme::accent(light);
+    let button = if primary {
+        egui::Button::new(RichText::new(label).strong().color(Theme::on_accent(light)))
+            .fill(accent)
+            .stroke(egui::Stroke::NONE)
+            .rounding(egui::Rounding::same(10.0))
+    } else {
+        egui::Button::new(RichText::new(label).strong().color(accent))
+            .fill(Theme::selected(light))
+            .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
+            .rounding(egui::Rounding::same(10.0))
+    };
+    ui.add_sized([ui.available_width(), 40.0], button)
+}
+
 fn compact_path(path: &str, max_chars: usize) -> String {
     let chars: Vec<char> = path.chars().collect();
     if chars.len() <= max_chars || max_chars < 12 {
