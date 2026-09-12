@@ -1,5 +1,6 @@
 use crate::config::{load_settings, save_settings, AppSettings, ThemePreference};
 use crate::engine::{format_bps, start_job, CopyOpts, DestPhase, JobState};
+use crate::session::{self, CopySession};
 use eframe::egui::{self, Color32, RichText};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

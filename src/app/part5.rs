@@ -140,6 +140,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn session_snapshot_and_apply_preserve_copy_configuration() {
+        let mut app = CopierApp::new_with_source(None);
+        app.source = r"C:\Música\Proyecto".to_owned();
+        app.dests = vec![r"D:\Copias".to_owned(), r"E:\Respaldo".to_owned()];
+        app.skip_same = false;
+        app.keep_going = false;
+        let snapshot = app.session_snapshot().unwrap();
+
+        let mut restored = CopierApp::new_with_source(None);
+        restored.apply_session(snapshot).unwrap();
+        assert_eq!(restored.source, r"C:\Música\Proyecto");
+        assert_eq!(restored.dests.len(), 2);
+        assert!(!restored.skip_same);
+        assert!(!restored.keep_going);
+        assert!(!restored.running_job());
+        assert!(restored.startup_rx.is_none());
+    }
+
+    #[test]
+    fn session_snapshot_rejects_source_as_destination_and_duplicates() {
+        let mut app = CopierApp::new_with_source(None);
+        app.source = r"C:\Origen".to_owned();
+        app.dests = vec![r"C:\Origen".to_owned()];
+        assert!(app.session_snapshot().is_err());
+
+        app.dests = vec![r"D:\Copias".to_owned(), r"D:\Copias".to_owned()];
+        assert!(app.session_snapshot().is_err());
+    }
+
     #[cfg(windows)]
     #[test]
     fn destination_batch_rejects_equivalent_windows_paths() {

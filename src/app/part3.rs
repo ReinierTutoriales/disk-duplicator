@@ -34,6 +34,118 @@ impl CopierApp {
         }
     }
 
+    fn session_snapshot(&self) -> Result<CopySession, String> {
+        let source = self.source.trim();
+        if source.is_empty() {
+            return Err("Selecciona una carpeta de origen antes de guardar la sesión.".to_owned());
+        }
+        if self.dests.is_empty() {
+            return Err("Agrega al menos un destino antes de guardar la sesión.".to_owned());
+        }
+
+        let mut dests = Vec::with_capacity(self.dests.len());
+        for dest in &self.dests {
+            let dest = dest.trim();
+            if dest.is_empty() {
+                return Err("No se puede guardar una sesión con destinos vacíos.".to_owned());
+            }
+            if Self::same_path(source, dest) {
+                return Err("El origen no puede ser también un destino.".to_owned());
+            }
+            if dests.iter().any(|existing: &String| Self::same_path(existing, dest)) {
+                return Err("La sesión contiene destinos duplicados.".to_owned());
+            }
+            dests.push(dest.to_owned());
+        }
+
+        Ok(CopySession {
+            source: source.to_owned(),
+            dests,
+            skip_same: self.skip_same,
+            keep_going: self.keep_going,
+        })
+    }
+
+    fn apply_session(&mut self, session: CopySession) -> Result<(), String> {
+        if session.source.trim().is_empty() || session.dests.is_empty() {
+            return Err("La sesión no contiene origen y destinos válidos.".to_owned());
+        }
+        let source = session.source.trim().to_owned();
+        let mut dests = Vec::with_capacity(session.dests.len());
+        for dest in session.dests {
+            let dest = dest.trim().to_owned();
+            if dest.is_empty() || Self::same_path(&source, &dest) {
+                return Err("La sesión contiene un destino inválido o igual al origen.".to_owned());
+            }
+            if dests.iter().any(|existing: &String| Self::same_path(existing, &dest)) {
+                return Err("La sesión contiene destinos duplicados.".to_owned());
+            }
+            dests.push(dest);
+        }
+
+        self.source = source;
+        self.dests = dests;
+        self.skip_same = session.skip_same;
+        self.keep_going = session.keep_going;
+        self.job = None;
+        self.workers.clear();
+        self.startup_rx = None;
+        self.path_errors.clear();
+        self.paths_key = u64::MAX;
+        self.last_path_check = Instant::now() - PATH_CHECK_INTERVAL;
+        self.error_flash_until = None;
+        self.status = "Sesión cargada · al iniciar se validará lo completado y solo se copiará lo pendiente".to_owned();
+        Ok(())
+    }
+
+    fn save_session_dialog(&mut self) {
+        let session = match self.session_snapshot() {
+            Ok(session) => session,
+            Err(error) => {
+                self.flash_error(error);
+                return;
+            }
+        };
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Guardar sesión de RepartoCopier")
+            .add_filter("Sesión de RepartoCopier", &["repartocopy"])
+            .set_file_name("copia.repartocopy");
+        if let Some(source) = Self::existing_dir(&self.source) {
+            if let Some(parent) = source.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        let path = session::with_default_extension(path);
+        match session::save(&path, &session) {
+            Ok(()) => {
+                self.error_flash_until = None;
+                self.status = format!("Sesión guardada · {}", display_path(&path.to_string_lossy()));
+            }
+            Err(error) => self.flash_error(error),
+        }
+    }
+
+    fn load_session_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Cargar sesión de RepartoCopier")
+            .add_filter("Sesión de RepartoCopier", &["repartocopy"]);
+        if let Some(source) = Self::existing_dir(&self.source) {
+            if let Some(parent) = source.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        match session::load(&path).and_then(|session| self.apply_session(session)) {
+            Ok(()) => {}
+            Err(error) => self.flash_error(error),
+        }
+    }
+
     fn starting(&self) -> bool {
         self.startup_rx.is_some()
     }
