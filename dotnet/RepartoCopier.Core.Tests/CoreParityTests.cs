@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using Blake3;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -305,6 +306,90 @@ public sealed class CoreParityTests
         var root = Path.Combine(destinationBase, "Origen");
         Assert.AreEqual(150, File.ReadLines(StateLayout.JournalPath(root)).Count());
         Assert.AreEqual(150, File.ReadLines(StateLayout.ManifestPath(root)).Count());
+    }
+
+    [TestMethod]
+    public async Task PipelineGovernorCancellationDoesNotLeakPrefetchCapacity()
+    {
+        var governor = new CopyEngine.PipelineGovernor();
+        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+
+        using var cancel = new CancellationTokenSource();
+        var blocked = governor.AcquirePrefetchSlotAsync(cancel.Token).AsTask();
+        cancel.Cancel();
+        try
+        {
+            await blocked;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        governor.ReleasePrefetchSlot();
+        await governor.AcquirePrefetchSlotAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(2, governor.InFlight);
+        governor.ReleasePrefetchSlot();
+        governor.ReleasePrefetchSlot();
+        Assert.AreEqual(0, governor.InFlight);
+    }
+
+    [TestMethod]
+    public async Task AdaptiveByteBudgetCancellationReturnsGrantedBytes()
+    {
+        var budget = new CopyEngine.AdaptiveByteBudget(64, 64);
+        await budget.AcquireAsync(64, CancellationToken.None);
+
+        using var cancel = new CancellationTokenSource();
+        var blocked = budget.AcquireAsync(64, cancel.Token).AsTask();
+        cancel.Cancel();
+        try
+        {
+            await blocked;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        budget.Release(64);
+        Assert.AreEqual(0L, budget.UsedBytes);
+        await budget.AcquireAsync(64, CancellationToken.None);
+        Assert.AreEqual(64L, budget.UsedBytes);
+        budget.Release(64);
+        Assert.AreEqual(0L, budget.UsedBytes);
+    }
+
+    [TestMethod]
+    public void SharedBlockRejectsReferenceOverRelease()
+    {
+        var budget = new CopyEngine.AdaptiveByteBudget(64, 64);
+        budget.AcquireAsync(64, CancellationToken.None).GetAwaiter().GetResult();
+        var buffer = ArrayPool<byte>.Shared.Rent(64);
+        var block = new CopyEngine.SharedBlock(buffer, 64, 64, 1, budget);
+        block.Release();
+        Assert.AreEqual(0L, budget.UsedBytes);
+        Assert.ThrowsExactly<InvalidOperationException>(() => block.Release());
+    }
+
+    [TestMethod]
+    public async Task ResourceGovernorCancelledWaiterDoesNotConsumeCpuLease()
+    {
+        using var governor = new CopyEngine.ResourceGovernor();
+        using var first = await governor.EnterCpuWorkAsync(CancellationToken.None);
+        using var cancel = new CancellationTokenSource();
+        var blocked = governor.EnterCpuWorkAsync(cancel.Token).AsTask();
+        cancel.Cancel();
+        try
+        {
+            await blocked;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        Assert.AreEqual(1, governor.Active);
     }
 
     [TestMethod]
