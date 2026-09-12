@@ -1,5 +1,6 @@
 name: Windows .NET CI
 
+# Permanent gate for the integrated FAN-OUT engine and Windows application.
 on:
   push:
     branches: [main]
