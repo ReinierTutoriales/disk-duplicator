@@ -1,5 +1,6 @@
 name: Fan-out admission refactor
 
+# Rerun after tightening cancellation ownership tests.
 on:
   push:
     branches: [main]
