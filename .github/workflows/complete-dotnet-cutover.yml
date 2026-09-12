@@ -50,6 +50,7 @@ jobs:
           $text = $text.Replace('RecoveryWritesRustCompatibleJournalAndManifest', 'RecoveryWritesLegacyCompatibleJournalAndManifest')
           $text = $text.Replace('RecoveryAcceptsOnlyPhysicallyVerifiedRustState', 'RecoveryAcceptsOnlyPhysicallyVerifiedLegacyState')
           $text = $text.Replace('WriteRustRecoveryProof', 'WriteLegacyRecoveryProof')
+          $text = $text.Replace('RecoveryManager.PrepareAndNormalize(destination, [file])', 'RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file])')
           Set-Content -Path $tests -Value $text -Encoding utf8NoBOM
 
       - name: Remove legacy Rust implementation
