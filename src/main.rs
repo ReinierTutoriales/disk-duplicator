@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod copy_plan;
 mod engine_impl;
 mod paths;
 mod preflight;

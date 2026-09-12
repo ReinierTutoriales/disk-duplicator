@@ -1,6 +1,7 @@
 use crate::config::{load_settings, save_settings, AppSettings, ThemePreference};
+use crate::copy_plan::{append_unique_destinations, same_path, CopyPlan};
 use crate::engine::{format_bps, start_job, CopyOpts, DestPhase, JobState};
-use crate::session::{self, CopySession};
+use crate::session;
 use eframe::egui::{self, Color32, RichText};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11,6 +12,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 type StartResult = Result<(Arc<JobState>, Vec<JoinHandle<()>>), String>;
+
+#[derive(Clone, Debug)]
+enum PendingDrop {
+    Folder(PathBuf),
+    File(PathBuf),
+}
 
 const SPACING_XS: f32 = 4.0;
 const SPACING_SM: f32 = 8.0;

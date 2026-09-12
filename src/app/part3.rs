@@ -22,6 +22,7 @@ impl CopierApp {
             startup_rx: None,
             show_credits: false,
             show_settings: false,
+            pending_drop: None,
             error_flash_until: None,
             theme_preference: settings.theme,
             use_light_theme,
@@ -34,81 +35,42 @@ impl CopierApp {
         }
     }
 
-    fn session_snapshot(&self) -> Result<CopySession, String> {
-        let source = self.source.trim();
-        if source.is_empty() {
-            return Err("Selecciona una carpeta de origen antes de guardar la sesión.".to_owned());
-        }
-        if self.dests.is_empty() {
-            return Err("Agrega al menos un destino antes de guardar la sesión.".to_owned());
-        }
-
-        let mut dests = Vec::with_capacity(self.dests.len());
-        for dest in &self.dests {
-            let dest = dest.trim();
-            if dest.is_empty() {
-                return Err("No se puede guardar una sesión con destinos vacíos.".to_owned());
-            }
-            if Self::same_path(source, dest) {
-                return Err("El origen no puede ser también un destino.".to_owned());
-            }
-            if dests.iter().any(|existing: &String| Self::same_path(existing, dest)) {
-                return Err("La sesión contiene destinos duplicados.".to_owned());
-            }
-            dests.push(dest.to_owned());
-        }
-
-        Ok(CopySession {
-            source: source.to_owned(),
-            dests,
-            skip_same: self.skip_same,
-            keep_going: self.keep_going,
-        })
+    fn copy_snapshot(&self) -> Result<CopyPlan, String> {
+        CopyPlan::new(
+            self.source.clone(),
+            self.dests.clone(),
+            self.skip_same,
+            self.keep_going,
+        )
     }
 
-    fn apply_session(&mut self, session: CopySession) -> Result<(), String> {
-        if session.source.trim().is_empty() || session.dests.is_empty() {
-            return Err("La sesión no contiene origen y destinos válidos.".to_owned());
-        }
-        let source = session.source.trim().to_owned();
-        let mut dests = Vec::with_capacity(session.dests.len());
-        for dest in session.dests {
-            let dest = dest.trim().to_owned();
-            if dest.is_empty() || Self::same_path(&source, &dest) {
-                return Err("La sesión contiene un destino inválido o igual al origen.".to_owned());
-            }
-            if dests.iter().any(|existing: &String| Self::same_path(existing, &dest)) {
-                return Err("La sesión contiene destinos duplicados.".to_owned());
-            }
-            dests.push(dest);
-        }
-
-        self.source = source;
-        self.dests = dests;
-        self.skip_same = session.skip_same;
-        self.keep_going = session.keep_going;
+    fn apply_saved_copy(&mut self, copy: CopyPlan) {
+        self.source = copy.source;
+        self.dests = copy.dests;
+        self.skip_same = copy.skip_same;
+        self.keep_going = copy.keep_going;
         self.job = None;
         self.workers.clear();
         self.startup_rx = None;
+        self.pending_drop = None;
         self.path_errors.clear();
         self.paths_key = u64::MAX;
         self.last_path_check = Instant::now() - PATH_CHECK_INTERVAL;
         self.error_flash_until = None;
-        self.status = "Sesión cargada · al iniciar se validará lo completado y solo se copiará lo pendiente".to_owned();
-        Ok(())
+        self.status = "Copia cargada · al iniciar se validará lo completado y solo se copiará lo pendiente".to_owned();
     }
 
-    fn save_session_dialog(&mut self) {
-        let session = match self.session_snapshot() {
-            Ok(session) => session,
+    fn save_copy_dialog(&mut self) {
+        let copy = match self.copy_snapshot() {
+            Ok(copy) => copy,
             Err(error) => {
                 self.flash_error(error);
                 return;
             }
         };
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Guardar sesión de RepartoCopier")
-            .add_filter("Sesión de RepartoCopier", &["repartocopy"])
+            .set_title("Salvar copia de RepartoCopier")
+            .add_filter("Copia de RepartoCopier", &["repartocopy"])
             .set_file_name("copia.repartocopy");
         if let Some(source) = Self::existing_dir(&self.source) {
             if let Some(parent) = source.parent() {
@@ -119,19 +81,19 @@ impl CopierApp {
             return;
         };
         let path = session::with_default_extension(path);
-        match session::save(&path, &session) {
+        match session::save(&path, &copy) {
             Ok(()) => {
                 self.error_flash_until = None;
-                self.status = format!("Sesión guardada · {}", display_path(&path.to_string_lossy()));
+                self.status = format!("Copia salvada · {}", display_path(&path.to_string_lossy()));
             }
             Err(error) => self.flash_error(error),
         }
     }
 
-    fn load_session_dialog(&mut self) {
+    fn load_copy_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Cargar sesión de RepartoCopier")
-            .add_filter("Sesión de RepartoCopier", &["repartocopy"]);
+            .set_title("Cargar copia de RepartoCopier")
+            .add_filter("Copia de RepartoCopier", &["repartocopy"]);
         if let Some(source) = Self::existing_dir(&self.source) {
             if let Some(parent) = source.parent() {
                 dialog = dialog.set_directory(parent);
@@ -140,8 +102,8 @@ impl CopierApp {
         let Some(path) = dialog.pick_file() else {
             return;
         };
-        match session::load(&path).and_then(|session| self.apply_session(session)) {
-            Ok(()) => {}
+        match session::load(&path) {
+            Ok(copy) => self.apply_saved_copy(copy),
             Err(error) => self.flash_error(error),
         }
     }
@@ -154,24 +116,6 @@ impl CopierApp {
         self.job
             .as_ref()
             .is_some_and(|job| job.running.load(Ordering::Relaxed))
-    }
-
-    fn normalized_path_key(path: &str) -> String {
-        let normalized = path.trim().replace('/', "\\");
-        let trimmed = normalized.trim_end_matches('\\');
-        let stable = if trimmed.is_empty() { normalized.as_str() } else { trimmed };
-        #[cfg(windows)]
-        {
-            stable.to_ascii_lowercase()
-        }
-        #[cfg(not(windows))]
-        {
-            stable.to_owned()
-        }
-    }
-
-    fn same_path(a: &str, b: &str) -> bool {
-        Self::normalized_path_key(a) == Self::normalized_path_key(b)
     }
 
     fn existing_dir(path: &str) -> Option<PathBuf> {
@@ -214,19 +158,113 @@ impl CopierApp {
     }
 
     fn add_destinations(&mut self, selected: Vec<String>) -> usize {
-        let mut added = 0usize;
-        for path in selected {
-            let path = path.trim().to_owned();
-            if path.is_empty() || Self::same_path(&path, &self.source) {
-                continue;
-            }
-            if self.dests.iter().any(|existing| Self::same_path(existing, &path)) {
-                continue;
-            }
-            self.dests.push(path);
-            added += 1;
+        append_unique_destinations(&self.source, &mut self.dests, selected)
+    }
+
+    fn accept_drop(&mut self, paths: Vec<PathBuf>, busy: bool) {
+        if paths.is_empty() {
+            return;
         }
-        added
+        if busy {
+            self.flash_error("No se puede cambiar origen o destinos mientras una copia está activa.".to_owned());
+            return;
+        }
+        if paths.len() != 1 {
+            self.flash_error("Arrastra un solo archivo o carpeta para evitar una acción ambigua.".to_owned());
+            return;
+        }
+        let path = paths.into_iter().next().expect("one dropped path");
+        if path.is_dir() {
+            self.pending_drop = Some(PendingDrop::Folder(path));
+        } else if path.is_file() {
+            self.pending_drop = Some(PendingDrop::File(path));
+        } else {
+            self.flash_error("El elemento arrastrado no es un archivo o carpeta accesible.".to_owned());
+        }
+    }
+
+    fn draw_drop_prompt(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_drop.clone() else {
+            return;
+        };
+        let mut close = false;
+        let mut use_source = None;
+        let mut add_destination = None;
+
+        egui::Window::new(match pending {
+            PendingDrop::Folder(_) => "Carpeta arrastrada",
+            PendingDrop::File(_) => "Archivo arrastrado",
+        })
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(window_frame(ctx, self.use_light_theme))
+        .show(ctx, |ui| match &pending {
+            PendingDrop::Folder(path) => {
+                let shown = display_path(&path.to_string_lossy());
+                ui.label(RichText::new(compact_path(&shown, 64)).strong());
+                ui.label(RichText::new("¿Qué quieres hacer con esta carpeta?").color(Theme::muted(self.use_light_theme)));
+                ui.add_space(SPACING_SM);
+                if ui.button("Usar como origen y elegir destinos").clicked() {
+                    use_source = Some(path.clone());
+                }
+                if !self.source.trim().is_empty()
+                    && !same_path(&self.source, &path.to_string_lossy())
+                    && ui.button("Agregar como destino").clicked()
+                {
+                    add_destination = Some(path.clone());
+                }
+                if ui.button("Cancelar").clicked() {
+                    close = true;
+                }
+            }
+            PendingDrop::File(path) => {
+                let shown = display_path(&path.to_string_lossy());
+                ui.label(RichText::new(compact_path(&shown, 64)).strong());
+                ui.label(
+                    RichText::new("FAN-OUT copia árboles de carpetas completos. Para no copiar contenido distinto al que esperas, un archivo suelto no se convierte automáticamente en origen.")
+                        .color(Theme::muted(self.use_light_theme)),
+                );
+                ui.add_space(SPACING_SM);
+                if let Some(parent) = path.parent() {
+                    if ui.button("Usar la carpeta que contiene este archivo").clicked() {
+                        use_source = Some(parent.to_path_buf());
+                    }
+                }
+                if ui.button("Cancelar").clicked() {
+                    close = true;
+                }
+            }
+        });
+
+        if close {
+            self.pending_drop = None;
+            return;
+        }
+        if let Some(path) = add_destination {
+            let added = self.add_destinations(vec![path.to_string_lossy().into_owned()]);
+            self.pending_drop = None;
+            if added > 0 {
+                self.status = "Destino agregado desde arrastrar y soltar".to_owned();
+            }
+            return;
+        }
+        if let Some(path) = use_source {
+            self.source = path.to_string_lossy().into_owned();
+            self.pending_drop = None;
+            self.path_errors.clear();
+            self.paths_key = u64::MAX;
+            if let Some(paths) = self.pick_destination_dirs() {
+                let added = self.add_destinations(paths);
+                self.status = if added > 0 {
+                    count_label(added as u64, "destino agregado", "destinos agregados")
+                } else {
+                    "Origen cargado · agrega uno o más destinos".to_owned()
+                };
+            } else {
+                self.status = "Origen cargado · agrega uno o más destinos".to_owned();
+            }
+        }
     }
 
     fn paths_key(&self) -> u64 {

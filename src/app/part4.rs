@@ -66,6 +66,19 @@ impl eframe::App for CopierApp {
         let verifying = running && snaps.iter().any(|dest| dest.phase == DestPhase::Verifying);
         let busy = starting || running;
         let now = Instant::now();
+        let dropped_paths: Vec<PathBuf> = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if !dropped_paths.is_empty() {
+            self.accept_drop(dropped_paths, busy);
+        }
+        self.draw_drop_prompt(ctx);
+
 
         if let Some(until) = self.error_flash_until {
             if now >= until {
@@ -103,25 +116,25 @@ impl eframe::App for CopierApp {
             start_disabled_reason(&self.source, self.dests.len(), path_error_count);
         let ready_to_start = start_disabled.is_none();
 
-        let save_session_shortcut = ctx.input_mut(|input| {
+        let save_copy_shortcut = ctx.input_mut(|input| {
             input.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::CTRL,
                 egui::Key::S,
             ))
         });
-        if save_session_shortcut {
-            self.save_session_dialog();
+        if save_copy_shortcut {
+            self.save_copy_dialog();
         }
 
-        let load_session_shortcut = !busy
+        let load_copy_shortcut = !busy
             && ctx.input_mut(|input| {
                 input.consume_shortcut(&egui::KeyboardShortcut::new(
                     egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
                     egui::Key::O,
                 ))
             });
-        if load_session_shortcut {
-            self.load_session_dialog();
+        if load_copy_shortcut {
+            self.load_copy_dialog();
         }
 
         let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
@@ -164,23 +177,23 @@ impl eframe::App for CopierApp {
                     if ui.add(settings).on_hover_text("Ajustes").clicked() {
                         self.show_settings = true;
                     }
-                    ui.menu_button("Sesión", |ui| {
+                    ui.menu_button("Copia", |ui| {
                         let can_save = !self.source.trim().is_empty() && !self.dests.is_empty();
                         if ui
-                            .add_enabled(can_save, egui::Button::new("Guardar sesión…   Ctrl+S"))
-                            .on_hover_text("Guarda origen, destinos y opciones. El progreso seguro permanece en los journals de cada destino.")
+                            .add_enabled(can_save, egui::Button::new("Salvar copia…   Ctrl+S"))
+                            .on_hover_text("Salva origen, destinos y opciones. El progreso seguro permanece en cada destino.")
                             .clicked()
                         {
                             ui.close_menu();
-                            self.save_session_dialog();
+                            self.save_copy_dialog();
                         }
                         if ui
-                            .add_enabled(!busy, egui::Button::new("Cargar sesión…   Ctrl+Shift+O"))
-                            .on_hover_text("Carga el trabajo. No inicia la copia automáticamente.")
+                            .add_enabled(!busy, egui::Button::new("Cargar copia…   Ctrl+Shift+O"))
+                            .on_hover_text("Carga origen, destinos y opciones. No inicia la copia automáticamente.")
                             .clicked()
                         {
                             ui.close_menu();
-                            self.load_session_dialog();
+                            self.load_copy_dialog();
                         }
                     });
                     if starting {
