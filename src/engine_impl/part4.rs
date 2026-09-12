@@ -256,7 +256,7 @@ mod tests {
         let root = temp_dir("tail-watchdog");
         let state = worker_state(&root, 0);
         let control = Arc::new(DestControl::new());
-        *control.operation.lock().unwrap() = (OperationPhase::Verify, Instant::now() - LONG_OP_THRESHOLD - Duration::from_secs(1));
+        *control.operation.lock().unwrap() = (OperationPhase::Sync, Instant::now() - LONG_OP_THRESHOLD - Duration::from_secs(1));
         let controls = vec![Arc::clone(&control)];
         let mut pending: PendingQueues = vec![std::collections::VecDeque::new()];
         watch_workers_after_input_closed(&controls, &state, &mut pending);
@@ -280,8 +280,6 @@ mod tests {
         let control = DestControl::new();
         assert_eq!(control.stall_limit_secs(), 30);
         control.enter_operation(OperationPhase::Sync);
-        assert_eq!(control.stall_limit_secs(), 120);
-        control.enter_operation(OperationPhase::Verify);
         assert_eq!(control.stall_limit_secs(), 120);
         control.enter_operation(OperationPhase::Commit);
         assert_eq!(control.stall_limit_secs(), 120);
@@ -348,7 +346,7 @@ mod tests {
         let snap = state.snapshot();
         assert_eq!(snap[0].files_skip, 0);
         assert_eq!(snap[0].files_done, 1);
-        assert_eq!(snap[0].phase, DestPhase::Done);
+        assert_eq!(snap[0].phase, DestPhase::Verifying);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -491,7 +489,41 @@ mod tests {
         assert_eq!(journal.lines().filter(|line| !line.is_empty()).count(), 1);
         let manifest = fs::read_to_string(manifest_path(&dest)).unwrap();
         assert_eq!(manifest.lines().filter(|line| !line.is_empty()).count(), 1);
-        assert_eq!(state.snapshot()[0].phase, DestPhase::Done);
+        assert_eq!(state.snapshot()[0].phase, DestPhase::Verifying);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verify_worker_defers_physical_validation_to_supervisor() {
+        let root = temp_dir("deferred-final-verify");
+        let source = root.join("src");
+        let dest = root.join("dst");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let data = vec![0x5Au8; 2 * 1024 * 1024];
+        let path = source.join("large.bin");
+        fs::write(&path, &data).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let files = Arc::new(vec![FileInfo {
+            rel: PathBuf::from("large.bin"),
+            size: meta.len(),
+            mtime_ns: metadata_mtime_ns(&meta),
+        }]);
+        let opts = CopyOpts { verify: true, skip_same: false, keep_going: true };
+        let (state, handles) = start_job_with_files(
+            source,
+            vec![dest.clone()],
+            files,
+            Arc::new(Vec::new()),
+            opts,
+        ).unwrap();
+        for handle in handles { handle.join().unwrap(); }
+
+        assert_eq!(fs::read(dest.join("large.bin")).unwrap(), data);
+        let snap = state.snapshot();
+        assert_eq!(snap[0].phase, DestPhase::Verifying);
+        assert_eq!(snap[0].files_done, 1);
+        assert_eq!(snap[0].files_err, 0);
         let _ = fs::remove_dir_all(root);
     }
 

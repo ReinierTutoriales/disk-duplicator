@@ -438,12 +438,24 @@ fn drop_input_locked(starting: bool, visual_running: bool) -> bool {
     starting || visual_running
 }
 
-fn visible_bps(bps: f64, last_tick: Instant, terminal: bool, paused: bool) -> f64 {
-    if terminal || paused {
+fn visible_bps(bps: f64, last_tick: Instant, phase: DestPhase, paused: bool) -> f64 {
+    if paused || phase != DestPhase::Copying {
         0.0
     } else {
         shown_bps(bps, last_tick)
     }
+}
+
+fn logical_fanout_bps(speeds: impl IntoIterator<Item = f64>) -> f64 {
+    let mut speeds = speeds.into_iter();
+    let Some(first) = speeds.next() else {
+        return 0.0;
+    };
+    speeds.fold(first, f64::min).max(0.0)
+}
+
+fn can_start_new_job(starting: bool, engine_running: bool) -> bool {
+    !starting && !engine_running
 }
 
 fn drop_action_button(
