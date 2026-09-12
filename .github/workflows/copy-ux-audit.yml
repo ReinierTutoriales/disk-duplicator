@@ -26,6 +26,18 @@ jobs:
           components: clippy,rustfmt
       - name: Apply cleanup and UX hardening
         run: python .github/copy_ux_hardening.py
+      - name: Remove superseded session limit
+        shell: pwsh
+        run: |
+          $path = 'src/session.rs'
+          $text = Get-Content $path -Raw
+          $old = "const MAX_DESTINATIONS: usize = 256;`r`n"
+          if (-not $text.Contains($old)) {
+            $old = "const MAX_DESTINATIONS: usize = 256;`n"
+          }
+          if (-not $text.Contains($old)) { throw 'Old MAX_DESTINATIONS constant was not found exactly once.' }
+          $text = $text.Replace($old, '')
+          Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
       - name: Format
         run: cargo fmt --all
       - name: Diff check
