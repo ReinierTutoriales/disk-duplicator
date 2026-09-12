@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/apply_audit_hardening.py'
+      - '.github/apply_audit_followup.py'
       - '.github/workflows/audit-hardening.yml'
   workflow_dispatch:
 
@@ -27,7 +28,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Apply audited hardening
-        run: python .github/apply_audit_hardening.py
+        run: |
+          python .github/apply_audit_hardening.py
+          python .github/apply_audit_followup.py
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
       - name: Test core Release
@@ -43,5 +46,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs
           if (git diff --cached --quiet) { throw 'No audit hardening changes produced.' }
-          git commit -m "fix: harden adaptive governor cancellation accounting"
+          git commit -m "fix: harden and consolidate adaptive governors"
           git push origin HEAD:main
