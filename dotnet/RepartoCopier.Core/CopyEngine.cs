@@ -10,13 +10,13 @@ namespace RepartoCopier.Core;
 public sealed class CopyJob : IAsyncDisposable
 {
     private readonly CancellationTokenSource _cancel = new();
-    private readonly ManualResetEventSlim _pauseGate = new(initialState: true);
+    private readonly AsyncPauseGate _pauseGate = new();
     private readonly IReadOnlyList<DestinationProgress> _progress;
     private Task _completion = Task.CompletedTask;
 
     internal CopyJob(IReadOnlyList<DestinationProgress> progress) => _progress = progress;
 
-    public bool IsPaused => !_pauseGate.IsSet;
+    public bool IsPaused => _pauseGate.IsPaused;
     public Task Completion => _completion;
     internal CancellationToken Token => _cancel.Token;
 
@@ -25,27 +25,64 @@ public sealed class CopyJob : IAsyncDisposable
     public IReadOnlyList<DestinationSnapshot> Snapshot() =>
         _progress.Select(item => item.Snapshot()).ToArray();
 
-    public void SetPaused(bool paused)
-    {
-        if (paused) _pauseGate.Reset();
-        else _pauseGate.Set();
-    }
+    public void SetPaused(bool paused) => _pauseGate.SetPaused(paused);
 
     public void RequestCancel()
     {
-        _pauseGate.Set();
+        _pauseGate.SetPaused(false);
         _cancel.Cancel();
     }
 
-    internal void WaitIfPaused(CancellationToken token) => _pauseGate.Wait(token);
+    internal ValueTask WaitIfPausedAsync(CancellationToken token) => _pauseGate.WaitAsync(token);
 
     public async ValueTask DisposeAsync()
     {
         RequestCancel();
         try { await _completion.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
-        _pauseGate.Dispose();
         _cancel.Dispose();
+    }
+
+    private sealed class AsyncPauseGate
+    {
+        private readonly object _gate = new();
+        private TaskCompletionSource? _resumeSignal;
+
+        public bool IsPaused
+        {
+            get { lock (_gate) return _resumeSignal is not null; }
+        }
+
+        public void SetPaused(bool paused)
+        {
+            TaskCompletionSource? resume = null;
+            lock (_gate)
+            {
+                if (paused)
+                {
+                    _resumeSignal ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+                else
+                {
+                    resume = _resumeSignal;
+                    _resumeSignal = null;
+                }
+            }
+            resume?.TrySetResult();
+        }
+
+        public async ValueTask WaitAsync(CancellationToken token)
+        {
+            while (true)
+            {
+                Task? wait;
+                lock (_gate)
+                    wait = _resumeSignal?.Task;
+                if (wait is null)
+                    return;
+                await wait.WaitAsync(token).ConfigureAwait(false);
+            }
+        }
     }
 }
 
@@ -291,7 +328,7 @@ public static class CopyEngine
             for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
             {
                 token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(token);
+                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
                 var entry = copy.Files[fileIndex];
                 ValidateSourceSnapshot(entry);
 
@@ -351,7 +388,7 @@ public static class CopyEngine
         while (true)
         {
             job.Token.ThrowIfCancellationRequested();
-            job.WaitIfPaused(job.Token);
+            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             var budgetStarted = Stopwatch.GetTimestamp();
             await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
             pipeline.RecordBudgetWait(Stopwatch.GetElapsedTime(budgetStarted));
@@ -511,7 +548,7 @@ public static class CopyEngine
             while (true)
             {
                 token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(token);
+                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
                 await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
                 var budgetStarted = Stopwatch.GetTimestamp();
                 try
@@ -622,7 +659,7 @@ public static class CopyEngine
         }
 
         job.Token.ThrowIfCancellationRequested();
-        job.WaitIfPaused(job.Token);
+        await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
         var queued = false;
         try
         {
@@ -682,7 +719,7 @@ public static class CopyEngine
                 if (!worker.IsActive) continue;
 
                 job.Token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(job.Token);
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 switch (message)
                 {
                     case BeginMessage begin:
@@ -787,7 +824,7 @@ public static class CopyEngine
         for (var attempt = 0; attempt <= Retries; attempt++)
         {
             job.Token.ThrowIfCancellationRequested();
-            job.WaitIfPaused(job.Token);
+            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             try
             {
                 current.Stream ??= ReopenPart(current.PartPath, current.Copied);
@@ -885,7 +922,7 @@ public static class CopyEngine
             foreach (var entry in copy.Files)
             {
                 job.Token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(job.Token);
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
                     continue;
                 var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
@@ -923,7 +960,7 @@ public static class CopyEngine
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
         {
             token.ThrowIfCancellationRequested();
-            job.WaitIfPaused(token);
+            await job.WaitIfPausedAsync(token).ConfigureAwait(false);
             var entry = copy.Files[fileIndex];
             var candidates = new List<int>();
             for (var slot = 0; slot < copy.DestinationRoots.Length; slot++)
@@ -1311,7 +1348,8 @@ public static class CopyEngine
                     case SampleKind.Budget: _budgetWaitMs += milliseconds; break;
                     case SampleKind.Read: _readMs += milliseconds; break;
                 }
-                _samples++;
+                if (kind == SampleKind.Consumer)
+                    _samples++;
                 EvaluateLocked();
             }
         }

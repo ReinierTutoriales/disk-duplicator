@@ -413,6 +413,85 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task AsyncPauseGateReleasesHundredsOfWaitersWithoutBlockingThreads()
+    {
+        await using var job = new CopyJob(Array.Empty<DestinationProgress>());
+        job.SetPaused(true);
+        Assert.IsTrue(job.IsPaused);
+
+        var waits = Enumerable.Range(0, 512)
+            .Select(_ => job.WaitIfPausedAsync(CancellationToken.None).AsTask())
+            .ToArray();
+        Assert.AreEqual(0, waits.Count(task => task.IsCompleted));
+
+        job.SetPaused(false);
+        await Task.WhenAll(waits).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.IsFalse(job.IsPaused);
+    }
+
+    [TestMethod]
+    public async Task PipelineGovernorRepeatedCancellationStressDoesNotLeakSlots()
+    {
+        var governor = new CopyEngine.PipelineGovernor();
+        for (var iteration = 0; iteration < 200; iteration++)
+        {
+            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+
+            using var cancel = new CancellationTokenSource();
+            var blocked = Enumerable.Range(0, 16)
+                .Select(_ => governor.AcquirePrefetchSlotAsync(cancel.Token).AsTask())
+                .ToArray();
+            cancel.Cancel();
+            foreach (var task in blocked)
+            {
+                try
+                {
+                    await task;
+                    Assert.Fail("Se esperaba cancelación.");
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            governor.ReleasePrefetchSlot();
+            governor.ReleasePrefetchSlot();
+            Assert.AreEqual(0, governor.InFlight);
+        }
+    }
+
+    [TestMethod]
+    public async Task FanOutStressWithRapidPauseResumePreservesEveryDestination()
+    {
+        using var temp = new TempDirectory("fanout-pause-stress");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[24 * 1024 * 1024 + 193];
+        new Random(314159).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "stress.bin"), payload);
+
+        var destinations = Enumerable.Range(0, 8)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+
+        for (var cycle = 0; cycle < 20 && !job.Completion.IsCompleted; cycle++)
+        {
+            job.SetPaused(true);
+            await Task.Delay(5);
+            job.SetPaused(false);
+            await Task.Delay(5);
+        }
+        job.SetPaused(false);
+
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
+        AssertHealthy(job);
+        foreach (var destination in destinations)
+            CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "stress.bin")));
+    }
+
+    [TestMethod]
     public async Task AdaptivePipelinePrefetchPreservesExactLargeFileFanOut()
     {
         using var temp = new TempDirectory("adaptive-pipeline-prefetch");
