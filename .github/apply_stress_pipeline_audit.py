@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 engine = Path('dotnet/RepartoCopier.Core/CopyEngine.cs')
 s = engine.read_text(encoding='utf-8')
@@ -92,11 +93,13 @@ public static class CopyEngine
 s = s.replace(copyjob_end, async_gate, 1)
 
 # Convert every cooperative pause safe-point in async engine code to a non-blocking wait.
-s = s.replace('                job.WaitIfPaused(token);', '                await job.WaitIfPausedAsync(token).ConfigureAwait(false);')
-s = s.replace('            job.WaitIfPaused(job.Token);', '            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);')
-s = s.replace('                job.WaitIfPaused(job.Token);', '                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);')
-s = s.replace('        job.WaitIfPaused(job.Token);', '        await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);')
-if 'WaitIfPaused(' in s:
+s, converted = re.subn(
+    r'(?m)^(?P<indent>\s*)job\.WaitIfPaused\((?P<token>[^;]+)\);$',
+    lambda m: f"{m.group('indent')}await job.WaitIfPausedAsync({m.group('token')}).ConfigureAwait(false);",
+    s)
+if converted == 0:
+    raise SystemExit('No pause safe points were converted')
+if re.search(r'\bWaitIfPaused\s*\(', s):
     raise SystemExit('A synchronous pause wait remains in CopyEngine.cs')
 
 # Prefetch adaptation should evaluate after complete consumer cycles, not after arbitrary partial events.
