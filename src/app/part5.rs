@@ -117,40 +117,40 @@ mod tests {
 
         assert_eq!(added, 2);
         assert_eq!(app.dests.len(), 3);
-        assert!(app.dests.iter().any(|path| CopierApp::same_path(path, r"G:\")));
-        assert!(app.dests.iter().any(|path| CopierApp::same_path(path, r"H:\")));
+        assert!(app.dests.iter().any(|path| same_path(path, r"G:\")));
+        assert!(app.dests.iter().any(|path| same_path(path, r"H:\")));
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_destination_keys_are_case_insensitive() {
-        assert!(CopierApp::same_path(r"F:\Backups\", r"f:/backups"));
+        assert!(same_path(r"F:\Backups\", r"f:/backups"));
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_destination_keys_normalize_mixed_separators_and_trailing_slashes() {
-        assert!(CopierApp::same_path(
+        assert!(same_path(
             r"F:/Backups/Nested/",
             r"f:\backups\nested\\"
         ));
-        assert!(CopierApp::same_path(
+        assert!(same_path(
             r"\\Server\Share\Folder\",
             r"//server/share/folder/"
         ));
     }
 
     #[test]
-    fn session_snapshot_and_apply_preserve_copy_configuration() {
+    fn saved_copy_roundtrip_preserves_copy_configuration() {
         let mut app = CopierApp::new_with_source(None);
         app.source = r"C:\Música\Proyecto".to_owned();
         app.dests = vec![r"D:\Copias".to_owned(), r"E:\Respaldo".to_owned()];
         app.skip_same = false;
         app.keep_going = false;
-        let snapshot = app.session_snapshot().unwrap();
+        let snapshot = app.copy_snapshot().unwrap();
 
         let mut restored = CopierApp::new_with_source(None);
-        restored.apply_session(snapshot).unwrap();
+        restored.apply_saved_copy(snapshot);
         assert_eq!(restored.source, r"C:\Música\Proyecto");
         assert_eq!(restored.dests.len(), 2);
         assert!(!restored.skip_same);
@@ -160,14 +160,14 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_rejects_source_as_destination_and_duplicates() {
+    fn copy_plan_rejects_source_as_destination_and_duplicates() {
         let mut app = CopierApp::new_with_source(None);
         app.source = r"C:\Origen".to_owned();
         app.dests = vec![r"C:\Origen".to_owned()];
-        assert!(app.session_snapshot().is_err());
+        assert!(app.copy_snapshot().is_err());
 
         app.dests = vec![r"D:\Copias".to_owned(), r"D:\Copias".to_owned()];
-        assert!(app.session_snapshot().is_err());
+        assert!(app.copy_snapshot().is_err());
     }
 
     #[cfg(windows)]

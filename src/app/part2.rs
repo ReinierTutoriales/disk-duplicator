@@ -9,6 +9,7 @@ pub struct CopierApp {
     startup_rx: Option<mpsc::Receiver<StartResult>>,
     show_credits: bool,
     show_settings: bool,
+    pending_drop: Option<PendingDrop>,
     error_flash_until: Option<Instant>,
     theme_preference: ThemePreference,
     use_light_theme: bool,

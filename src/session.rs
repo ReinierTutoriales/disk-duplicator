@@ -1,17 +1,11 @@
+use crate::copy_plan::{CopyPlan, MAX_DESTINATIONS};
 use crate::storage;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &str = "RepartoCopierSession/1";
 const MAX_SESSION_BYTES: u64 = 1024 * 1024;
-const MAX_DESTINATIONS: usize = 256;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CopySession {
-    pub source: String,
-    pub dests: Vec<String>,
-    pub skip_same: bool,
-    pub keep_going: bool,
-}
+pub type CopySession = CopyPlan;
 
 fn encode_hex(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -57,26 +51,7 @@ fn parse_bool(value: &str, field: &str) -> Result<bool, String> {
     }
 }
 
-fn validate(session: &CopySession) -> Result<(), String> {
-    if session.source.trim().is_empty() {
-        return Err("La sesión no contiene una carpeta de origen.".to_owned());
-    }
-    if session.dests.is_empty() {
-        return Err("La sesión no contiene destinos.".to_owned());
-    }
-    if session.dests.len() > MAX_DESTINATIONS {
-        return Err(format!(
-            "La sesión supera el máximo de {MAX_DESTINATIONS} destinos."
-        ));
-    }
-    if session.dests.iter().any(|dest| dest.trim().is_empty()) {
-        return Err("La sesión contiene un destino vacío.".to_owned());
-    }
-    Ok(())
-}
-
 fn render(session: &CopySession) -> Result<String, String> {
-    validate(session)?;
     let mut out = String::new();
     out.push_str(MAGIC);
     out.push('\n');
@@ -104,7 +79,7 @@ fn render(session: &CopySession) -> Result<String, String> {
 fn parse(text: &str) -> Result<CopySession, String> {
     let mut lines = text.lines();
     if lines.next() != Some(MAGIC) {
-        return Err("Formato o versión de sesión no compatible.".to_owned());
+        return Err("Formato o versión de copia guardada no compatible.".to_owned());
     }
 
     let mut source = None;
@@ -117,46 +92,44 @@ fn parse(text: &str) -> Result<CopySession, String> {
         }
         let (key, value) = line
             .split_once('=')
-            .ok_or_else(|| "La sesión contiene una línea inválida.".to_owned())?;
+            .ok_or_else(|| "La copia guardada contiene una línea inválida.".to_owned())?;
         match key {
             "source" => {
                 if source.is_some() {
-                    return Err("La sesión contiene más de un origen.".to_owned());
+                    return Err("La copia guardada contiene más de un origen.".to_owned());
                 }
                 source = Some(decode_hex(value, "source")?);
             }
             "skip_same" => {
                 if skip_same.is_some() {
-                    return Err("La sesión duplica skip_same.".to_owned());
+                    return Err("La copia guardada duplica skip_same.".to_owned());
                 }
                 skip_same = Some(parse_bool(value, "skip_same")?);
             }
             "keep_going" => {
                 if keep_going.is_some() {
-                    return Err("La sesión duplica keep_going.".to_owned());
+                    return Err("La copia guardada duplica keep_going.".to_owned());
                 }
                 keep_going = Some(parse_bool(value, "keep_going")?);
             }
             "dest" => {
                 if dests.len() >= MAX_DESTINATIONS {
                     return Err(format!(
-                        "La sesión supera el máximo de {MAX_DESTINATIONS} destinos."
+                        "La copia guardada supera el máximo de {MAX_DESTINATIONS} destinos."
                     ));
                 }
                 dests.push(decode_hex(value, "dest")?);
             }
-            _ => return Err(format!("Campo de sesión desconocido: {key}.")),
+            _ => return Err(format!("Campo de copia guardada desconocido: {key}.")),
         }
     }
 
-    let session = CopySession {
-        source: source.ok_or_else(|| "La sesión no contiene source.".to_owned())?,
+    CopyPlan::new(
+        source.ok_or_else(|| "La copia guardada no contiene source.".to_owned())?,
         dests,
-        skip_same: skip_same.ok_or_else(|| "La sesión no contiene skip_same.".to_owned())?,
-        keep_going: keep_going.ok_or_else(|| "La sesión no contiene keep_going.".to_owned())?,
-    };
-    validate(&session)?;
-    Ok(session)
+        skip_same.ok_or_else(|| "La copia guardada no contiene skip_same.".to_owned())?,
+        keep_going.ok_or_else(|| "La copia guardada no contiene keep_going.".to_owned())?,
+    )
 }
 
 pub fn with_default_extension(path: PathBuf) -> PathBuf {
@@ -169,13 +142,13 @@ pub fn with_default_extension(path: PathBuf) -> PathBuf {
 
 pub fn save(path: &Path, session: &CopySession) -> Result<(), String> {
     let text = render(session)?;
-    storage::atomic_write(path, text.as_bytes(), "la sesión")
+    storage::atomic_write(path, text.as_bytes(), "la copia guardada")
 }
 
 pub fn load(path: &Path) -> Result<CopySession, String> {
-    let bytes = storage::read_regular_file(path, MAX_SESSION_BYTES, "la sesión")?;
+    let bytes = storage::read_regular_file(path, MAX_SESSION_BYTES, "la copia guardada")?;
     let text = std::str::from_utf8(&bytes)
-        .map_err(|_| "La sesión no contiene UTF-8 válido.".to_owned())?;
+        .map_err(|_| "La copia guardada no contiene UTF-8 válido.".to_owned())?;
     parse(text)
 }
 
