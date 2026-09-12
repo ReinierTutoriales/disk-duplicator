@@ -544,7 +544,7 @@ impl eframe::App for CopierApp {
                                 job.set_paused(!paused);
                             }
                         }
-                    } else if !starting {
+                    } else if can_start_new_job(starting, engine_running) {
                         let button = egui::Button::new(
                             RichText::new("Iniciar copia")
                                 .strong()
@@ -564,7 +564,7 @@ impl eframe::App for CopierApp {
                         }
                     } else {
                         ui.spinner();
-                        ui.weak("Preparando…");
+                        ui.weak(if starting { "Preparando…" } else { "Finalizando…" });
                     }
                 });
             });
@@ -583,16 +583,30 @@ impl eframe::App for CopierApp {
                         .sum::<f64>()
                         / snaps.len() as f64;
 
-                    let total_bps = if all_terminal || paused {
-                        0.0
-                    } else {
+                    let aggregate_write_bps: f64 = snaps
+                        .iter()
+                        .map(|progress| {
+                            visible_bps(
+                                progress.bps_recent,
+                                progress.last_tick,
+                                progress.phase,
+                                paused,
+                            )
+                        })
+                        .sum();
+                    let fanout_bps = logical_fanout_bps(
                         snaps
                             .iter()
+                            .filter(|progress| progress.phase == DestPhase::Copying)
                             .map(|progress| {
-                                shown_bps(progress.bps_recent, progress.last_tick)
-                            })
-                            .sum()
-                    };
+                                visible_bps(
+                                    progress.bps_recent,
+                                    progress.last_tick,
+                                    progress.phase,
+                                    paused,
+                                )
+                            }),
+                    );
 
                     let eta = if paused {
                         "En pausa".to_owned()
@@ -660,15 +674,23 @@ impl eframe::App for CopierApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak(format!(
-                                        "{} · ETA {eta}",
-                                        format_bytes(job.bytes_total.load(Ordering::Relaxed))
-                                    ));
-                                    ui.label(
-                                        RichText::new(format!("Vel. {}", format_bps(total_bps)))
-                                            .strong()
-                                            .size(11.5),
-                                    );
+                                    let total_size =
+                                        format_bytes(job.bytes_total.load(Ordering::Relaxed));
+                                    if verifying {
+                                        ui.weak(format!("{total_size} · validación final BLAKE3"));
+                                    } else {
+                                        ui.weak(format!("{total_size} · ETA copia {eta}"));
+                                    }
+                                    let speed_text = if verifying {
+                                        "FAN-OUT —".to_owned()
+                                    } else {
+                                        format!("FAN-OUT {}", format_bps(fanout_bps))
+                                    };
+                                    ui.label(RichText::new(speed_text).strong().size(11.5))
+                                        .on_hover_text(format!(
+                                            "Escritura agregada a destinos: {}",
+                                            format_bps(aggregate_write_bps)
+                                        ));
                                 },
                             );
                         });
@@ -784,16 +806,10 @@ impl eframe::App for CopierApp {
                                                             )
                                                             .show_percentage(),
                                                     );
-                                                    let terminal = matches!(
-                                                        progress.phase,
-                                                        DestPhase::Done
-                                                            | DestPhase::Failed
-                                                            | DestPhase::Cancelled
-                                                    );
                                                     let speed = visible_bps(
                                                         progress.bps_recent,
                                                         progress.last_tick,
-                                                        terminal,
+                                                        progress.phase,
                                                         paused,
                                                     );
                                                     ui.horizontal(|ui| {
@@ -813,13 +829,8 @@ impl eframe::App for CopierApp {
                                                         );
                                                     });
 
-                                                    let terminal = matches!(
-                                                        progress.phase,
-                                                        DestPhase::Done
-                                                            | DestPhase::Failed
-                                                            | DestPhase::Cancelled
-                                                    );
-                                                    let last_file = if terminal
+                                                    let last_file = if progress.phase
+                                                        != DestPhase::Copying
                                                         || progress.last_file.is_empty()
                                                     {
                                                         None

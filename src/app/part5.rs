@@ -46,11 +46,27 @@ mod tests {
     }
 
     #[test]
-    fn terminal_and_paused_speed_is_always_zero() {
+    fn only_copying_phase_reports_throughput() {
         let now = Instant::now();
-        assert_eq!(visible_bps(900_000_000.0, now, true, false), 0.0);
-        assert_eq!(visible_bps(900_000_000.0, now, false, true), 0.0);
-        assert!(visible_bps(900_000_000.0, now, false, false) > 0.0);
+        assert_eq!(visible_bps(900_000_000.0, now, DestPhase::Done, false), 0.0);
+        assert_eq!(visible_bps(900_000_000.0, now, DestPhase::Verifying, false), 0.0);
+        assert_eq!(visible_bps(900_000_000.0, now, DestPhase::Copying, true), 0.0);
+        assert!(visible_bps(900_000_000.0, now, DestPhase::Copying, false) > 0.0);
+    }
+
+    #[test]
+    fn fanout_rate_is_not_inflated_by_destination_count() {
+        let logical = logical_fanout_bps([108.1, 108.7, 108.8, 108.6]);
+        assert!((logical - 108.1).abs() < f64::EPSILON);
+        assert_eq!(logical_fanout_bps([]), 0.0);
+    }
+
+    #[test]
+    fn previous_supervisor_blocks_new_job_but_not_drop_preparation() {
+        assert!(!can_start_new_job(false, true));
+        assert!(can_start_new_job(false, false));
+        assert!(!can_start_new_job(true, false));
+        assert!(!drop_input_locked(false, false));
     }
 
     #[test]

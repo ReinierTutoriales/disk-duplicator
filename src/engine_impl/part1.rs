@@ -211,7 +211,6 @@ enum FanoutItem {
 enum OperationPhase {
     Write,
     Sync,
-    Verify,
     Commit,
 }
 
@@ -251,7 +250,7 @@ impl DestControl {
         let (phase, started) = *self.operation.lock().unwrap();
         match phase {
             OperationPhase::Write => last_write_progress.elapsed() >= WRITE_STALL_THRESHOLD,
-            OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
+            OperationPhase::Sync | OperationPhase::Commit => {
                 started.elapsed() >= LONG_OP_THRESHOLD
             }
         }
@@ -261,7 +260,7 @@ impl DestControl {
         let (phase, _) = *self.operation.lock().unwrap();
         match phase {
             OperationPhase::Write => WRITE_STALL_THRESHOLD.as_secs(),
-            OperationPhase::Sync | OperationPhase::Verify | OperationPhase::Commit => {
+            OperationPhase::Sync | OperationPhase::Commit => {
                 LONG_OP_THRESHOLD.as_secs()
             }
         }

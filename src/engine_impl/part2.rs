@@ -274,8 +274,6 @@ fn fanout_worker(
     slot: usize,
     opts: CopyOpts,
 ) {
-    const VERIFY_BUFFER: usize = 8 * 1024 * 1024;
-
     let start = Instant::now();
     let mut effective_written = 0u64;
     let mut current: Option<CurrentFile> = None;
@@ -299,7 +297,6 @@ fn fanout_worker(
         return;
     }
 
-    let mut verify_buf = opts.verify.then(|| vec![0u8; VERIFY_BUFFER]);
     let mut journal = match StateJournal::open(&dest) {
         Ok(j) => j,
         Err(e) => {
@@ -534,47 +531,11 @@ fn fanout_worker(
                     break;
                 }
 
-                if let Some(buf) = verify_buf.as_mut() {
-                    set_phase(&state, slot, DestPhase::Verifying, None);
-                    control.enter_operation(OperationPhase::Verify);
-                    let verify_result = hash_file_with_buffer_control(&tmp, buf, Some(&state), Some(&control));
-                    control.enter_operation(OperationPhase::Write);
-                    match verify_result {
-                        Ok(actual) if actual == expected => {}
-                        Ok(_) => {
-                            cleanup_part(&dest, &dst);
-                            rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
-                            record_file_error(
-                                &state,
-                                slot,
-                                format!("BLAKE3 no coincide: {}", dst.display()),
-                            );
-                            set_phase(&state, slot, DestPhase::Copying, None);
-                            if !opts.keep_going {
-                                control.alive.store(false, Ordering::Release);
-                                break;
-                            }
-                            continue;
-                        }
-                        Err(e) => {
-                            cleanup_part(&dest, &dst);
-                            rollback_write_progress(&state, slot, cur.copied, &mut effective_written, start);
-                            if !control.alive.load(Ordering::Acquire) { break; }
-                            if e == "Cancelado" {
-                                control.alive.store(false, Ordering::Release);
-                                break;
-                            }
-                            record_file_error(&state, slot, e);
-                            set_phase(&state, slot, DestPhase::Copying, None);
-                            if !opts.keep_going {
-                                control.alive.store(false, Ordering::Release);
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                    set_phase(&state, slot, DestPhase::Copying, None);
-                }
+                // Physical BLAKE3 is deliberately deferred to the final supervisor pass.
+                // Doing it here stalls this destination, fills the bounded FAN-OUT queues,
+                // and throttles every other destination behind the verifier. The journal
+                // and manifest still record the source hash, and preflight re-validates
+                // resumed entries physically before trusting them.
 
                 if !control.alive.load(Ordering::Acquire) {
                     cleanup_part(&dest, &dst);
@@ -710,6 +671,11 @@ fn fanout_worker(
     let errs = state.dests.lock().unwrap()[slot].files_err;
     if !control.alive.load(Ordering::Acquire) {
         set_phase(&state, slot, DestPhase::Failed, None);
+    } else if opts.verify {
+        // The copy worker is finished, but the job is not complete until the supervisor
+        // performs the final physical BLAKE3 validation. Keeping the phase non-terminal
+        // prevents the UI from announcing completion or accepting a replacement job early.
+        set_phase(&state, slot, DestPhase::Verifying, None);
     } else if errs == 0 {
         set_phase(&state, slot, DestPhase::Done, None);
     } else {

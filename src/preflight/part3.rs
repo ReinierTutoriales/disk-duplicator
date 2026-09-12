@@ -86,6 +86,18 @@ fn supervise_job(
             return;
         }
 
+        if opts.verify {
+            let mut progress = state.dests.lock().unwrap();
+            for dp in progress.iter_mut() {
+                if !matches!(dp.phase, DestPhase::Failed | DestPhase::Cancelled) {
+                    dp.phase = DestPhase::Verifying;
+                    dp.bps = 0.0;
+                    dp.bps_recent = 0.0;
+                    dp.last_file.clear();
+                }
+            }
+        }
+
         let source_problem = source_change(
             &source.root,
             &source.files,

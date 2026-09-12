@@ -603,7 +603,7 @@ impl CopierApp {
                                         .color(Theme::accent(self.use_light_theme)),
                                 );
                                 ui.label(
-                                    RichText::new("Una carpeta · múltiples destinos")
+                                    RichText::new("Archivo o carpeta · múltiples destinos")
                                         .color(Theme::muted(self.use_light_theme)),
                                 );
                                 ui.add_space(SPACING_SM);
