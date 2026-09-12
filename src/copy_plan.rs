@@ -70,6 +70,9 @@ pub fn append_unique_destinations(
 ) -> usize {
     let mut added = 0usize;
     for path in selected {
+        if existing.len() >= MAX_DESTINATIONS {
+            break;
+        }
         let path = path.trim().to_owned();
         if path.is_empty() || same_path(&path, source) {
             continue;
@@ -153,6 +156,20 @@ mod tests {
             true,
         )
         .is_err());
+    }
+
+    #[test]
+    fn destination_editing_never_exceeds_plan_limit() {
+        let mut existing: Vec<String> = (0..MAX_DESTINATIONS - 1)
+            .map(|index| format!(r"D:\Dest{index}"))
+            .collect();
+        let added = append_unique_destinations(
+            r"C:\Source",
+            &mut existing,
+            [r"E:\One".to_owned(), r"F:\Two".to_owned()],
+        );
+        assert_eq!(added, 1);
+        assert_eq!(existing.len(), MAX_DESTINATIONS);
     }
 
     #[test]
