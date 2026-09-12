@@ -493,6 +493,88 @@ impl CopierApp {
         }
     }
 
+    fn draw_copy_options(&mut self, ui: &mut egui::Ui, busy: bool) {
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.skip_same, "Omitir archivos iguales")
+                    .on_hover_text("Evita copiar de nuevo archivos que ya coinciden.");
+                ui.checkbox(&mut self.keep_going, "Continuar si un destino falla")
+                    .on_hover_text("Los demás destinos continúan si uno presenta un error.");
+            });
+        });
+    }
+
+    fn draw_copy_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        paused: bool,
+        starting: bool,
+        engine_running: bool,
+        start_disabled: Option<&str>,
+    ) {
+        if running {
+            if let Some(job) = &self.job {
+                let cancel = egui::Button::new(
+                    RichText::new("Cancelar")
+                        .strong()
+                        .color(Theme::error(self.use_light_theme)),
+                )
+                .fill(Theme::card(self.use_light_theme))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    Theme::border(self.use_light_theme),
+                ));
+                if ui
+                    .add_sized([92.0, FLUENT_CONTROL_HEIGHT], cancel)
+                    .on_hover_text("Cancelar de forma segura la copia actual")
+                    .clicked()
+                {
+                    job.request_cancel();
+                }
+
+                let pause_label = if paused { "Continuar" } else { "Pausar" };
+                let pause_button = egui::Button::new(
+                    RichText::new(pause_label)
+                        .strong()
+                        .color(Theme::accent(self.use_light_theme)),
+                )
+                .fill(Theme::selected(self.use_light_theme))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    Theme::accent(self.use_light_theme),
+                ));
+                if ui
+                    .add_sized([98.0, FLUENT_CONTROL_HEIGHT], pause_button)
+                    .clicked()
+                {
+                    job.set_paused(!paused);
+                }
+            }
+        } else if can_start_new_job(starting, engine_running) {
+            let button = egui::Button::new(
+                RichText::new("Iniciar copia")
+                    .strong()
+                    .color(Theme::on_accent(self.use_light_theme)),
+            )
+            .fill(Theme::accent(self.use_light_theme))
+            .stroke(egui::Stroke::NONE)
+            .min_size(egui::vec2(124.0, FLUENT_CONTROL_HEIGHT));
+            let ready_to_start = start_disabled.is_none();
+            let start_hint = start_disabled.unwrap_or("Iniciar copia a todos los destinos");
+            if ui
+                .add_enabled(ready_to_start, button)
+                .on_hover_text(start_hint)
+                .clicked()
+            {
+                self.start();
+            }
+        } else {
+            ui.spinner();
+            ui.weak(if starting { "Preparando…" } else { "Finalizando…" });
+        }
+    }
+
     fn theme_choice(
         ui: &mut egui::Ui,
         current: ThemePreference,
