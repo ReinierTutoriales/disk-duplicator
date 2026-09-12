@@ -100,6 +100,9 @@ public static class CopyEngine
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
     private const int PreallocationThreshold = 4 * 1024 * 1024;
+    // Files at or below one writer chunk use Windows write-through instead of
+    // paying for a separate FlushFileBuffers call after the write.
+    private const int WriteThroughFileThreshold = WriteChunkSize;
     private const long MinimumBufferBudget = 256L * 1024 * 1024;
     private const long InitialBufferBudget = 512L * 1024 * 1024;
     private const long MaximumBufferBudget = 4L * 1024 * 1024 * 1024;
@@ -829,16 +832,14 @@ public static class CopyEngine
         var transient = StateLayout.TransientPaths(worker.Root, destination);
         var part = transient.PartPath;
         TryDelete(part);
-        var stream = new FileStream(part, new FileStreamOptions
-        {
-            Mode = FileMode.CreateNew,
-            Access = FileAccess.Write,
-            Share = FileShare.None,
-            Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-            BufferSize = 1,
-            PreallocationSize = entry.Size >= PreallocationThreshold ? entry.Size : 0,
-        });
-        return new CurrentFile(entry, destination, part, transient.BackupPath, stream);
+        var writeThrough = entry.Size <= WriteThroughFileThreshold;
+        var stream = OpenPartStream(
+            part,
+            FileMode.CreateNew,
+            offset: 0,
+            writeThrough,
+            entry.Size >= PreallocationThreshold ? entry.Size : 0);
+        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, writeThrough);
     }
 
     private static async Task WriteWithRetryAsync(
@@ -854,7 +855,7 @@ public static class CopyEngine
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             try
             {
-                current.Stream ??= ReopenPart(current.PartPath, current.Copied);
+                current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
                 var remaining = data;
                 while (!remaining.IsEmpty)
                 {
@@ -910,10 +911,15 @@ public static class CopyEngine
 
         if (current.Stream is not null)
         {
-            // BufferSize=1 disables FileStream buffering; one durable flush is enough.
-            var flushStarted = Stopwatch.GetTimestamp();
-            current.Stream.Flush(flushToDisk: true);
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+            if (!current.WriteThrough)
+            {
+                // Large files use cached sequential writes and one explicit durable flush.
+                var flushStarted = Stopwatch.GetTimestamp();
+                current.Stream.Flush(flushToDisk: true);
+                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+            }
+            // For small files FileOptions.WriteThrough already forces each write through
+            // the Windows cache to the device, avoiding a second FlushFileBuffers round-trip.
             current.Stream.Dispose();
             current.Stream = null;
         }
@@ -1168,17 +1174,30 @@ public static class CopyEngine
         fileSize <= LargeBufferSize ? LargeBufferSize :
         BlockSize;
 
-    private static FileStream ReopenPart(string path, long offset)
+    private static FileStream ReopenPart(string path, long offset, bool writeThrough) =>
+        OpenPartStream(path, FileMode.Open, offset, writeThrough, preallocationSize: 0);
+
+    private static FileStream OpenPartStream(
+        string path,
+        FileMode mode,
+        long offset,
+        bool writeThrough,
+        long preallocationSize)
     {
+        var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
+        if (writeThrough)
+            options |= FileOptions.WriteThrough;
         var stream = new FileStream(path, new FileStreamOptions
         {
-            Mode = FileMode.Open,
+            Mode = mode,
             Access = FileAccess.Write,
             Share = FileShare.None,
-            Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+            Options = options,
             BufferSize = 1,
+            PreallocationSize = preallocationSize,
         });
-        stream.Position = offset;
+        if (offset != 0)
+            stream.Position = offset;
         return stream;
     }
 
@@ -1933,13 +1952,15 @@ public static class CopyEngine
         string destinationPath,
         string partPath,
         string backupPath,
-        FileStream stream)
+        FileStream stream,
+        bool writeThrough)
     {
         public FileEntry Entry { get; } = entry;
         public string DestinationPath { get; } = destinationPath;
         public string PartPath { get; } = partPath;
         public string BackupPath { get; } = backupPath;
         public FileStream? Stream { get; set; } = stream;
+        public bool WriteThrough { get; } = writeThrough;
         public long Copied { get; set; }
         public bool Failed { get; set; }
     }

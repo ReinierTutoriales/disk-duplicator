@@ -539,6 +539,43 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task WriteThroughSmallFilePathPreservesExactDataAndVerification()
+    {
+        using var temp = new TempDirectory("writethrough-small-files");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var small = new byte[4096];
+        var medium = new byte[1024 * 1024];
+        var boundary = new byte[4 * 1024 * 1024];
+        var large = new byte[4 * 1024 * 1024 + 1];
+        new Random(161803).NextBytes(small);
+        new Random(161804).NextBytes(medium);
+        new Random(161805).NextBytes(boundary);
+        new Random(161806).NextBytes(large);
+        await File.WriteAllBytesAsync(Path.Combine(source, "small.bin"), small);
+        await File.WriteAllBytesAsync(Path.Combine(source, "medium.bin"), medium);
+        await File.WriteAllBytesAsync(Path.Combine(source, "boundary.bin"), boundary);
+        await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), large);
+        var destinations = Enumerable.Range(0, 3)
+            .Select(i => Directory.CreateDirectory(Path.Combine(temp.Path, $"d{i}")).FullName)
+            .ToArray();
+        await using var job = CopyEngine.Start(
+            CopyPlan.Create(source, destinations, false, false),
+            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
+        AssertHealthy(job);
+        foreach (var root in destinations)
+        {
+            var copied = Path.Combine(root, "Origen");
+            CollectionAssert.AreEqual(small, await File.ReadAllBytesAsync(Path.Combine(copied, "small.bin")));
+            CollectionAssert.AreEqual(medium, await File.ReadAllBytesAsync(Path.Combine(copied, "medium.bin")));
+            CollectionAssert.AreEqual(boundary, await File.ReadAllBytesAsync(Path.Combine(copied, "boundary.bin")));
+            CollectionAssert.AreEqual(large, await File.ReadAllBytesAsync(Path.Combine(copied, "large.bin")));
+        }
+        // Only the >4 MiB file should require an explicit FlushFileBuffers per destination.
+        Assert.AreEqual(destinations.Length, job.DiagnosticsSnapshot().DurableFlushes);
+    }
+
+    [TestMethod]
     public async Task DiagnosticsSnapshotMeasuresCopyAndVerificationHotPaths()
     {
         using var temp = new TempDirectory("telemetry-hotpaths");
