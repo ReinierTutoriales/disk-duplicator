@@ -35,6 +35,17 @@ mod tests {
     }
 
     #[test]
+    fn terminal_cleanup_does_not_block_a_new_drop() {
+        assert!(drop_input_locked(true, false));
+        assert!(drop_input_locked(false, true));
+        assert!(!drop_input_locked(false, false));
+
+        let visual_running_during_cleanup = ui_copy_active(true, true);
+        assert!(!visual_running_during_cleanup);
+        assert!(!drop_input_locked(false, visual_running_during_cleanup));
+    }
+
+    #[test]
     fn terminal_and_paused_speed_is_always_zero() {
         let now = Instant::now();
         assert_eq!(visible_bps(900_000_000.0, now, true, false), 0.0);

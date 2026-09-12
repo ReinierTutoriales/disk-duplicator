@@ -434,6 +434,10 @@ fn ui_copy_active(engine_running: bool, all_terminal: bool) -> bool {
     engine_running && !all_terminal
 }
 
+fn drop_input_locked(starting: bool, visual_running: bool) -> bool {
+    starting || visual_running
+}
+
 fn visible_bps(bps: f64, last_tick: Instant, terminal: bool, paused: bool) -> f64 {
     if terminal || paused {
         0.0
