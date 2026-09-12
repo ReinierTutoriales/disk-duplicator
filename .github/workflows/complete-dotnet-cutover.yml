@@ -53,13 +53,10 @@ jobs:
           $text = $text.Replace('RecoveryManager.PrepareAndNormalize(destination, [file])', 'RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file])')
           Set-Content -Path $tests -Value $text -Encoding utf8NoBOM
 
-      - name: Remove legacy Rust implementation
+      - name: Remove legacy Rust product implementation
         shell: pwsh
         run: |
           git rm -r --ignore-unmatch .cargo src Cargo.toml Cargo.lock build.rs app.manifest
-          git rm --ignore-unmatch .github/workflows/build.yml
-          git rm --ignore-unmatch .github/workflows/dotnet-migration.yml
-          git rm --ignore-unmatch .github/workflows/integrate-dotnet-recovery.yml
           git rm --ignore-unmatch .github/integrate_dotnet_recovery.py
 
       - name: Write .NET-only repository metadata
@@ -150,54 +147,7 @@ jobs:
           TestResults/
           '@ | Set-Content .gitignore -Encoding utf8NoBOM
 
-      - name: Add permanent Windows .NET CI
-        shell: pwsh
-        run: |
-          @'
-          name: Windows .NET CI
-
-          on:
-            push:
-              branches: [main]
-              paths:
-                - 'dotnet/**'
-                - 'RepartoCopier.sln'
-                - '.github/workflows/windows-dotnet.yml'
-                - 'README.md'
-                - 'TESTING.md'
-            workflow_dispatch:
-
-          permissions:
-            contents: read
-
-          jobs:
-            validate:
-              runs-on: windows-latest
-              timeout-minutes: 30
-              steps:
-                - uses: actions/checkout@v7.0.1
-                - uses: actions/setup-dotnet@v5
-                  with:
-                    dotnet-version: '10.0.x'
-                - name: Restore core tests
-                  run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
-                - name: Test core Release
-                  run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
-                - name: Restore WinUI
-                  run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
-                - name: Build WinUI Release
-                  run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
-                - name: Assert .NET-only tracked sources
-                  shell: pwsh
-                  run: |
-                    $forbidden = @(git ls-files | Where-Object { $_ -match '(^|/)Cargo\.(toml|lock)$|(^|/)build\.rs$|\.rs$|^\.cargo/' })
-                    if ($forbidden.Count -gt 0) {
-                      $forbidden | ForEach-Object { Write-Error "Legacy source remains: $_" }
-                      throw 'Repository must remain C#/.NET-only.'
-                    }
-          '@ | Set-Content .github/workflows/windows-dotnet.yml -Encoding utf8NoBOM
-
-      - name: Assert no Rust sources remain
+      - name: Assert no Rust product sources remain
         shell: pwsh
         run: |
           $forbidden = @(git ls-files | Where-Object { $_ -match '(^|/)Cargo\.(toml|lock)$|(^|/)build\.rs$|\.rs$|^\.cargo/' })
@@ -218,12 +168,11 @@ jobs:
       - name: Build WinUI Release
         run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
 
-      - name: Commit validated C# WinUI cutover
+      - name: Commit validated C# WinUI product cutover
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/complete-dotnet-cutover.yml
           git add -A
-          git commit -m "refactor: complete C# WinUI migration"
+          git commit -m "refactor: complete C# WinUI product migration"
           git push origin HEAD:main
