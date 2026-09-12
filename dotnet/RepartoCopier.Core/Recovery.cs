@@ -516,7 +516,7 @@ internal static class RecoveryManager
                 var read = stream.Read(buffer, 0, bufferSize);
                 if (read == 0)
                     break;
-                hasher.Update(buffer.AsSpan(0, read));
+                hasher.UpdateWithJoin(buffer.AsSpan(0, read));
             }
             return hasher.Finalize().AsSpan().ToArray();
         }

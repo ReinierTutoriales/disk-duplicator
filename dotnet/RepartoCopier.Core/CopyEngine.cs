@@ -425,7 +425,7 @@ public static class CopyEngine
 
             totalRead += read;
             var hashStarted = Stopwatch.GetTimestamp();
-            hasher.Update(rented.AsSpan(0, read));
+            hasher.UpdateWithJoin(rented.AsSpan(0, read));
             job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
             var recipients = active.Where(worker => worker.IsActive).ToArray();
             if (recipients.Length == 0)
@@ -607,7 +607,7 @@ public static class CopyEngine
 
                 totalRead += read;
                 var hashStarted = Stopwatch.GetTimestamp();
-                hasher.Update(rented.AsSpan(0, read));
+                hasher.UpdateWithJoin(rented.AsSpan(0, read));
                 job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
                 try
@@ -1062,12 +1062,12 @@ public static class CopyEngine
                 var hashStarted = Stopwatch.GetTimestamp();
                 if (resources is null)
                 {
-                    hasher.Update(buffer.AsSpan(0, read));
+                    hasher.UpdateWithJoin(buffer.AsSpan(0, read));
                 }
                 else
                 {
                     using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
-                    hasher.Update(buffer.AsSpan(0, read));
+                    hasher.UpdateWithJoin(buffer.AsSpan(0, read));
                 }
                 if (verification)
                     telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));

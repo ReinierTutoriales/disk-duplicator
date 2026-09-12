@@ -519,6 +519,26 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void ParallelBlake3IncrementalMatchesSerialExactly()
+    {
+        var payload = new byte[17 * 1024 * 1024 + 997];
+        new Random(271828).NextBytes(payload);
+        using var serial = Hasher.New();
+        using var parallel = Hasher.New();
+        const int step = 4 * 1024 * 1024;
+        for (var offset = 0; offset < payload.Length; offset += step)
+        {
+            var length = Math.Min(step, payload.Length - offset);
+            var span = payload.AsSpan(offset, length);
+            serial.Update(span);
+            parallel.UpdateWithJoin(span);
+        }
+        CollectionAssert.AreEqual(
+            serial.Finalize().AsSpan().ToArray(),
+            parallel.Finalize().AsSpan().ToArray());
+    }
+
+    [TestMethod]
     public async Task DiagnosticsSnapshotMeasuresCopyAndVerificationHotPaths()
     {
         using var temp = new TempDirectory("telemetry-hotpaths");
