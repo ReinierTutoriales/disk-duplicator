@@ -12,6 +12,7 @@ public sealed class CopyJob : IAsyncDisposable
     private readonly CancellationTokenSource _cancel = new();
     private readonly AsyncPauseGate _pauseGate = new();
     private readonly IReadOnlyList<DestinationProgress> _progress;
+    private readonly CopyTelemetry _telemetry = new();
     private Task _completion = Task.CompletedTask;
 
     internal CopyJob(IReadOnlyList<DestinationProgress> progress) => _progress = progress;
@@ -24,6 +25,9 @@ public sealed class CopyJob : IAsyncDisposable
 
     public IReadOnlyList<DestinationSnapshot> Snapshot() =>
         _progress.Select(item => item.Snapshot()).ToArray();
+
+    public CopyDiagnosticsSnapshot DiagnosticsSnapshot() => _telemetry.Snapshot();
+    internal CopyTelemetry Telemetry => _telemetry;
 
     public void SetPaused(bool paused) => _pauseGate.SetPaused(paused);
 
@@ -391,14 +395,19 @@ public static class CopyEngine
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             var budgetStarted = Stopwatch.GetTimestamp();
             await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
-            pipeline.RecordBudgetWait(Stopwatch.GetElapsedTime(budgetStarted));
+            var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
+            pipeline.RecordBudgetWait(budgetElapsed);
+            job.Telemetry.RecordBufferWait(budgetElapsed);
+            job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
             var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
             int read;
             try
             {
                 var readStarted = Stopwatch.GetTimestamp();
                 read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
-                pipeline.RecordSourceRead(Stopwatch.GetElapsedTime(readStarted));
+                var readElapsed = Stopwatch.GetElapsedTime(readStarted);
+                pipeline.RecordSourceRead(readElapsed);
+                job.Telemetry.RecordSourceRead(read, readElapsed);
             }
             catch
             {
@@ -415,7 +424,9 @@ public static class CopyEngine
             }
 
             totalRead += read;
+            var hashStarted = Stopwatch.GetTimestamp();
             hasher.Update(rented.AsSpan(0, read));
+            job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
             var recipients = active.Where(worker => worker.IsActive).ToArray();
             if (recipients.Length == 0)
             {
@@ -427,7 +438,9 @@ public static class CopyEngine
             var block = new SharedBlock(rented, read, readBufferSize, recipients.Length, bufferBudget);
             var deliveryStarted = Stopwatch.GetTimestamp();
             await DeliverAsync(recipients, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
-            pipeline.RecordDeliveryWait(Stopwatch.GetElapsedTime(deliveryStarted));
+            var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
+            pipeline.RecordDeliveryWait(deliveryElapsed);
+            job.Telemetry.RecordFanoutWait(deliveryElapsed);
             active.RemoveAll(worker => !worker.IsActive);
             if (active.Count == 0)
                 return null;
@@ -485,7 +498,9 @@ public static class CopyEngine
                 var shared = sourceBlock.TransferToShared(recipients.Length);
                 var deliveryStarted = Stopwatch.GetTimestamp();
                 await DeliverAsync(recipients, new DataMessage(shared), countsData: true, job).ConfigureAwait(false);
-                pipeline.RecordDeliveryWait(Stopwatch.GetElapsedTime(deliveryStarted));
+                var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
+                pipeline.RecordDeliveryWait(deliveryElapsed);
+                job.Telemetry.RecordFanoutWait(deliveryElapsed);
                 active.RemoveAll(worker => !worker.IsActive);
                 if (active.Count == 0)
                 {
@@ -554,7 +569,10 @@ public static class CopyEngine
                 try
                 {
                     await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
-                    pipeline.RecordBudgetWait(Stopwatch.GetElapsedTime(budgetStarted));
+                    var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
+                    pipeline.RecordBudgetWait(budgetElapsed);
+                    job.Telemetry.RecordBufferWait(budgetElapsed);
+                    job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
                 }
                 catch
                 {
@@ -567,7 +585,9 @@ public static class CopyEngine
                 {
                     var readStarted = Stopwatch.GetTimestamp();
                     read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
-                    pipeline.RecordSourceRead(Stopwatch.GetElapsedTime(readStarted));
+                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
+                    pipeline.RecordSourceRead(readElapsed);
+                    job.Telemetry.RecordSourceRead(read, readElapsed);
                 }
                 catch
                 {
@@ -586,7 +606,9 @@ public static class CopyEngine
                 }
 
                 totalRead += read;
+                var hashStarted = Stopwatch.GetTimestamp();
                 hasher.Update(rented.AsSpan(0, read));
+                job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
                 try
                 {
@@ -665,7 +687,10 @@ public static class CopyEngine
         {
             if (countsData)
             {
-                if (!await worker.WaitForAdaptiveWindowAsync(job.Token).ConfigureAwait(false))
+                var queueWaitStarted = Stopwatch.GetTimestamp();
+                var windowOpen = await worker.WaitForAdaptiveWindowAsync(job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordQueueWait(Stopwatch.GetElapsedTime(queueWaitStarted));
+                if (!windowOpen)
                 {
                     ReleaseIfData(message);
                     return;
@@ -735,6 +760,7 @@ public static class CopyEngine
                                 var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
                                 if (chunkData.Block.Length >= WriteChunkSize)
                                     worker.RecordBlockWrite(elapsed);
+                                job.Telemetry.RecordWrite(chunkData.Block.Length, elapsed);
                                 current.Copied += chunkData.Block.Length;
                                 worker.Progress.AddWritten(chunkData.Block.Length);
                             }
@@ -760,7 +786,7 @@ public static class CopyEngine
                         orphanData.Block.Release();
                         break;
                     case EndMessage end when current is not null:
-                        FinishFile(worker, current, end.Hash, options, recovery);
+                        FinishFile(worker, current, end.Hash, options, recovery, job);
                         if (!current.Failed)
                             expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
                         current = null;
@@ -865,7 +891,8 @@ public static class CopyEngine
         CurrentFile current,
         byte[] expectedHash,
         CopyOptions options,
-        RecoveryCheckpointWriter recovery)
+        RecoveryCheckpointWriter recovery,
+        CopyJob job)
     {
         if (current.Failed) return;
         if (current.Copied != current.Entry.Size)
@@ -884,7 +911,9 @@ public static class CopyEngine
         if (current.Stream is not null)
         {
             // BufferSize=1 disables FileStream buffering; one durable flush is enough.
+            var flushStarted = Stopwatch.GetTimestamp();
             current.Stream.Flush(flushToDisk: true);
+            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
             current.Stream.Dispose();
             current.Stream = null;
         }
@@ -894,8 +923,11 @@ public static class CopyEngine
             throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
 
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
+        var commitStarted = Stopwatch.GetTimestamp();
         CommitPart(current.PartPath, current.DestinationPath, current.BackupPath);
+        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
+        var recoveryStarted = Stopwatch.GetTimestamp();
         recovery.Append(
             new RecoveryFile(
                 current.Entry.SourcePath,
@@ -903,6 +935,7 @@ public static class CopyEngine
                 current.Entry.Size,
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
+        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
         worker.Progress.MarkDone();
     }
 
@@ -939,7 +972,7 @@ public static class CopyEngine
                     workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
                     break;
                 }
-                var actual = await HashFileAsync(destination, job.Token, resources).ConfigureAwait(false);
+                var actual = await HashFileAsync(destination, job.Token, resources, job.Telemetry, verification: true).ConfigureAwait(false);
                 if (!actual.AsSpan().SequenceEqual(expected))
                 {
                     workers[slot].Fail($"BLAKE3 no coincide: {destination}");
@@ -1002,7 +1035,9 @@ public static class CopyEngine
     private static async Task<byte[]> HashFileAsync(
         string path,
         CancellationToken token,
-        ResourceGovernor? resources = null)
+        ResourceGovernor? resources = null,
+        CopyTelemetry? telemetry = null,
+        bool verification = false)
     {
         using var hasher = Hasher.New();
         var buffer = ArrayPool<byte>.Shared.Rent(4 * 1024 * 1024);
@@ -1018,8 +1053,13 @@ public static class CopyEngine
             });
             while (true)
             {
+                var readStarted = Stopwatch.GetTimestamp();
                 var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token).ConfigureAwait(false);
+                var readElapsed = Stopwatch.GetElapsedTime(readStarted);
+                if (verification)
+                    telemetry?.RecordVerifyRead(read, readElapsed);
                 if (read == 0) break;
+                var hashStarted = Stopwatch.GetTimestamp();
                 if (resources is null)
                 {
                     hasher.Update(buffer.AsSpan(0, read));
@@ -1029,6 +1069,8 @@ public static class CopyEngine
                     using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
                     hasher.Update(buffer.AsSpan(0, read));
                 }
+                if (verification)
+                    telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
             }
             return hasher.Finalize().AsSpan().ToArray();
         }
@@ -1584,6 +1626,11 @@ public static class CopyEngine
         internal long UsedBytes
         {
             get { lock (_gate) return _usedBytes; }
+        }
+
+        internal long TargetBytes
+        {
+            get { lock (_gate) return _targetBytes; }
         }
 
         internal AdaptiveByteBudget(long initialBytes, long maximumBytes)

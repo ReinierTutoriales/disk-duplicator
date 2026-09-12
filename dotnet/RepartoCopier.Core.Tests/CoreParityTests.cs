@@ -519,6 +519,36 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task DiagnosticsSnapshotMeasuresCopyAndVerificationHotPaths()
+    {
+        using var temp = new TempDirectory("telemetry-hotpaths");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[20 * 1024 * 1024 + 113];
+        new Random(112358).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+        var destinations = Enumerable.Range(0, 2)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
+        AssertHealthy(job);
+
+        var metrics = job.DiagnosticsSnapshot();
+        Assert.IsTrue(metrics.SourceReadBytes >= payload.Length);
+        Assert.IsTrue(metrics.SourceHashBytes >= payload.Length);
+        Assert.IsTrue(metrics.WrittenBytes >= (long)payload.Length * destinations.Length);
+        Assert.IsTrue(metrics.VerifyReadBytes >= (long)payload.Length * destinations.Length);
+        Assert.IsTrue(metrics.VerifyHashBytes >= (long)payload.Length * destinations.Length);
+        Assert.IsTrue(metrics.PeakBufferedBytes > 0);
+        Assert.IsTrue(metrics.MaximumObservedBufferTargetBytes >= metrics.PeakBufferedBytes);
+        Assert.AreEqual(destinations.Length, metrics.DurableFlushes);
+        Assert.AreEqual(destinations.Length, metrics.Commits);
+        Assert.AreEqual(destinations.Length, metrics.RecoveryEvents);
+    }
+
+    [TestMethod]
     public async Task AdaptivePipelinePrefetchPreservesExactLargeFileFanOut()
     {
         using var temp = new TempDirectory("adaptive-pipeline-prefetch");
