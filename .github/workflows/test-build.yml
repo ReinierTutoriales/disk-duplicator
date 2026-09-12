@@ -1,0 +1,59 @@
+name: Build corrected test package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/test-build.yml'
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore and test core
+        run: |
+          dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+          dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Publish corrected WinUI build
+        run: |
+          dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+          dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o publish
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish\* -DestinationPath RepartoCopier-main-fanout-corrected-win-x64.zip -Force
+
+      - name: Upload corrected package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RepartoCopier-main-fanout-corrected-win-x64
+          path: RepartoCopier-main-fanout-corrected-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary workflow
+        shell: pwsh
+        run: |
+          Remove-Item .github/workflows/test-build.yml -Force
+          git config user.name "ReinierTutoriales"
+          git config user.email "86568548+ReinierTutoriales@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: remove temporary test packaging workflow"
+          git push origin HEAD:main
