@@ -34,6 +34,9 @@ const STARTING_REPAINT: Duration = Duration::from_millis(80);
 const ERROR_FLASH: Duration = Duration::from_secs(5);
 const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const PATH_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const PATH_EDIT_DEBOUNCE: Duration = Duration::from_millis(250);
+const DESTINATION_CHIP_MAX_HEIGHT: f32 = 74.0;
+const HEADER_DETAIL_MIN_REMAINING: f32 = 560.0;
 const SPEED_DECAY_GRACE_SECS: f64 = 0.5;
 const SPEED_DECAY_TAU_SECS: f64 = 2.0;
 const DEFAULT_ACCENT_RGB: u32 = 0x0000_78D4;
@@ -396,6 +399,10 @@ fn progress_fraction(written: u64, total: u64, phase: DestPhase) -> f32 {
 
 fn source_layout_stacked(available_width: f32) -> bool {
     available_width < 720.0
+}
+
+fn actions_layout_stacked(available_width: f32) -> bool {
+    available_width < 760.0
 }
 
 fn start_disabled_reason(

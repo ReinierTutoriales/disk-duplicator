@@ -105,6 +105,19 @@ mod tests {
     }
 
     #[test]
+    fn action_row_stacks_before_controls_compete_for_width() {
+        assert!(actions_layout_stacked(680.0));
+        assert!(actions_layout_stacked(759.0));
+        assert!(!actions_layout_stacked(760.0));
+        assert!(!actions_layout_stacked(960.0));
+    }
+
+    #[test]
+    fn path_validation_debounce_is_shorter_than_periodic_refresh() {
+        assert!(PATH_EDIT_DEBOUNCE < PATH_CHECK_INTERVAL);
+    }
+
+    #[test]
     fn disabled_start_always_has_a_specific_reason() {
         assert_eq!(
             start_disabled_reason("", 0, 0),
