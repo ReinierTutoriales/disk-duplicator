@@ -50,6 +50,7 @@ public sealed class CopyJob : IAsyncDisposable
 public static class CopyEngine
 {
     private const int BlockSize = 16 * 1024 * 1024;
+    private const int WriteChunkSize = 4 * 1024 * 1024;
     private const int ReservedRam = 512 * 1024 * 1024;
     private const int QueueDepth = 16;
     private const int Retries = 2;
@@ -535,7 +536,14 @@ public static class CopyEngine
             try
             {
                 current.Stream ??= ReopenPart(current.PartPath, current.Copied);
-                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                var remaining = data;
+                while (!remaining.IsEmpty)
+                {
+                    var length = Math.Min(WriteChunkSize, remaining.Length);
+                    await current.Stream.WriteAsync(remaining[..length], job.Token).ConfigureAwait(false);
+                    remaining = remaining[length..];
+                    worker.NoteProgress();
+                }
                 return;
             }
             catch (OperationCanceledException) { throw; }
