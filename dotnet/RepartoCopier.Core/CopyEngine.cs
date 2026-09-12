@@ -877,7 +877,6 @@ public static class CopyEngine
             .ToArray();
         var tasks = activeSlots.Select(async slot =>
         {
-            using var lease = await resources.EnterCpuWorkAsync(job.Token).ConfigureAwait(false);
             progress[slot].SetPhase(DestinationPhase.Verifying);
             foreach (var entry in copy.Files)
             {
@@ -891,7 +890,14 @@ public static class CopyEngine
                     workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
                     break;
                 }
-                var actual = await HashFileAsync(destination, job.Token).ConfigureAwait(false);
+                ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                WindowsPath.EnsureRegularFile(destination, "El archivo durante verificación");
+                if (new FileInfo(destination).Length != entry.Size)
+                {
+                    workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
+                    break;
+                }
+                var actual = await HashFileAsync(destination, job.Token, resources).ConfigureAwait(false);
                 if (!actual.AsSpan().SequenceEqual(expected))
                 {
                     workers[slot].Fail($"BLAKE3 no coincide: {destination}");
@@ -926,12 +932,17 @@ public static class CopyEngine
             }
             if (candidates.Count == 0) continue;
 
-            var sourceHash = await HashFileAsync(entry.SourcePath, token).ConfigureAwait(false);
+            ValidateSourceSnapshot(entry);
+            var sourceHash = await HashFileAsync(entry.SourcePath, token, resources).ConfigureAwait(false);
+            ValidateSourceSnapshot(entry);
             var checks = candidates.Select(async slot =>
             {
-                using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
                 var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
-                var destinationHash = await HashFileAsync(destination, token).ConfigureAwait(false);
+                ValidateRuntimeDestinationPath(copy.DestinationRoots[slot], entry.RelativePath);
+                WindowsPath.EnsureRegularFile(destination, "El archivo candidato de SkipSame");
+                if (new FileInfo(destination).Length != entry.Size)
+                    return;
+                var destinationHash = await HashFileAsync(destination, token, resources).ConfigureAwait(false);
                 if (destinationHash.AsSpan().SequenceEqual(sourceHash))
                 {
                     masks[fileIndex][slot] = true;
@@ -946,7 +957,10 @@ public static class CopyEngine
     private static bool[][] CreateEmptySkipMasks(int files, int destinations) =>
         Enumerable.Range(0, files).Select(_ => new bool[destinations]).ToArray();
 
-    private static async Task<byte[]> HashFileAsync(string path, CancellationToken token)
+    private static async Task<byte[]> HashFileAsync(
+        string path,
+        CancellationToken token,
+        ResourceGovernor? resources = null)
     {
         using var hasher = Hasher.New();
         var buffer = ArrayPool<byte>.Shared.Rent(4 * 1024 * 1024);
@@ -964,7 +978,15 @@ public static class CopyEngine
             {
                 var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token).ConfigureAwait(false);
                 if (read == 0) break;
-                hasher.Update(buffer.AsSpan(0, read));
+                if (resources is null)
+                {
+                    hasher.Update(buffer.AsSpan(0, read));
+                }
+                else
+                {
+                    using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
+                    hasher.Update(buffer.AsSpan(0, read));
+                }
             }
             return hasher.Finalize().AsSpan().ToArray();
         }
@@ -1157,7 +1179,7 @@ public static class CopyEngine
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : FanoutMessage;
 
-    private sealed class SharedBlock
+    internal sealed class SharedBlock
     {
         private byte[]? _buffer;
         private int _references;
@@ -1178,14 +1200,20 @@ public static class CopyEngine
 
         public void Release()
         {
-            if (Interlocked.Decrement(ref _references) != 0) return;
-            var buffer = Interlocked.Exchange(ref _buffer, null);
-            if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
+            var remaining = Interlocked.Decrement(ref _references);
+            if (remaining > 0)
+                return;
+            if (remaining < 0)
+                throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
+
+            var buffer = Interlocked.Exchange(ref _buffer, null)
+                ?? throw new InvalidOperationException("SharedBlock perdió su buffer antes de la última liberación.");
+            ArrayPool<byte>.Shared.Return(buffer);
             _budget.Release(_reservedBytes);
         }
     }
 
-    private sealed class PipelineGovernor
+    internal sealed class PipelineGovernor
     {
         private const int MinPrefetch = 1;
         private const int InitialPrefetch = 2;
@@ -1193,7 +1221,7 @@ public static class CopyEngine
         private const int SamplesPerDecision = 8;
 
         private readonly object _gate = new();
-        private readonly Queue<TaskCompletionSource> _slotWaiters = new();
+        private readonly Queue<PrefetchWaiter> _slotWaiters = new();
         private int _prefetchLimit = InitialPrefetch;
         private int _inFlight;
         private int _samples;
@@ -1201,6 +1229,11 @@ public static class CopyEngine
         private double _deliveryWaitMs;
         private double _budgetWaitMs;
         private double _readMs;
+
+        internal int InFlight
+        {
+            get { lock (_gate) return _inFlight; }
+        }
 
         public ValueTask AcquirePrefetchSlotAsync(CancellationToken token)
         {
@@ -1211,27 +1244,50 @@ public static class CopyEngine
                     _inFlight++;
                     return ValueTask.CompletedTask;
                 }
-                var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var waiter = new PrefetchWaiter();
                 _slotWaiters.Enqueue(waiter);
-                return new ValueTask(waiter.Task.WaitAsync(token));
+                return new ValueTask(WaitForPrefetchSlotAsync(waiter, token));
+            }
+        }
+
+        private async Task WaitForPrefetchSlotAsync(PrefetchWaiter waiter, CancellationToken token)
+        {
+            try
+            {
+                await waiter.Ready.Task.WaitAsync(token).ConfigureAwait(false);
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    if (waiter.Granted)
+                    {
+                        waiter.Granted = false;
+                        if (_inFlight <= 0)
+                            throw new InvalidOperationException("Contabilidad de prefetch inválida durante cancelación.");
+                        _inFlight--;
+                    }
+                    else
+                    {
+                        waiter.Cancelled = true;
+                    }
+                    PumpSlotsLocked();
+                }
+                throw;
             }
         }
 
         public void ReleasePrefetchSlot()
         {
-            TaskCompletionSource? ready = null;
             lock (_gate)
             {
-                if (_inFlight > 0)
-                    _inFlight--;
+                if (_inFlight <= 0)
+                    throw new InvalidOperationException("Se intentó liberar un slot de prefetch no adquirido.");
+                _inFlight--;
                 EvaluateLocked();
-                if (_inFlight < _prefetchLimit && _slotWaiters.Count > 0)
-                {
-                    ready = _slotWaiters.Dequeue();
-                    _inFlight++;
-                }
+                PumpSlotsLocked();
             }
-            ready?.TrySetResult();
         }
 
         public void RecordConsumerWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Consumer);
@@ -1274,13 +1330,27 @@ public static class CopyEngine
             _deliveryWaitMs = 0;
             _budgetWaitMs = 0;
             _readMs = 0;
+            PumpSlotsLocked();
+        }
 
+        private void PumpSlotsLocked()
+        {
             while (_inFlight < _prefetchLimit && _slotWaiters.Count > 0)
             {
                 var waiter = _slotWaiters.Dequeue();
+                if (waiter.Cancelled)
+                    continue;
+                waiter.Granted = true;
                 _inFlight++;
-                waiter.TrySetResult();
+                waiter.Ready.TrySetResult();
             }
+        }
+
+        private sealed class PrefetchWaiter
+        {
+            public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public bool Cancelled { get; set; }
+            public bool Granted { get; set; }
         }
 
         private enum SampleKind
@@ -1292,7 +1362,7 @@ public static class CopyEngine
         }
     }
 
-    private sealed class ResourceGovernor : IDisposable
+    internal sealed class ResourceGovernor : IDisposable
     {
         private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
         private const double CpuGrowThreshold = 0.60;
@@ -1307,6 +1377,11 @@ public static class CopyEngine
         private int _limit = 1;
         private int _active;
         private bool _disposed;
+
+        internal int Active
+        {
+            get { lock (_gate) return _active; }
+        }
 
         public ResourceGovernor()
         {
@@ -1343,7 +1418,17 @@ public static class CopyEngine
             {
                 lock (_gate)
                 {
-                    waiter.Cancelled = true;
+                    if (waiter.Granted)
+                    {
+                        waiter.Granted = false;
+                        if (_active <= 0)
+                            throw new InvalidOperationException("Contabilidad de CPU inválida durante cancelación.");
+                        _active--;
+                    }
+                    else
+                    {
+                        waiter.Cancelled = true;
+                    }
                     PumpLocked();
                 }
                 throw;
@@ -1397,6 +1482,7 @@ public static class CopyEngine
                 var waiter = _waiters.Dequeue();
                 if (waiter.Cancelled)
                     continue;
+                waiter.Granted = true;
                 _active++;
                 waiter.Ready.TrySetResult();
             }
@@ -1427,6 +1513,7 @@ public static class CopyEngine
         {
             public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public bool Cancelled { get; set; }
+            public bool Granted { get; set; }
         }
 
         internal sealed class CpuLease : IDisposable
@@ -1443,7 +1530,7 @@ public static class CopyEngine
         }
     }
 
-    private sealed class AdaptiveByteBudget
+    internal sealed class AdaptiveByteBudget
     {
         private readonly object _gate = new();
         private readonly Queue<Waiter> _waiters = new();
@@ -1451,7 +1538,12 @@ public static class CopyEngine
         private long _targetBytes;
         private long _usedBytes;
 
-        private AdaptiveByteBudget(long initialBytes, long maximumBytes)
+        internal long UsedBytes
+        {
+            get { lock (_gate) return _usedBytes; }
+        }
+
+        internal AdaptiveByteBudget(long initialBytes, long maximumBytes)
         {
             _targetBytes = initialBytes;
             _maximumBytes = maximumBytes;
@@ -1490,7 +1582,9 @@ public static class CopyEngine
             List<Waiter>? ready = null;
             lock (_gate)
             {
-                _usedBytes = Math.Max(0, _usedBytes - bytes);
+                if (_usedBytes < bytes)
+                    throw new InvalidOperationException("Se intentó liberar más memoria FAN-OUT de la reservada.");
+                _usedBytes -= bytes;
                 ready = PumpWaitersLocked();
             }
             Complete(ready);
@@ -1507,7 +1601,17 @@ public static class CopyEngine
                 List<Waiter>? ready = null;
                 lock (_gate)
                 {
-                    waiter.Cancelled = true;
+                    if (waiter.Granted)
+                    {
+                        waiter.Granted = false;
+                        if (_usedBytes < waiter.Bytes)
+                            throw new InvalidOperationException("Contabilidad de memoria inválida durante cancelación.");
+                        _usedBytes -= waiter.Bytes;
+                    }
+                    else
+                    {
+                        waiter.Cancelled = true;
+                    }
                     ready = PumpWaitersLocked();
                 }
                 Complete(ready);
@@ -1567,6 +1671,7 @@ public static class CopyEngine
                 if (!TryAcquireLocked(waiter.Bytes))
                     break;
                 _waiters.Dequeue();
+                waiter.Granted = true;
                 (ready ??= []).Add(waiter);
             }
             return ready;
@@ -1596,6 +1701,7 @@ public static class CopyEngine
             public int Bytes { get; } = bytes;
             public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public bool Cancelled { get; set; }
+            public bool Granted { get; set; }
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
@@ -1691,7 +1797,7 @@ public static class CopyEngine
             if (depth < 0)
             {
                 Interlocked.Exchange(ref _queueDepth, 0);
-                depth = 0;
+                throw new InvalidOperationException("La profundidad de cola del destino quedó negativa.");
             }
             Progress.SetQueueDepth(depth);
             PulseQueueDrained();
