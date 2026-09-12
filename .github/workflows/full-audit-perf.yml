@@ -1,0 +1,64 @@
+name: Full performance and state audit
+
+on:
+  push:
+    paths:
+      - '.github/workflows/full-audit-perf.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Apply audited performance patch
+        shell: pwsh
+        run: python .github/full_audit_perf.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Diff check
+        shell: pwsh
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Clippy all targets
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Release tests
+        run: cargo test --release --all-targets
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Commit verified audit and clean helpers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Remove-Item .github/full_audit_perf.py -Force
+          Remove-Item .github/workflows/full-audit-perf.yml -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/engine_impl/part2.rs src/engine_impl/part4.rs src/preflight/part3.rs src/app/part1.rs src/app/part3.rs src/app/part4.rs src/app/part5.rs .github/full_audit_perf.py .github/workflows/full-audit-perf.yml
+          git commit -m "perf: remove fanout verification stalls and fix throughput metrics"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh workflow run build.yml --ref main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
