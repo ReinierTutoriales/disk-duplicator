@@ -120,7 +120,7 @@ public sealed partial class MainWindow : Window
         DestinationCountText.Text = FormatDestinationCount(0);
     }
 
-    private void Start_Click(object sender, RoutedEventArgs e)
+    private async void Start_Click(object sender, RoutedEventArgs e)
     {
         if (_job is not null) return;
         try
@@ -136,13 +136,19 @@ public sealed partial class MainWindow : Window
                 SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
-            _job = CopyEngine.Start(plan, options);
             SetEditingEnabled(false);
             StartButton.IsEnabled = false;
+            PauseButton.IsEnabled = false;
+            CancelButton.IsEnabled = false;
+            PauseButton.Content = "Pausar";
+            StatusText.Text = "Analizando origen y destinos…";
+
+            _job = await CopyEngine.StartAsync(plan, options);
             PauseButton.IsEnabled = true;
             CancelButton.IsEnabled = true;
-            PauseButton.Content = "Pausar";
-            StatusText.Text = "Preparando copia…";
+            StatusText.Text = plan.SkipSame
+                ? "Comparando archivos existentes con BLAKE3…"
+                : "Iniciando copia FAN-OUT…";
             _progressRows.Clear();
             foreach (var snapshot in _job.Snapshot())
                 _progressRows.Add(new ProgressRow(snapshot));
@@ -151,6 +157,11 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _job = null;
+            SetEditingEnabled(true);
+            StartButton.IsEnabled = true;
+            PauseButton.IsEnabled = false;
+            CancelButton.IsEnabled = false;
             ShowError(ex.Message);
         }
     }

@@ -132,6 +132,25 @@ public static class CopyEngine
         return job;
     }
 
+    public static async Task<CopyJob> StartAsync(
+        CopyPlan plan,
+        CopyOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        options ??= new CopyOptions(
+            Verify: true,
+            SkipSame: plan.SkipSame,
+            KeepGoing: plan.KeepGoing);
+
+        var prepared = await Task.Run(() => Preflight(plan), cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var progress = prepared.DestinationRoots
+            .Select(root => new DestinationProgress(root, prepared.TotalBytes))
+            .ToArray();
+        var job = new CopyJob(progress);
+        job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
+        return job;
+    }
     private static PreparedCopy Preflight(CopyPlan plan)
     {
         var requestedSource = Path.GetFullPath(plan.Source);
