@@ -51,13 +51,20 @@ jobs:
       - name: Commit verified session hardening and clean helpers
         shell: pwsh
         run: |
+          # build.yml is validated as repository infrastructure separately. The Actions token
+          # cannot update workflow files, so keep the permanent workflow out of this product commit.
+          git restore .github/workflows/build.yml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Remove-Item .github/session_hardening.py
           Remove-Item .github/workflows/session-audit.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           git commit -m "feat: add resumable copy sessions and safe persistence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git push origin main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           gh workflow run build.yml --ref main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
