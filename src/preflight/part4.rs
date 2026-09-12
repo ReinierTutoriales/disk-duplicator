@@ -31,6 +31,40 @@ mod tests {
     }
 
     #[test]
+    fn single_file_source_plan_contains_only_selected_file() {
+        let root = temp_dir("single-file-source");
+        let selected = root.join("selected.bin");
+        fs::write(&selected, b"selected").unwrap();
+        fs::write(root.join("sibling.bin"), b"sibling").unwrap();
+
+        let plan = plan_source(&selected).unwrap();
+        assert!(plan.single_file);
+        assert_eq!(plan.engine_root, selected.canonicalize().unwrap().parent().unwrap());
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].rel, PathBuf::from("selected.bin"));
+        assert!(plan.dirs.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn single_file_preflight_targets_destination_root_without_copying_siblings() {
+        let root = temp_dir("single-file-preflight");
+        let selected = root.join("selected.bin");
+        let dest = root.join("destination");
+        fs::write(&selected, b"selected").unwrap();
+        fs::write(root.join("sibling.bin"), b"sibling").unwrap();
+        fs::create_dir_all(&dest).unwrap();
+
+        let (plan, _) = run_preflight(&selected, std::slice::from_ref(&dest), opts(true)).unwrap();
+        assert!(plan.single_file);
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].rel, PathBuf::from("selected.bin"));
+        assert_eq!(plan.dests.len(), 1);
+        assert_eq!(plan.dests[0], dest.canonicalize().unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn scan_never_filters_regular_files_by_name() {
         let root = temp_dir("all-files");
         fs::write(root.join("normal.bin"), b"1").unwrap();
@@ -391,10 +425,13 @@ mod tests {
             worker_barrier.wait();
         });
         let supervisor = supervise_job(
-            source,
+            SupervisorSource {
+                root: source,
+                files: Arc::new(Vec::new()),
+                dirs: Arc::new(Vec::new()),
+                single_file: false,
+            },
             vec![dest],
-            Arc::new(Vec::new()),
-            Arc::new(Vec::new()),
             Arc::clone(&state),
             vec![worker],
             opts(false),

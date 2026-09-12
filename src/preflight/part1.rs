@@ -31,6 +31,7 @@ struct PreflightResult {
     dests: Vec<PathBuf>,
     files: Arc<Vec<PlannedFile>>,
     dirs: Arc<Vec<PathBuf>>,
+    single_file: bool,
 }
 
 fn metadata_mtime_ns(meta: &fs::Metadata) -> u128 {

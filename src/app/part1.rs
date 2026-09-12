@@ -398,7 +398,7 @@ fn start_disabled_reason(
     path_error_count: usize,
 ) -> Option<&'static str> {
     if source.trim().is_empty() {
-        Some("Selecciona una carpeta de origen")
+        Some("Selecciona un archivo o carpeta de origen")
     } else if destination_count == 0 {
         Some("Agrega al menos un destino")
     } else if path_error_count > 0 {

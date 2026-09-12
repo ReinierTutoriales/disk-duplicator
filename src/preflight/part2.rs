@@ -137,24 +137,85 @@ fn validate_destinations(source: &Path, dests: &[PathBuf]) -> Result<Vec<PathBuf
     Ok(canonical)
 }
 
+struct SourcePlan {
+    engine_root: PathBuf,
+    overlap_path: PathBuf,
+    files: Vec<PlannedFile>,
+    dirs: Vec<PathBuf>,
+    single_file: bool,
+}
+
+fn plan_source(source: &Path) -> Result<SourcePlan, String> {
+    let meta = fs::symlink_metadata(source)
+        .map_err(|e| format!("No se pudo inspeccionar el origen {}: {e}", source.display()))?;
+    if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+        return Err(format!(
+            "No se permite usar un enlace simbólico, junction o reparse point como origen: {}.",
+            source.display()
+        ));
+    }
+
+    let canonical = canonical_existing(source, "origen")?;
+    if meta.is_dir() {
+        let (files, dirs) = scan_source(&canonical)?;
+        return Ok(SourcePlan {
+            engine_root: canonical.clone(),
+            overlap_path: canonical,
+            files,
+            dirs,
+            single_file: false,
+        });
+    }
+
+    if !meta.is_file() {
+        return Err("El origen debe ser un archivo regular o una carpeta.".to_owned());
+    }
+
+    let file_name = canonical
+        .file_name()
+        .ok_or_else(|| "El archivo de origen no tiene un nombre válido.".to_owned())?
+        .to_os_string();
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| "El archivo de origen no tiene una carpeta contenedora válida.".to_owned())?
+        .to_path_buf();
+    let file = File::open(&canonical)
+        .map_err(|e| format!("No se puede leer {}: {e}", canonical.display()))?;
+    let file_meta = file
+        .metadata()
+        .map_err(|e| format!("metadata {}: {e}", canonical.display()))?;
+    if !file_meta.is_file() {
+        return Err("El origen dejó de ser un archivo regular durante el análisis.".to_owned());
+    }
+
+    Ok(SourcePlan {
+        engine_root: parent,
+        overlap_path: canonical,
+        files: vec![PlannedFile {
+            rel: PathBuf::from(file_name),
+            size: file_meta.len(),
+            mtime_ns: metadata_mtime_ns(&file_meta),
+        }],
+        dirs: Vec::new(),
+        single_file: true,
+    })
+}
+
 fn run_preflight(
     source: &Path,
     dests: &[PathBuf],
     opts: CopyOpts,
 ) -> Result<PreflightPlan, String> {
-    if !source.is_dir() {
-        return Err("El origen debe ser una carpeta.".into());
-    }
     if dests.is_empty() {
         return Err("Agrega al menos un destino.".into());
     }
 
-    reject_reparse_root(source, "origen")?;
-    let canonical_source = canonical_existing(source, "origen")?;
-    let canonical_dests = validate_destinations(&canonical_source, dests)?;
-    let (files, dirs) = scan_source(&canonical_source)?;
-    let files = Arc::new(files);
-    let dirs = Arc::new(dirs);
+    let source_plan = plan_source(source)?;
+    let canonical_dests = validate_destinations(&source_plan.overlap_path, dests)?;
+    let canonical_source = source_plan.engine_root;
+    let files = Arc::new(source_plan.files);
+    let dirs = Arc::new(source_plan.dirs);
+    let single_file = source_plan.single_file;
     let mut verified_skips = Vec::with_capacity(canonical_dests.len());
     let mut source_hashes = SourceHashCache::with_capacity(files.len());
     let mut verify_buf = vec![0u8; VERIFY_BUF];
@@ -177,12 +238,18 @@ fn run_preflight(
             dests: canonical_dests,
             files,
             dirs,
+            single_file,
         },
         Arc::new(verified_skips),
     ))
 }
 
-fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Option<String> {
+fn source_change(
+    source: &Path,
+    files: &[PlannedFile],
+    dirs: &[PathBuf],
+    single_file: bool,
+) -> Option<String> {
     for info in files {
         let path = source.join(&info.rel);
         let Ok(meta) = fs::symlink_metadata(&path) else {
@@ -217,6 +284,10 @@ fn source_change(source: &Path, files: &[PlannedFile], dirs: &[PathBuf]) -> Opti
                 path.display()
             ));
         }
+    }
+
+    if single_file {
+        return None;
     }
 
     match scan_source(source) {

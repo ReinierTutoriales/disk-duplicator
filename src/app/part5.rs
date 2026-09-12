@@ -49,7 +49,7 @@ mod tests {
     fn disabled_start_always_has_a_specific_reason() {
         assert_eq!(
             start_disabled_reason("", 0, 0),
-            Some("Selecciona una carpeta de origen")
+            Some("Selecciona un archivo o carpeta de origen")
         );
         assert_eq!(
             start_disabled_reason(r"C:\Origen", 0, 0),

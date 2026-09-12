@@ -7,7 +7,7 @@ impl CopierApp {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let status = if source.is_empty() {
-            "Listo para copiar una carpeta a múltiples destinos".to_owned()
+            "Listo para copiar un archivo o carpeta a múltiples destinos".to_owned()
         } else {
             "Origen precargado · agrega uno o más destinos".to_owned()
         };
@@ -222,10 +222,13 @@ impl CopierApp {
                 let shown = display_path(&path.to_string_lossy());
                 ui.label(RichText::new(compact_path(&shown, 64)).strong());
                 ui.label(
-                    RichText::new("FAN-OUT copia árboles de carpetas completos. Para no copiar contenido distinto al que esperas, un archivo suelto no se convierte automáticamente en origen.")
+                    RichText::new("Puedes distribuir este archivo exacto por FAN-OUT o usar su carpeta contenedora como origen.")
                         .color(Theme::muted(self.use_light_theme)),
                 );
                 ui.add_space(SPACING_SM);
+                if ui.button("Copiar este archivo y elegir destinos").clicked() {
+                    use_source = Some(path.clone());
+                }
                 if let Some(parent) = path.parent() {
                     if ui.button("Usar la carpeta que contiene este archivo").clicked() {
                         use_source = Some(parent.to_path_buf());
@@ -281,8 +284,8 @@ impl CopierApp {
             let path = PathBuf::from(source);
             if !path.exists() {
                 errors.push("El origen no existe.".to_owned());
-            } else if !path.is_dir() {
-                errors.push("El origen no es una carpeta.".to_owned());
+            } else if !path.is_dir() && !path.is_file() {
+                errors.push("El origen no es un archivo regular ni una carpeta.".to_owned());
             }
         }
 
@@ -316,7 +319,7 @@ impl CopierApp {
 
     fn start(&mut self) {
         if self.source.trim().is_empty() {
-            self.flash_error("Selecciona una carpeta de origen.".to_owned());
+            self.flash_error("Selecciona un archivo o carpeta de origen.".to_owned());
             return;
         }
 
