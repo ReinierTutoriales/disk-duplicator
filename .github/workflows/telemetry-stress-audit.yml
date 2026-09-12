@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/apply_telemetry_stress_v2.py'
+      - '.github/fix_telemetry_v2_indent.py'
       - '.github/workflows/telemetry-stress-audit.yml'
   workflow_dispatch:
 
@@ -26,6 +27,8 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
+      - name: Align exact queue anchor
+        run: python .github/fix_telemetry_v2_indent.py
       - name: Apply exact telemetry instrumentation and stress harness
         run: python .github/apply_telemetry_stress_v2.py
       - name: Restore core tests
