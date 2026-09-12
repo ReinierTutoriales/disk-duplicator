@@ -135,6 +135,42 @@ impl CopierApp {
             .map(|path| path.to_string_lossy().into_owned())
     }
 
+    fn pick_source_file(&self) -> Option<String> {
+        let mut dialog = rfd::FileDialog::new().set_title("Seleccionar archivo de origen");
+        let source = PathBuf::from(self.source.trim());
+        let start = if source.is_file() {
+            source.parent().map(PathBuf::from)
+        } else {
+            Self::existing_dir(&self.source)
+        }
+        .or_else(|| self.dests.last().and_then(|dest| Self::existing_dir(dest)));
+        if let Some(start) = start {
+            dialog = dialog.set_directory(start);
+        }
+        dialog
+            .pick_file()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn source_picker_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Examinar", |ui| {
+            if ui.button("Carpeta…").clicked() {
+                ui.close_menu();
+                if let Some(path) = self.pick_source_dir() {
+                    self.source = path;
+                }
+            }
+            if ui.button("Archivo…").clicked() {
+                ui.close_menu();
+                if let Some(path) = self.pick_source_file() {
+                    self.source = path;
+                }
+            }
+        })
+        .response
+        .on_hover_text("Seleccionar carpeta o archivo de origen");
+    }
+
     fn pick_destination_dirs(&self) -> Option<Vec<String>> {
         let mut dialog = rfd::FileDialog::new().set_title("Seleccionar uno o más destinos");
         let start = self

@@ -474,12 +474,12 @@ fn drop_action_button(
         egui::Button::new(RichText::new(label).strong().color(Theme::on_accent(light)))
             .fill(accent)
             .stroke(egui::Stroke::NONE)
-            .rounding(egui::Rounding::same(10.0))
+            .rounding(egui::Rounding::same(FLUENT_RADIUS_MD))
     } else {
         egui::Button::new(RichText::new(label).strong().color(accent))
             .fill(Theme::selected(light))
             .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
-            .rounding(egui::Rounding::same(10.0))
+            .rounding(egui::Rounding::same(FLUENT_RADIUS_MD))
     };
     ui.add_sized([ui.available_width(), 40.0], button)
 }
