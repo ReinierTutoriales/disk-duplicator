@@ -197,6 +197,7 @@ impl CopierApp {
         })
         .collapsible(false)
         .resizable(false)
+        .default_width(430.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .frame(window_frame(ctx, self.use_light_theme))
         .show(ctx, |ui| match &pending {
@@ -205,12 +206,25 @@ impl CopierApp {
                 ui.label(RichText::new(compact_path(&shown, 64)).strong());
                 ui.label(RichText::new("¿Qué quieres hacer con esta carpeta?").color(Theme::muted(self.use_light_theme)));
                 ui.add_space(SPACING_SM);
-                if ui.button("Usar como origen y elegir destinos").clicked() {
+                if drop_action_button(
+                    ui,
+                    "Usar como origen y elegir destinos",
+                    true,
+                    self.use_light_theme,
+                )
+                .clicked()
+                {
                     use_source = Some(path.clone());
                 }
                 if !self.source.trim().is_empty()
                     && !same_path(&self.source, &path.to_string_lossy())
-                    && ui.button("Agregar como destino").clicked()
+                    && drop_action_button(
+                        ui,
+                        "Agregar como destino",
+                        false,
+                        self.use_light_theme,
+                    )
+                    .clicked()
                 {
                     add_destination = Some(path.clone());
                 }
@@ -226,11 +240,25 @@ impl CopierApp {
                         .color(Theme::muted(self.use_light_theme)),
                 );
                 ui.add_space(SPACING_SM);
-                if ui.button("Copiar este archivo y elegir destinos").clicked() {
+                if drop_action_button(
+                    ui,
+                    "Copiar este archivo y elegir destinos",
+                    true,
+                    self.use_light_theme,
+                )
+                .clicked()
+                {
                     use_source = Some(path.clone());
                 }
                 if let Some(parent) = path.parent() {
-                    if ui.button("Usar la carpeta que contiene este archivo").clicked() {
+                    if drop_action_button(
+                        ui,
+                        "Usar la carpeta que contiene este archivo",
+                        false,
+                        self.use_light_theme,
+                    )
+                    .clicked()
+                    {
                         use_source = Some(parent.to_path_buf());
                     }
                 }

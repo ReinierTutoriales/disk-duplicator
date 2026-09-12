@@ -28,6 +28,21 @@ mod tests {
     }
 
     #[test]
+    fn terminal_snapshots_end_the_visual_copy_before_engine_cleanup_finishes() {
+        assert!(ui_copy_active(true, false));
+        assert!(!ui_copy_active(true, true));
+        assert!(!ui_copy_active(false, false));
+    }
+
+    #[test]
+    fn terminal_and_paused_speed_is_always_zero() {
+        let now = Instant::now();
+        assert_eq!(visible_bps(900_000_000.0, now, true, false), 0.0);
+        assert_eq!(visible_bps(900_000_000.0, now, false, true), 0.0);
+        assert!(visible_bps(900_000_000.0, now, false, false) > 0.0);
+    }
+
+    #[test]
     fn accent_foreground_keeps_readable_contrast() {
         let previous = SYSTEM_ACCENT_RGB.load(Ordering::Relaxed);
         SYSTEM_ACCENT_RGB.store(0x00FF_FFFF, Ordering::Relaxed);
