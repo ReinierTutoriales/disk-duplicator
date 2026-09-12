@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 type StartResult = Result<(Arc<JobState>, Vec<JoinHandle<()>>), String>;
+type PathValidationResult = (u64, Vec<String>);
 
 #[derive(Clone, Debug)]
 enum PendingDrop {

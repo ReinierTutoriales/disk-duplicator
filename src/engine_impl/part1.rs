@@ -594,6 +594,7 @@ fn record_write_progress(
     state: &JobState,
     slot: usize,
     size: u64,
+    queue_depth: usize,
     effective_written: &mut u64,
     start: Instant,
 ) {
@@ -601,6 +602,7 @@ fn record_write_progress(
     let mut g = state.dests.lock().unwrap();
     let dp = &mut g[slot];
     dp.written = dp.written.saturating_add(size);
+    dp.queue_depth = queue_depth;
 
     let elapsed = start.elapsed().as_secs_f64();
     if elapsed > 0.0 {
