@@ -1,4 +1,5 @@
 using System.Text;
+using Blake3;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RepartoCopier.Core;
 
@@ -134,6 +135,160 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void RecoveryWritesLegacyCompatibleJournalAndManifest()
+    {
+        using var temp = new TempDirectory("recovery-format");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, [1, 2, 3]);
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var file = RecoveryFileFor(source, "folder\\a.bin");
+        var hash = Hasher.Hash(File.ReadAllBytes(source)).AsSpan().ToArray();
+
+        RecoveryManager.AppendDurable(destination, file, hash);
+
+        Assert.AreEqual(
+            $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}",
+            File.ReadAllText(StateLayout.JournalPath(destination)).TrimEnd());
+        Assert.AreEqual(
+            $"{Convert.ToHexString(hash).ToLowerInvariant()}  {RecoveryManager.ManifestKey(file.RelativePath)}",
+            File.ReadAllText(StateLayout.ManifestPath(destination)).TrimEnd());
+    }
+
+    [TestMethod]
+    public void RecoveryAcceptsOnlyPhysicallyVerifiedLegacyState()
+    {
+        using var temp = new TempDirectory("recovery-proof");
+        var sourceRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "source")).FullName;
+        var source = Path.Combine(sourceRoot, "a.bin");
+        File.WriteAllBytes(source, [10, 20, 30]);
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.Copy(source, Path.Combine(destination, "a.bin"));
+        var file = RecoveryFileFor(source, "a.bin");
+        var hash = Hasher.Hash(File.ReadAllBytes(source)).AsSpan().ToArray();
+        StateLayout.PrepareStateDirectory(destination);
+        File.WriteAllText(
+            StateLayout.JournalPath(destination),
+            $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}\n");
+        File.WriteAllText(
+            StateLayout.ManifestPath(destination),
+            $"{Convert.ToHexString(hash).ToLowerInvariant()}  {RecoveryManager.ManifestKey(file.RelativePath)}\n");
+
+        var valid = RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.IsTrue(valid.Contains(RecoveryManager.StateKey(file)));
+    }
+
+    [TestMethod]
+    public void RecoveryRejectsJournalWithoutManifestProof()
+    {
+        using var temp = new TempDirectory("recovery-no-manifest");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, [1, 2, 3]);
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.Copy(source, Path.Combine(destination, "a.bin"));
+        var file = RecoveryFileFor(source, "a.bin");
+        StateLayout.PrepareStateDirectory(destination);
+        File.WriteAllText(
+            StateLayout.JournalPath(destination),
+            $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}\n");
+
+        var valid = RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.AreEqual(0, valid.Count);
+        Assert.AreEqual(string.Empty, File.ReadAllText(StateLayout.JournalPath(destination)));
+    }
+
+    [TestMethod]
+    public void RecoveryRejectsSameSizeDestinationCorruption()
+    {
+        using var temp = new TempDirectory("recovery-corrupt-dest");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("abc"));
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.WriteAllBytes(Path.Combine(destination, "a.bin"), Encoding.ASCII.GetBytes("xyz"));
+        var file = RecoveryFileFor(source, "a.bin");
+        WriteLegacyRecoveryProof(destination, file, Hasher.Hash(Encoding.ASCII.GetBytes("abc")).AsSpan().ToArray());
+
+        var valid = RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.AreEqual(0, valid.Count);
+    }
+
+    [TestMethod]
+    public void RecoveryRejectsChangedSourceAgainstPersistedManifest()
+    {
+        using var temp = new TempDirectory("recovery-changed-source");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("abc"));
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.WriteAllBytes(Path.Combine(destination, "a.bin"), Encoding.ASCII.GetBytes("abc"));
+        var file = RecoveryFileFor(source, "a.bin");
+        var oldHash = Hasher.Hash(Encoding.ASCII.GetBytes("abc")).AsSpan().ToArray();
+        WriteLegacyRecoveryProof(destination, file, oldHash);
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("xyz"));
+
+        var valid = RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.AreEqual(0, valid.Count);
+    }
+
+    [TestMethod]
+    public void RecoveryUpgradesLegacyKeysToLosslessP2Keys()
+    {
+        using var temp = new TempDirectory("recovery-legacy");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("abc"));
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.Copy(source, Path.Combine(destination, "a.bin"));
+        var file = RecoveryFileFor(source, "a.bin");
+        var hash = Hasher.Hash(File.ReadAllBytes(source)).AsSpan().ToArray();
+        StateLayout.PrepareStateDirectory(destination);
+        File.WriteAllText(
+            StateLayout.JournalPath(destination),
+            $"{{\"key\":\"{RecoveryManager.LegacyStateKey(file)}\"}}\n");
+        File.WriteAllText(
+            StateLayout.ManifestPath(destination),
+            $"{Convert.ToHexString(hash).ToLowerInvariant()}  {RecoveryManager.LegacyManifestKey(file.RelativePath)}\n");
+
+        var valid = RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.IsTrue(valid.Contains(RecoveryManager.StateKey(file)));
+        var journal = File.ReadAllText(StateLayout.JournalPath(destination));
+        StringAssert.Contains(journal, RecoveryManager.StateKey(file));
+        Assert.IsFalse(journal.Contains(RecoveryManager.LegacyStateKey(file), StringComparison.Ordinal));
+        var manifest = File.ReadAllText(StateLayout.ManifestPath(destination));
+        StringAssert.Contains(manifest, RecoveryManager.ManifestKey(file.RelativePath));
+    }
+
+    [TestMethod]
+    public void RecoveryRestoresOwnedBackupAfterInterruptedCommit()
+    {
+        using var temp = new TempDirectory("recovery-backup");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("new"));
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var destinationFile = Path.Combine(destination, "a.bin");
+        var file = RecoveryFileFor(source, "a.bin");
+        StateLayout.PrepareTempDirectory(destination);
+        File.WriteAllBytes(StateLayout.BackupPath(destination, destinationFile), Encoding.ASCII.GetBytes("old"));
+
+        RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]);
+        Assert.AreEqual("old", Encoding.ASCII.GetString(File.ReadAllBytes(destinationFile)));
+    }
+
+    [TestMethod]
+    public void RecoveryRejectsBackupDirectoryInsteadOfDeletingIt()
+    {
+        using var temp = new TempDirectory("recovery-unsafe-backup");
+        var source = Path.Combine(temp.Path, "source.bin");
+        File.WriteAllBytes(source, [1]);
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var destinationFile = Path.Combine(destination, "a.bin");
+        var file = RecoveryFileFor(source, "a.bin");
+        StateLayout.PrepareTempDirectory(destination);
+        Directory.CreateDirectory(StateLayout.BackupPath(destination, destinationFile));
+
+        var error = Assert.ThrowsExactly<IOException>(() =>
+            RecoveryManager.PrepareAndNormalize(Path.GetDirectoryName(source)!, destination, [file]));
+        StringAssert.Contains(error.Message, "Entrada de estado no segura");
+    }
+
+    [TestMethod]
     public async Task FanOutDeliversMultipleBlocksToEveryDestination()
     {
         using var temp = new TempDirectory("fanout-multiblock");
@@ -217,6 +372,24 @@ public sealed class CoreParityTests
         Assert.AreEqual(DestinationPhase.Done, job.Snapshot().Single().Phase);
     }
 
+    private static RecoveryFile RecoveryFileFor(string sourcePath, string relativePath)
+    {
+        var info = new FileInfo(sourcePath);
+        var ns = checked((info.LastWriteTimeUtc.Ticks - DateTime.UnixEpoch.Ticks) * 100L);
+        return new RecoveryFile(sourcePath, relativePath, info.Length, ns);
+    }
+
+    private static void WriteLegacyRecoveryProof(string destination, RecoveryFile file, byte[] hash)
+    {
+        StateLayout.PrepareStateDirectory(destination);
+        File.WriteAllText(
+            StateLayout.JournalPath(destination),
+            $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}\n");
+        File.WriteAllText(
+            StateLayout.ManifestPath(destination),
+            $"{Convert.ToHexString(hash).ToLowerInvariant()}  {RecoveryManager.ManifestKey(file.RelativePath)}\n");
+    }
+
     private static void AssertHealthy(CopyJob job)
     {
         var snapshots = job.Snapshot();
@@ -244,3 +417,4 @@ public sealed class CoreParityTests
         }
     }
 }
+

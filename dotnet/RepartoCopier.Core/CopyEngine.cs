@@ -132,16 +132,39 @@ public static class CopyEngine
             0,
             (sum, file) => checked(sum + (ulong)file.Size));
 
-        foreach (var root in destinationRoots)
+        var recoveryFiles = files
+            .Select(file => new RecoveryFile(
+                file.SourcePath,
+                file.RelativePath,
+                file.Size,
+                file.ModifiedUnixNanoseconds))
+            .ToArray();
+        var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+        for (var slot = 0; slot < destinationRoots.Length; slot++)
         {
+            var root = destinationRoots[slot];
             PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files);
-            PreflightSafety.EnsureFreeSpace(root, scan.Files);
-            StateLayout.PrepareTempDirectory(root);
+            var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles);
+            var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
+            {
+                if (!completed.Contains(RecoveryManager.StateKey(recoveryFiles[fileIndex])))
+                    continue;
+                preverifiedSkips[fileIndex][slot] = true;
+                skippedPaths.Add(files[fileIndex].RelativePath);
+            }
+            PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths);
             foreach (var relative in directories)
                 EnsureDestinationDirectory(root, relative);
         }
 
-        return new PreparedCopy(sourceRoot, destinationRoots, files, directories, totalBytes);
+        return new PreparedCopy(
+            sourceRoot,
+            destinationRoots,
+            files,
+            directories,
+            totalBytes,
+            preverifiedSkips);
     }
 
     private static async Task RunAsync(
@@ -158,6 +181,11 @@ public static class CopyEngine
             var skipMasks = options.SkipSame
                 ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token).ConfigureAwait(false)
                 : CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
+            for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+            {
+                for (var slot = 0; slot < copy.DestinationRoots.Length; slot++)
+                    skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
+            }
 
             var queueDepth = QueueDepthFor(copy.DestinationRoots.Length);
             workers = copy.DestinationRoots
@@ -636,14 +664,15 @@ public static class CopyEngine
         }
     }
 
-    private static void AppendRecoveryState(string root, FileEntry entry, byte[] hash)
-    {
-        var journal = StateLayout.JournalPath(root);
-        var manifest = StateLayout.ManifestPath(root);
-        var key = $"{StateLayout.PersistedPathKey(entry.RelativePath)}|{entry.Size}|{entry.ModifiedUnixNanoseconds}";
-        File.AppendAllText(journal, key + Environment.NewLine);
-        File.AppendAllText(manifest, $"{StateLayout.PersistedPathKey(entry.RelativePath)} {Convert.ToHexString(hash).ToLowerInvariant()}{Environment.NewLine}");
-    }
+    private static void AppendRecoveryState(string root, FileEntry entry, byte[] hash) =>
+        RecoveryManager.AppendDurable(
+            root,
+            new RecoveryFile(
+                entry.SourcePath,
+                entry.RelativePath,
+                entry.Size,
+                entry.ModifiedUnixNanoseconds),
+            hash);
 
     private static void CommitPart(string destinationRoot, string part, string destination)
     {
@@ -801,7 +830,8 @@ public static class CopyEngine
         string[] DestinationRoots,
         IReadOnlyList<FileEntry> Files,
         IReadOnlyList<string> Directories,
-        ulong TotalBytes);
+        ulong TotalBytes,
+        bool[][] PreverifiedSkips);
 
     private sealed record FileEntry(
         string SourcePath,
@@ -918,3 +948,4 @@ public static class CopyEngine
         public bool Failed { get; set; }
     }
 }
+

@@ -85,7 +85,7 @@ internal static class RecoveryManager
             }
             catch (FormatException)
             {
-                // Rust ignores malformed manifest entries for resume trust.
+                // Malformed manifest entries are never trusted for resume.
             }
         }
         return hashes;
@@ -453,3 +453,4 @@ internal static class RecoveryManager
         File.Delete(path);
     }
 }
+
