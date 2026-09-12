@@ -219,7 +219,7 @@ impl eframe::App for CopierApp {
         egui::TopBottomPanel::top("header_v2").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("RepartoCopier").strong());
+                ui.label(RichText::new("RepartoCopier").strong().size(19.0));
                 if ui.available_width() > 430.0 {
                     ui.label(
                         RichText::new("Archivo o carpeta · múltiples destinos")
@@ -231,7 +231,7 @@ impl eframe::App for CopierApp {
                     if ui.add(settings).on_hover_text("Ajustes").clicked() {
                         self.show_settings = true;
                     }
-                    ui.menu_button("Copia", |ui| {
+                    ui.menu_button(RichText::new("Copia").strong(), |ui| {
                         let can_save = !self.source.trim().is_empty() && !self.dests.is_empty();
                         if ui
                             .add_enabled(can_save, egui::Button::new("Salvar copia…   Ctrl+S"))
@@ -370,7 +370,7 @@ impl eframe::App for CopierApp {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
                         .add_sized(
-                            [146.0, 32.0],
+                            [154.0, 34.0],
                             egui::Button::new(
                                 RichText::new("+  Agregar destinos")
                                     .strong()
@@ -381,7 +381,7 @@ impl eframe::App for CopierApp {
                                 1.0_f32,
                                 Theme::border(self.use_light_theme),
                             ))
-                            .rounding(egui::Rounding::same(10.0)),
+                            .rounding(egui::Rounding::same(FLUENT_RADIUS_MD)),
                         )
                         .on_hover_text(
                             "Selecciona uno o varios destinos · Ctrl+D. Usa Ctrl o Shift para selección múltiple.",
@@ -442,8 +442,8 @@ impl eframe::App for CopierApp {
                                 1.0_f32,
                                 Theme::border(self.use_light_theme),
                             ))
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin::symmetric(7.0, 3.0))
+                            .rounding(egui::Rounding::same(FLUENT_RADIUS_SM))
+                            .inner_margin(egui::Margin::symmetric(9.0, 5.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -526,7 +526,7 @@ impl eframe::App for CopierApp {
                                 1.0_f32,
                                 Theme::border(self.use_light_theme),
                             ));
-                            if ui.add_sized([88.0, 30.0], cancel).clicked() {
+                            if ui.add_sized([92.0, 34.0], cancel).clicked() {
                                 job.request_cancel();
                             }
                             let pause_label = if paused { "Continuar" } else { "Pausar" };
@@ -540,7 +540,7 @@ impl eframe::App for CopierApp {
                                 1.0_f32,
                                 Theme::accent(self.use_light_theme),
                             ));
-                            if ui.add_sized([92.0, 30.0], pause_button).clicked() {
+                            if ui.add_sized([98.0, 34.0], pause_button).clicked() {
                                 job.set_paused(!paused);
                             }
                         }
@@ -552,7 +552,7 @@ impl eframe::App for CopierApp {
                         )
                         .fill(Theme::accent(self.use_light_theme))
                         .stroke(egui::Stroke::NONE)
-                        .min_size(egui::vec2(116.0, 30.0));
+                        .min_size(egui::vec2(124.0, 34.0));
                         let start_hint = start_disabled
                             .unwrap_or("Iniciar copia a todos los destinos");
                         if ui
@@ -713,7 +713,7 @@ impl eframe::App for CopierApp {
 
                     ui.add_space(SPACING_XS);
 
-                    const CARD_ROW_HEIGHT: f32 = 105.0;
+                    const CARD_ROW_HEIGHT: f32 = 112.0;
                     const ROW_SPACING: f32 = 6.0;
 
                     let grid_width = ui.available_width();

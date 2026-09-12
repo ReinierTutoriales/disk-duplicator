@@ -22,7 +22,11 @@ enum PendingDrop {
 const SPACING_XS: f32 = 4.0;
 const SPACING_SM: f32 = 8.0;
 const SPACING_MD: f32 = 12.0;
-const SPACING_LG: f32 = 18.0;
+const SPACING_LG: f32 = 20.0;
+const FLUENT_RADIUS_SM: f32 = 6.0;
+const FLUENT_RADIUS_MD: f32 = 8.0;
+const FLUENT_RADIUS_LG: f32 = 12.0;
+const FLUENT_CONTROL_HEIGHT: f32 = 32.0;
 const RUNNING_REPAINT: Duration = Duration::from_millis(200);
 const PAUSED_REPAINT: Duration = Duration::from_millis(500);
 const STARTING_REPAINT: Duration = Duration::from_millis(80);
@@ -266,38 +270,38 @@ impl Theme {
 
     fn panel(light: bool) -> Color32 {
         if light {
+            Color32::from_rgb(246, 246, 246)
+        } else {
+            Color32::from_rgb(28, 28, 28)
+        }
+    }
+
+    fn window(light: bool) -> Color32 {
+        if light {
             Color32::from_rgb(243, 243, 243)
         } else {
             Color32::from_rgb(32, 32, 32)
         }
     }
 
-    fn window(light: bool) -> Color32 {
-        if light {
-            Color32::from_rgb(249, 249, 249)
-        } else {
-            Color32::from_rgb(39, 39, 39)
-        }
-    }
-
     fn card(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(255, 255, 255)
+            Color32::from_rgb(253, 253, 253)
         } else {
-            Color32::from_rgb(45, 45, 45)
+            Color32::from_rgb(44, 44, 44)
         }
     }
 
     fn selected(light: bool) -> Color32 {
-        let percent = if light { 12 } else { 22 };
+        let percent = if light { 8 } else { 16 };
         Self::blend(Self::card(light), Self::accent(light), percent)
     }
 
     fn border(light: bool) -> Color32 {
         if light {
-            Color32::from_rgb(229, 229, 229)
+            Color32::from_rgb(224, 224, 224)
         } else {
-            Color32::from_rgb(61, 61, 61)
+            Color32::from_rgb(58, 58, 58)
         }
     }
 }
@@ -324,9 +328,10 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
     ctx.set_visuals(visuals);
 
     ctx.style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(SPACING_SM, 6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
-        style.visuals.window_rounding = egui::Rounding::same(10.0);
+        style.spacing.item_spacing = egui::vec2(SPACING_SM, SPACING_SM);
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.spacing.interact_size.y = FLUENT_CONTROL_HEIGHT;
+        style.visuals.window_rounding = egui::Rounding::same(FLUENT_RADIUS_LG);
     });
 }
 
@@ -334,15 +339,15 @@ fn card_frame(light: bool) -> egui::Frame {
     egui::Frame::none()
         .fill(Theme::card(light))
         .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 9.0))
+        .rounding(egui::Rounding::same(FLUENT_RADIUS_MD))
+        .inner_margin(egui::Margin::symmetric(14.0, 11.0))
 }
 
 fn window_frame(ctx: &egui::Context, light: bool) -> egui::Frame {
     egui::Frame::window(&ctx.style())
         .fill(Theme::window(light))
         .stroke(egui::Stroke::new(1.0_f32, Theme::border(light)))
-        .rounding(egui::Rounding::same(10.0))
+        .rounding(egui::Rounding::same(FLUENT_RADIUS_LG))
 }
 
 fn format_bytes(bytes: u64) -> String {
