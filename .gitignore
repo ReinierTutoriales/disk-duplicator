@@ -1,4 +1,10 @@
-/target
-*.exe
-*.pdb
-*.vsf
+.vs/
+**/bin/
+**/obj/
+AppPackages/
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.cer
+TestResults/

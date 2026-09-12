@@ -171,7 +171,8 @@ internal static class PreflightSafety
 
     internal static void EnsureFreeSpace(
         string destinationRoot,
-        IReadOnlyList<ScannedFile> files)
+        IReadOnlyList<ScannedFile> files,
+        IReadOnlySet<string>? skippedRelativePaths = null)
     {
         if (files.Count == 0)
             return;
@@ -180,9 +181,12 @@ internal static class PreflightSafety
         var granularity = Math.Max(1UL, volume.AllocationGranularity);
         Int128 committedDelta = 0;
         Int128 peakExtra = 0;
+        ulong bytesToWrite = 0;
 
         foreach (var file in files)
         {
+            if (skippedRelativePaths?.Contains(file.RelativePath) == true)
+                continue;
             var destination = Path.Combine(destinationRoot, file.RelativePath);
             ulong oldAllocation = 0;
             if (File.Exists(destination))
@@ -197,6 +201,7 @@ internal static class PreflightSafety
             }
 
             var newAllocation = RoundUp((ulong)file.Size, granularity);
+            bytesToWrite = SaturatingAdd(bytesToWrite, (ulong)file.Size);
             var duringTemporary = committedDelta + (Int128)newAllocation;
             if (duringTemporary > peakExtra)
                 peakExtra = duringTemporary;
@@ -208,7 +213,7 @@ internal static class PreflightSafety
             : peakExtra >= (Int128)ulong.MaxValue
                 ? ulong.MaxValue
                 : (ulong)peakExtra;
-        var reserve = ReserveForVolume(volume.TotalBytes);
+        var reserve = bytesToWrite == 0 ? 0UL : ReserveForVolume(volume.TotalBytes);
         var required = SaturatingAdd(peak, reserve);
         if (volume.AvailableBytes >= required)
             return;
