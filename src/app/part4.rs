@@ -103,6 +103,31 @@ impl eframe::App for CopierApp {
             start_disabled_reason(&self.source, self.dests.len(), path_error_count);
         let ready_to_start = start_disabled.is_none();
 
+        let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape_pressed {
+            self.show_settings = false;
+            self.show_credits = false;
+        }
+
+        if !busy {
+            let open_source = ctx.input_mut(|input| input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::O)));
+            if open_source {
+                if let Some(path) = self.pick_source_dir() {
+                    self.source = path;
+                }
+            }
+
+            let add_destinations = ctx.input_mut(|input| input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::D)));
+            if add_destinations {
+                if let Some(paths) = self.pick_destination_dirs() {
+                    let added = self.add_destinations(paths);
+                    if added > 0 {
+                        self.status = count_label(added as u64, "destino agregado", "destinos agregados");
+                    }
+                }
+            }
+        }
+
         egui::TopBottomPanel::top("header_v2").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
             ui.horizontal(|ui| {
@@ -178,7 +203,7 @@ impl eframe::App for CopierApp {
                             );
                             if ui
                                 .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                                .on_hover_text("Seleccionar carpeta de origen")
+                                .on_hover_text("Seleccionar carpeta de origen · Ctrl+O")
                                 .clicked()
                             {
                                 if let Some(path) = self.pick_source_dir() {
@@ -208,7 +233,7 @@ impl eframe::App for CopierApp {
                         );
                         if ui
                             .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                            .on_hover_text("Seleccionar carpeta de origen")
+                            .on_hover_text("Seleccionar carpeta de origen · Ctrl+O")
                             .clicked()
                         {
                             if let Some(path) = self.pick_source_dir() {
@@ -232,7 +257,7 @@ impl eframe::App for CopierApp {
                     if ui
                         .add_sized([126.0, 26.0], egui::Button::new("+ Agregar destinos"))
                         .on_hover_text(
-                            "Selecciona uno o varios destinos. Usa Ctrl o Shift para selección múltiple.",
+                            "Selecciona uno o varios destinos · Ctrl+D. Usa Ctrl o Shift para selección múltiple.",
                         )
                         .clicked()
                     {
