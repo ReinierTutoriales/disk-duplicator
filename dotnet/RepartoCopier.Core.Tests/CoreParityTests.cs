@@ -308,6 +308,27 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task FanOutVerifiesEightDestinationsConcurrently()
+    {
+        using var temp = new TempDirectory("fanout-verify-eight");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[1024 * 1024 + 31];
+        new Random(24680).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+        var destinations = Enumerable.Range(0, 8)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+        AssertHealthy(job);
+
+        foreach (var destination in destinations)
+            CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "payload.bin")));
+    }
+
+    [TestMethod]
     public async Task FanOutDeliversMultipleBlocksToEveryDestination()
     {
         using var temp = new TempDirectory("fanout-multiblock");
