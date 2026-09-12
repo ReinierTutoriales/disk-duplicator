@@ -393,6 +393,39 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task FanOutHandlesDenseSmallFileTreeAcrossFourDestinations()
+    {
+        using var temp = new TempDirectory("fanout-small-files");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var expected = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < 256; index++)
+        {
+            var relative = Path.Combine($"d{index % 8}", $"f{index:D4}.bin");
+            var path = Path.Combine(source, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var payload = new byte[1 + (index * 997) % (48 * 1024)];
+            new Random(10_000 + index).NextBytes(payload);
+            await File.WriteAllBytesAsync(path, payload);
+            expected[relative] = payload;
+        }
+
+        var destinations = Enumerable.Range(0, 4)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+        AssertHealthy(job);
+
+        foreach (var destination in destinations)
+        {
+            var root = Path.Combine(destination, "Origen");
+            foreach (var (relative, payload) in expected)
+                CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(root, relative)));
+        }
+    }
+
+    [TestMethod]
     public async Task SingleFileCopiesOnlyThatFile()
     {
         using var temp = new TempDirectory("single-file");
