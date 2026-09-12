@@ -107,14 +107,12 @@ public static class CopyEngine
     private const long InitialBufferBudget = 512L * 1024 * 1024;
     private const long MaximumBufferBudget = 4L * 1024 * 1024 * 1024;
     private const long BufferBudgetGrowthStep = 256L * 1024 * 1024;
-    private const int ChannelCapacity = 16;
-    private const int AdaptiveInitialQueue = 4;
-    private const int AdaptiveMinQueue = 2;
-    private const int AdaptiveMaxQueue = 8;
-    private const int FastSamplesToGrow = 8;
+    // 4 GiB / 16 MiB = 256 maximum live data blocks. At the public
+    // 256-destination ceiling that is 65,536 channel references. The same
+    // global budget also bounds Begin/End-heavy trees whose payload-byte
+    // budget would otherwise see almost no pressure.
+    private const int ControlBacklogCapacity = 64 * 1024;
     private const int Retries = 2;
-    private static readonly TimeSpan FastBlockWrite = TimeSpan.FromMilliseconds(40);
-    private static readonly TimeSpan SlowBlockWrite = TimeSpan.FromMilliseconds(250);
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
@@ -257,6 +255,7 @@ public static class CopyEngine
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
         var pipeline = new PipelineGovernor();
+        var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
         try
         {
             var skipMasks = options.SkipSame
@@ -268,11 +267,11 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
-            var queueDepth = ChannelCapacity;
             workers = copy.DestinationRoots
-                .Select((root, index) => new DestinationWorker(root, index, progress[index], queueDepth))
+                .Select((root, index) => new DestinationWorker(root, index, progress[index], controlBudget))
                 .ToArray();
 
+            var copyPhaseStarted = Stopwatch.GetTimestamp();
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job, expectedHashes))
                 .ToArray();
@@ -302,13 +301,25 @@ public static class CopyEngine
                 writerError = ex;
             }
 
+            job.Telemetry.RecordCopyPhase(Stopwatch.GetElapsedTime(copyPhaseStarted));
+
             if (producerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
 
             if (options.Verify && !token.IsCancellationRequested)
-                await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job, resources).ConfigureAwait(false);
+            {
+                var verifyPhaseStarted = Stopwatch.GetTimestamp();
+                try
+                {
+                    await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job, resources).ConfigureAwait(false);
+                }
+                finally
+                {
+                    job.Telemetry.RecordVerifyPhase(Stopwatch.GetElapsedTime(verifyPhaseStarted));
+                }
+            }
 
             for (var i = 0; i < progress.Length; i++)
             {
@@ -676,7 +687,7 @@ public static class CopyEngine
     }
 
     private static async Task DeliverAsync(
-        IReadOnlyCollection<DestinationWorker> recipients,
+        IReadOnlyList<DestinationWorker> recipients,
         FanoutMessage message,
         bool countsData,
         CopyJob job)
@@ -684,13 +695,27 @@ public static class CopyEngine
         if (recipients.Count == 0)
             return;
 
-        var deliveries = recipients
-            .Select(worker => DeliverOneAsync(worker, message, countsData, job))
-            .ToArray();
-        await Task.WhenAll(deliveries).ConfigureAwait(false);
+        var index = 0;
+        try
+        {
+            for (; index < recipients.Count; index++)
+                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);
+        }
+        catch
+        {
+            // DeliverOneAsync owns and releases the current recipient's data reference
+            // when it throws. References for recipients not visited yet still belong to
+            // this dispatcher and must be released explicitly.
+            if (message is DataMessage data)
+            {
+                for (var remaining = index + 1; remaining < recipients.Count; remaining++)
+                    data.Block.Release();
+            }
+            throw;
+        }
     }
 
-    private static async Task DeliverOneAsync(
+    private static async ValueTask DeliverOneAsync(
         DestinationWorker worker,
         FanoutMessage message,
         bool countsData,
@@ -702,43 +727,61 @@ public static class CopyEngine
             return;
         }
 
-        job.Token.ThrowIfCancellationRequested();
-        await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-        var queued = false;
+        var controlOwned = false;
+        var queueOwned = false;
         try
         {
-            if (countsData)
+            job.Token.ThrowIfCancellationRequested();
+            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+
+            var controlWaitStarted = Stopwatch.GetTimestamp();
+            await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
+            var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
+            job.Telemetry.RecordControlBacklogWait(controlWait);
+            job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
+            controlOwned = true;
+
+            // Fail() can race the initial IsActive read while we wait for a global
+            // control slot. Do not enqueue into a worker that died in that window.
+            if (!worker.IsActive)
             {
-                var queueWaitStarted = Stopwatch.GetTimestamp();
-                var windowOpen = await worker.WaitForAdaptiveWindowAsync(job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordQueueWait(Stopwatch.GetElapsedTime(queueWaitStarted));
-                if (!windowOpen)
-                {
-                    ReleaseIfData(message);
-                    return;
-                }
-                worker.IncrementQueueDepth();
-                queued = true;
+                worker.ControlBudget.Release();
+                controlOwned = false;
+                ReleaseIfData(message);
+                return;
             }
 
-            await worker.Channel.Writer.WriteAsync(message, job.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            if (queued) worker.DecrementQueueDepth();
-            ReleaseIfData(message);
-            throw;
-        }
-        catch (ChannelClosedException)
-        {
-            if (queued) worker.DecrementQueueDepth();
+            worker.IncrementQueueDepth();
+            queueOwned = true;
+
+            // Unbounded channels have no per-worker capacity gate. false therefore
+            // means the writer side was completed between IsActive and TryWrite.
+            if (worker.Channel.Writer.TryWrite(message))
+            {
+                controlOwned = false; // ownership transfers to the queued message
+                queueOwned = false;
+                return;
+            }
+
+            worker.DecrementQueueDepth();
+            queueOwned = false;
+            worker.ControlBudget.Release();
+            controlOwned = false;
             ReleaseIfData(message);
             if (worker.IsActive)
                 worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
         }
+        catch (OperationCanceledException)
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
+            ReleaseIfData(message);
+            throw;
+        }
         catch
         {
-            if (queued) worker.DecrementQueueDepth();
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
             ReleaseIfData(message);
             throw;
         }
@@ -757,64 +800,66 @@ public static class CopyEngine
             worker.Progress.SetPhase(DestinationPhase.Copying);
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
-                if (message is DataMessage droppedData && !worker.IsActive)
+                // QueueDepth and the global control budget represent messages waiting
+                // in channels only. Once dequeued, release both before doing physical I/O.
+                worker.DecrementQueueDepth();
+                worker.ControlBudget.Release();
+                var data = message as DataMessage;
+                try
                 {
-                    worker.DecrementQueueDepth();
-                    droppedData.Block.Release();
-                    continue;
-                }
-                if (!worker.IsActive) continue;
+                    if (!worker.IsActive)
+                        continue;
 
-                job.Token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-                switch (message)
-                {
-                    case BeginMessage begin:
-                        current = BeginFile(worker, begin.Entry);
-                        break;
-                    case DataMessage chunkData when current is not null:
-                        try
-                        {
-                            if (!current.Failed)
+                    job.Token.ThrowIfCancellationRequested();
+                    await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+                    switch (message)
+                    {
+                        case BeginMessage begin:
+                            current = BeginFile(worker, begin.Entry);
+                            break;
+                        case DataMessage chunkData when current is not null:
+                            try
                             {
-                                var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                                await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
-                                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
-                                if (chunkData.Block.Length >= WriteChunkSize)
-                                    worker.RecordBlockWrite(elapsed);
-                                job.Telemetry.RecordWrite(chunkData.Block.Length, elapsed);
-                                current.Copied += chunkData.Block.Length;
-                                worker.Progress.AddWritten(chunkData.Block.Length);
+                                if (!current.Failed)
+                                {
+                                    var started = Stopwatch.GetTimestamp();
+                                    await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
+                                    var elapsed = Stopwatch.GetElapsedTime(started);
+                                    job.Telemetry.RecordWrite(chunkData.Block.Length, elapsed);
+                                    current.Copied += chunkData.Block.Length;
+                                    worker.Progress.AddWritten(chunkData.Block.Length);
+                                }
                             }
-                        }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
-                        {
-                            current.Failed = true;
-                            current.Stream?.Dispose();
-                            current.Stream = null;
-                            TryDelete(current.PartPath);
-                            if (current.Copied > 0) worker.Progress.RollbackWritten((ulong)current.Copied);
-                            if (options.KeepGoing) worker.Progress.MarkError(ex.Message);
-                            else worker.Fail(ex.Message);
-                        }
-                        finally
-                        {
-                            worker.DecrementQueueDepth();
-                            chunkData.Block.Release();
-                        }
-                        break;
-                    case DataMessage orphanData:
-                        worker.DecrementQueueDepth();
-                        orphanData.Block.Release();
-                        break;
-                    case EndMessage end when current is not null:
-                        FinishFile(worker, current, end.Hash, options, recovery, job);
-                        if (!current.Failed)
-                            expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
-                        current = null;
-                        break;
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                current.Failed = true;
+                                current.Stream?.Dispose();
+                                current.Stream = null;
+                                TryDelete(current.PartPath);
+                                if (current.Copied > 0) worker.Progress.RollbackWritten((ulong)current.Copied);
+                                if (options.KeepGoing) worker.Progress.MarkError(ex.Message);
+                                else worker.Fail(ex.Message);
+                            }
+                            break;
+                        case DataMessage:
+                            // A data message without an active file is discarded safely;
+                            // the SharedBlock reference is released by the iteration finally.
+                            break;
+                        case EndMessage end when current is not null:
+                            FinishFile(worker, current, end.Hash, options, recovery, job);
+                            if (!current.Failed)
+                                expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
+                            current = null;
+                            break;
+                    }
+                    worker.NoteProgress();
                 }
-                worker.NoteProgress();
+                finally
+                {
+                    // The dequeued data reference belongs to this iteration regardless
+                    // of failure, cancellation, pause cancellation, or orphaned state.
+                    data?.Block.Release();
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1084,18 +1129,24 @@ public static class CopyEngine
                 if (verification)
                     telemetry?.RecordVerifyRead(read, readElapsed);
                 if (read == 0) break;
-                var hashStarted = Stopwatch.GetTimestamp();
                 if (resources is null)
                 {
+                    var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(buffer.AsSpan(0, read));
+                    if (verification)
+                        telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 }
                 else
                 {
+                    var cpuWaitStarted = Stopwatch.GetTimestamp();
                     using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
+                    if (verification)
+                        telemetry?.RecordVerifyCpuWait(Stopwatch.GetElapsedTime(cpuWaitStarted));
+                    var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(buffer.AsSpan(0, read));
+                    if (verification)
+                        telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 }
-                if (verification)
-                    telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
             }
             return hasher.Finalize().AsSpan().ToArray();
         }
@@ -1224,11 +1275,9 @@ public static class CopyEngine
     {
         while (worker.Channel.Reader.TryRead(out var message))
         {
-            if (message is DataMessage data)
-            {
-                worker.DecrementQueueDepth();
-                data.Block.Release();
-            }
+            worker.DecrementQueueDepth();
+            worker.ControlBudget.Release();
+            ReleaseIfData(message);
         }
     }
 
@@ -1853,65 +1902,37 @@ public static class CopyEngine
 
     private sealed class DestinationWorker
     {
-        private readonly SemaphoreSlim _queueDrained = new(0, 1);
         private int _active = 1;
         private int _queueDepth;
-        private int _adaptiveQueueLimit = AdaptiveInitialQueue;
-        private int _fastSamples;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
 
-        public DestinationWorker(string root, int slot, DestinationProgress progress, int capacity)
+        public DestinationWorker(
+            string root,
+            int slot,
+            DestinationProgress progress,
+            GlobalControlBacklogBudget controlBudget)
         {
             Root = root;
             Slot = slot;
             Progress = progress;
-            Channel = System.Threading.Channels.Channel.CreateBounded<FanoutMessage>(new BoundedChannelOptions(capacity)
+            ControlBudget = controlBudget;
+            Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
-                SingleWriter = false,
-                FullMode = BoundedChannelFullMode.Wait,
+                SingleWriter = true,
+                AllowSynchronousContinuations = false,
             });
         }
 
         public string Root { get; }
         public int Slot { get; }
         public DestinationProgress Progress { get; }
+        public GlobalControlBacklogBudget ControlBudget { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
-        private int QueueDepth => Math.Max(0, Volatile.Read(ref _queueDepth));
-        private int AdaptiveQueueLimit => Volatile.Read(ref _adaptiveQueueLimit);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
-
-        public async ValueTask<bool> WaitForAdaptiveWindowAsync(CancellationToken token)
-        {
-            while (IsActive && QueueDepth >= AdaptiveQueueLimit)
-                await _queueDrained.WaitAsync(token).ConfigureAwait(false);
-            return IsActive;
-        }
-
-        public void RecordBlockWrite(TimeSpan elapsed)
-        {
-            if (elapsed >= SlowBlockWrite)
-            {
-                Interlocked.Exchange(ref _fastSamples, 0);
-                AdjustQueueLimit(-1);
-                return;
-            }
-
-            if (elapsed <= FastBlockWrite)
-            {
-                if (Interlocked.Increment(ref _fastSamples) >= FastSamplesToGrow)
-                {
-                    Interlocked.Exchange(ref _fastSamples, 0);
-                    AdjustQueueLimit(1);
-                }
-                return;
-            }
-
-            Interlocked.Exchange(ref _fastSamples, 0);
-        }
 
         public void IncrementQueueDepth()
         {
@@ -1928,7 +1949,6 @@ public static class CopyEngine
                 throw new InvalidOperationException("La profundidad de cola del destino quedó negativa.");
             }
             Progress.SetQueueDepth(depth);
-            PulseQueueDrained();
         }
 
         public void Fail(string error)
@@ -1937,32 +1957,6 @@ public static class CopyEngine
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
             Channel.Writer.TryComplete();
-            PulseQueueDrained();
-        }
-
-        private void AdjustQueueLimit(int delta)
-        {
-            while (true)
-            {
-                var current = Volatile.Read(ref _adaptiveQueueLimit);
-                var next = Math.Clamp(current + delta, AdaptiveMinQueue, AdaptiveMaxQueue);
-                if (next == current)
-                    return;
-                if (Interlocked.CompareExchange(ref _adaptiveQueueLimit, next, current) == current)
-                {
-                    if (next > current)
-                        PulseQueueDrained();
-                    return;
-                }
-            }
-        }
-
-        private void PulseQueueDrained()
-        {
-            if (_queueDrained.CurrentCount != 0)
-                return;
-            try { _queueDrained.Release(); }
-            catch (SemaphoreFullException) { }
         }
     }
 
