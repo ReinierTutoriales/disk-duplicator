@@ -67,6 +67,7 @@ pub fn atomic_write(path: &Path, data: &[u8], label: &str) -> Result<(), String>
 
     let tmp = unique_sibling(path, "tmp");
     let backup = unique_sibling(path, "bak");
+    let mut preserve_backup = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -98,12 +99,7 @@ pub fn atomic_write(path: &Path, data: &[u8], label: &str) -> Result<(), String>
         match fs::rename(&tmp, path) {
             Ok(()) => {
                 if had_old {
-                    fs::remove_file(&backup).map_err(|e| {
-                        format!(
-                            "{label} se guardó, pero no se pudo limpiar el backup {}: {e}",
-                            backup.display()
-                        )
-                    })?;
+                    let _ = fs::remove_file(&backup);
                 }
                 Ok(())
             }
@@ -113,10 +109,13 @@ pub fn atomic_write(path: &Path, data: &[u8], label: &str) -> Result<(), String>
                         Ok(()) => Err(format!(
                             "No se pudo reemplazar {label}: {commit_err}; se restauró la versión anterior"
                         )),
-                        Err(restore_err) => Err(format!(
-                            "CRÍTICO: no se pudo reemplazar {label}: {commit_err}; tampoco restaurar {}: {restore_err}",
-                            backup.display()
-                        )),
+                        Err(restore_err) => {
+                            preserve_backup = true;
+                            Err(format!(
+                                "CRÍTICO: no se pudo reemplazar {label}: {commit_err}; tampoco restaurar {}: {restore_err}",
+                                backup.display()
+                            ))
+                        }
                     }
                 } else {
                     Err(format!("No se pudo finalizar {label}: {commit_err}"))
@@ -128,7 +127,7 @@ pub fn atomic_write(path: &Path, data: &[u8], label: &str) -> Result<(), String>
     if tmp.exists() {
         let _ = fs::remove_file(&tmp);
     }
-    if backup.exists() && path.exists() {
+    if !preserve_backup && backup.exists() && path.exists() {
         let _ = fs::remove_file(&backup);
     }
     result
