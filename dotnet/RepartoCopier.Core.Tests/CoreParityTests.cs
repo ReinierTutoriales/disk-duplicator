@@ -308,6 +308,27 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task AdaptivePipelinePrefetchPreservesExactLargeFileFanOut()
+    {
+        using var temp = new TempDirectory("adaptive-pipeline-prefetch");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[48 * 1024 * 1024 + 731];
+        new Random(86420).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), payload);
+
+        var destinations = Enumerable.Range(0, 4)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
+        AssertHealthy(job);
+
+        foreach (var destination in destinations)
+            CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "large.bin")));
+    }
+
+    [TestMethod]
     public async Task FeedbackGovernedVerificationPreservesIntegrity()
     {
         using var temp = new TempDirectory("feedback-governor-integrity");
