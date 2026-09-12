@@ -26,7 +26,11 @@ jobs:
 
       - name: Apply audited performance patch
         shell: pwsh
-        run: python .github/full_audit_perf.py
+        run: |
+          python .github/full_audit_perf.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/full_audit_perf_fix.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Format
         run: cargo fmt --all
@@ -52,10 +56,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           Remove-Item .github/full_audit_perf.py -Force
+          Remove-Item .github/full_audit_perf_fix.py -Force
           Remove-Item .github/workflows/full-audit-perf.yml -Force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/engine_impl/part2.rs src/engine_impl/part4.rs src/preflight/part3.rs src/app/part1.rs src/app/part3.rs src/app/part4.rs src/app/part5.rs .github/full_audit_perf.py .github/workflows/full-audit-perf.yml
+          git add src/engine_impl/part1.rs src/engine_impl/part2.rs src/engine_impl/part4.rs src/preflight/part3.rs src/app/part1.rs src/app/part3.rs src/app/part4.rs src/app/part5.rs .github/full_audit_perf.py .github/full_audit_perf_fix.py .github/workflows/full-audit-perf.yml
           git commit -m "perf: remove fanout verification stalls and fix throughput metrics"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git push origin HEAD:main
