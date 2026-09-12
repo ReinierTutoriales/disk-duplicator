@@ -110,6 +110,21 @@ text = text.replace(old, new, 1)
 anchor = '''    [TestMethod]\n    public async Task FanOutPreservesRootTreeEmptyDirectoriesAndBytes()'''
 if anchor not in text:
     raise SystemExit("expected FAN-OUT parity test anchor")
-insert = '''    [TestMethod]\n    public async Task FanOutDeliversMultipleBlocksToEveryDestination()\n    {\n        using var temp = new TempDirectory("fanout-multiblock");\n        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;\n        var payload = new byte[20 * 1024 * 1024 + 137];\n        new Random(12345).NextBytes(payload);\n        await File.WriteAllBytesAsync(Path.Combine(source, "multi.bin"), payload);\n        var destinations = new[]\n        {\n            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-1")).FullName,\n            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-2")).FullName,\n        };\n\n        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: true);\n        await using var job = CopyEngine.Start(plan);\n        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));\n\n        foreach (var destination in destinations)\n        {\n            var copied = await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "multi.bin"));\n            CollectionAssert.AreEqual(payload, copied);\n        }\n        Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));\n    }\n\n'''
+insert = '''    [TestMethod]\n    public async Task FanOutDeliversMultipleBlocksToEveryDestination()\n    {\n        using var temp = new TempDirectory("fanout-multiblock");\n        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;\n        var payload = new byte[20 * 1024 * 1024 + 137];\n        new Random(12345).NextBytes(payload);\n        await File.WriteAllBytesAsync(Path.Combine(source, "multi.bin"), payload);\n        var destinations = new[]\n        {\n            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-1")).FullName,\n            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-2")).FullName,\n        };\n\n        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: true);\n        await using var job = CopyEngine.Start(plan);\n        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));\n        AssertHealthy(job);\n\n        foreach (var destination in destinations)\n        {\n            var copied = await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "multi.bin"));\n            CollectionAssert.AreEqual(payload, copied);\n        }\n    }\n\n'''
 text = text.replace(anchor, insert + anchor, 1)
+
+text = text.replace(
+    '        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));\n\n        foreach (var destinationBase in new[] { baseOne, baseTwo })',
+    '        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));\n        AssertHealthy(job);\n\n        foreach (var destinationBase in new[] { baseOne, baseTwo })',
+    1)
+text = text.replace(
+    '        await job.Completion.WaitAsync(TimeSpan.FromSeconds(20));\n\n        Assert.AreEqual("solo este archivo"',
+    '        await job.Completion.WaitAsync(TimeSpan.FromSeconds(20));\n        AssertHealthy(job);\n\n        Assert.AreEqual("solo este archivo"',
+    1)
+
+helper_anchor = '''    private sealed class TempDirectory : IDisposable'''
+if helper_anchor not in text:
+    raise SystemExit("expected TempDirectory anchor")
+helper = '''    private static void AssertHealthy(CopyJob job)\n    {\n        var snapshots = job.Snapshot();\n        var bad = snapshots.Where(item => item.Phase != DestinationPhase.Done).ToArray();\n        if (bad.Length == 0) return;\n        Assert.Fail(string.Join(" | ", bad.Select(item => $"{item.Label}: {item.Phase}: {item.Error}")));\n    }\n\n'''
+text = text.replace(helper_anchor, helper + helper_anchor, 1)
 tests.write_text(text, encoding="utf-8")
