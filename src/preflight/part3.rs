@@ -46,11 +46,16 @@ fn validate_destinations_parallel(
     })
 }
 
-fn supervise_job(
-    source: PathBuf,
-    dest_paths: Vec<PathBuf>,
+struct SupervisorSource {
+    root: PathBuf,
     files: Arc<Vec<PlannedFile>>,
     dirs: Arc<Vec<PathBuf>>,
+    single_file: bool,
+}
+
+fn supervise_job(
+    source: SupervisorSource,
+    dest_paths: Vec<PathBuf>,
     state: Arc<JobState>,
     handles: Vec<JoinHandle<()>>,
     opts: CopyOpts,
@@ -81,7 +86,12 @@ fn supervise_job(
             return;
         }
 
-        let source_problem = source_change(&source, &files, &dirs);
+        let source_problem = source_change(
+            &source.root,
+            &source.files,
+            &source.dirs,
+            source.single_file,
+        );
         let mut final_errors: Vec<Option<String>> = vec![None; dest_paths.len()];
 
         {
@@ -114,7 +124,7 @@ fn supervise_job(
 
         let reader_hashes = state.reader_hashes.lock().unwrap().clone();
         let expected_hashes = if opts.verify {
-            match final_source_hashes_for_job(&source, &files, &reader_hashes, Some(&state)) {
+            match final_source_hashes_for_job(&source.root, &source.files, &reader_hashes, Some(&state)) {
                 Ok(hashes) => hashes,
                 Err(e) => {
                     if state.cancel.load(Ordering::Acquire) {
@@ -142,10 +152,10 @@ fn supervise_job(
         };
 
         for (slot, result) in validate_destinations_parallel(
-            &source,
+            &source.root,
             &dest_paths,
-            &files,
-            &dirs,
+            &source.files,
+            &source.dirs,
             opts.verify,
             FinalValidationContext {
                 expected_hashes: &expected_hashes,
@@ -215,10 +225,13 @@ pub fn start_job(
         verified_skips,
     )?;
     let supervisor = supervise_job(
-        preflight.source,
+        SupervisorSource {
+            root: preflight.source,
+            files: preflight.files,
+            dirs: preflight.dirs,
+            single_file: preflight.single_file,
+        },
         preflight.dests,
-        preflight.files,
-        preflight.dirs,
         Arc::clone(&state),
         handles,
         opts,

@@ -92,7 +92,7 @@ impl CopyPlan {
     ) -> Result<Self, String> {
         let source = source.into().trim().to_owned();
         if source.is_empty() {
-            return Err("Selecciona una carpeta de origen.".to_owned());
+            return Err("Selecciona un archivo o carpeta de origen.".to_owned());
         }
         if dests.is_empty() {
             return Err("Agrega al menos un destino.".to_owned());

@@ -22,14 +22,25 @@ mod engine {
         dests: Vec<PathBuf>,
         opts: CopyOpts,
     ) -> Result<(Arc<JobState>, Vec<JoinHandle<()>>), String> {
-        let folder_name = source.file_name().ok_or_else(|| {
-            "El origen debe ser una carpeta con nombre; no se puede duplicar una raíz completa."
-                .to_owned()
+        let meta = std::fs::symlink_metadata(&source).map_err(|e| {
+            format!(
+                "No se pudo inspeccionar el origen {}: {e}",
+                source.display()
+            )
         })?;
-        let effective_dests = dests
-            .into_iter()
-            .map(|base| base.join(folder_name))
-            .collect();
+        let source_name = source.file_name().ok_or_else(|| {
+            "El origen debe tener un nombre; no se puede duplicar una raíz completa.".to_owned()
+        })?;
+        let effective_dests = if meta.is_dir() {
+            dests
+                .into_iter()
+                .map(|base| base.join(source_name))
+                .collect()
+        } else if meta.is_file() {
+            dests
+        } else {
+            return Err("El origen debe ser un archivo regular o una carpeta.".to_owned());
+        };
         crate::preflight::start_job(source, effective_dests, opts)
     }
 }
