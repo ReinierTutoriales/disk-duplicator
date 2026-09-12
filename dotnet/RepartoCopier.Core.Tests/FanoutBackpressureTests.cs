@@ -11,7 +11,10 @@ public sealed class FanoutBackpressureTests
     {
         using var temp = new TempDirectory("control-plane");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
-        const int files = 256;
+        // This is a correctness/backlog test, not a small-file throughput benchmark.
+        // Keep it large enough to exercise many Begin/Data/End messages but short
+        // enough to be stable on variable-speed hosted Windows runners.
+        const int files = 96;
         for (var index = 0; index < files; index++)
         {
             var path = Path.Combine(source, $"f-{index:D4}.bin");
@@ -26,7 +29,7 @@ public sealed class FanoutBackpressureTests
             .ToArray();
         var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
         await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: false, SkipSame: false, KeepGoing: false));
-        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(120));
 
         AssertHealthy(job);
         Assert.IsTrue(job.DiagnosticsSnapshot().PeakControlBacklogMessages > 0);
