@@ -20,7 +20,7 @@ public sealed class CoreParityTests
             keepGoing: false);
         Assert.AreEqual("C:/Origen/", plan.Source);
         CollectionAssert.AreEqual(new[] { "D:/Uno/", "E:/Dos" }, plan.Destinations.ToArray());
-        Assert.ThrowsException<ArgumentException>(() =>
+        Assert.ThrowsExactly<ArgumentException>(() =>
             CopyPlan.Create("C:/Origen", ["C:/Origen/"], true, true));
 
         var existing = Enumerable.Range(0, CopyPlan.MaxDestinations - 1)
@@ -64,6 +64,32 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task FanOutDeliversMultipleBlocksToEveryDestination()
+    {
+        using var temp = new TempDirectory("fanout-multiblock");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[20 * 1024 * 1024 + 137];
+        new Random(12345).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "multi.bin"), payload);
+        var destinations = new[]
+        {
+            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-1")).FullName,
+            Directory.CreateDirectory(Path.Combine(temp.Path, "dest-2")).FullName,
+        };
+
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: true);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+        AssertHealthy(job);
+
+        foreach (var destination in destinations)
+        {
+            var copied = await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "multi.bin"));
+            CollectionAssert.AreEqual(payload, copied);
+        }
+    }
+
+    [TestMethod]
     public async Task FanOutPreservesRootTreeEmptyDirectoriesAndBytes()
     {
         using var temp = new TempDirectory("fanout-tree");
@@ -81,6 +107,7 @@ public sealed class CoreParityTests
         var plan = CopyPlan.Create(source, [baseOne, baseTwo], skipSame: false, keepGoing: false);
         await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+        AssertHealthy(job);
 
         foreach (var destinationBase in new[] { baseOne, baseTwo })
         {
@@ -113,10 +140,19 @@ public sealed class CoreParityTests
         var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
         await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(20));
+        AssertHealthy(job);
 
         Assert.AreEqual("solo este archivo", await File.ReadAllTextAsync(Path.Combine(destination, "elegido.txt")));
         Assert.IsFalse(File.Exists(Path.Combine(destination, "hermano.txt")));
         Assert.AreEqual(DestinationPhase.Done, job.Snapshot().Single().Phase);
+    }
+
+    private static void AssertHealthy(CopyJob job)
+    {
+        var snapshots = job.Snapshot();
+        var bad = snapshots.Where(item => item.Phase != DestinationPhase.Done).ToArray();
+        if (bad.Length == 0) return;
+        Assert.Fail(string.Join(" | ", bad.Select(item => $"{item.Label}: {item.Phase}: {item.Error}")));
     }
 
     private sealed class TempDirectory : IDisposable

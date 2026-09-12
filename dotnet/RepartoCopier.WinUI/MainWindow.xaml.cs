@@ -33,7 +33,7 @@ public sealed partial class MainWindow : Window
     private void TryLoadLaunchSource()
     {
         var args = Environment.GetCommandLineArgs();
-        if (args.Length == 2 && !args[1].StartsWith('-', StringComparison.Ordinal))
+        if (args.Length == 2 && !args[1].StartsWith("-", StringComparison.Ordinal))
             SourcePathBox.Text = args[1];
         else if (args.Length == 3 && string.Equals(args[1], "--source", StringComparison.Ordinal))
             SourcePathBox.Text = args[2];
@@ -188,24 +188,26 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            if (!ReferenceEquals(_job, observed)) return;
-            RefreshProgress();
-            _progressTimer.Stop();
-            var snapshots = observed.Snapshot();
-            var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
-            var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
-            StatusText.Text = cancelled
-                ? "Copia cancelada"
-                : failed > 0
-                    ? $"Finalizado con {failed} destino(s) fallido(s)"
-                    : "Copia completada y verificada";
-            await observed.DisposeAsync();
-            _job = null;
-            SetEditingEnabled(true);
-            StartButton.IsEnabled = true;
-            PauseButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
-            PauseButton.Content = "Pausar";
+            if (ReferenceEquals(_job, observed))
+            {
+                RefreshProgress();
+                _progressTimer.Stop();
+                var snapshots = observed.Snapshot();
+                var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+                var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+                StatusText.Text = cancelled
+                    ? "Copia cancelada"
+                    : failed > 0
+                        ? $"Finalizado con {failed} destino(s) fallido(s)"
+                        : "Copia completada y verificada";
+                await observed.DisposeAsync();
+                _job = null;
+                SetEditingEnabled(true);
+                StartButton.IsEnabled = true;
+                PauseButton.IsEnabled = false;
+                CancelButton.IsEnabled = false;
+                PauseButton.Content = "Pausar";
+            }
         }
     }
 
