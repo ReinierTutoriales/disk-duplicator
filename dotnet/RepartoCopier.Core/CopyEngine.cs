@@ -69,7 +69,6 @@ public static class CopyEngine
     private const int AdaptiveMaxQueue = 8;
     private const int FastSamplesToGrow = 8;
     private const int Retries = 2;
-    private const int AbsoluteMaxVerificationParallelism = 8;
     private static readonly TimeSpan FastBlockWrite = TimeSpan.FromMilliseconds(40);
     private static readonly TimeSpan SlowBlockWrite = TimeSpan.FromMilliseconds(250);
 
@@ -192,10 +191,11 @@ public static class CopyEngine
         var token = job.Token;
         var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
+        using var resources = new ResourceGovernor();
         try
         {
             var skipMasks = options.SkipSame
-                ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token).ConfigureAwait(false)
+                ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token, resources).ConfigureAwait(false)
                 : CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
             for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
             {
@@ -208,7 +208,6 @@ public static class CopyEngine
                 .Select((root, index) => new DestinationWorker(root, index, progress[index], queueDepth))
                 .ToArray();
 
-            using var copyResources = ResourceGovernor.EnterCopy(workers.Length);
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job, expectedHashes))
                 .ToArray();
@@ -243,9 +242,8 @@ public static class CopyEngine
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
 
-            copyResources.Dispose();
             if (options.Verify && !token.IsCancellationRequested)
-                await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job).ConfigureAwait(false);
+                await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job, resources).ConfigureAwait(false);
 
             for (var i = 0; i < progress.Length; i++)
             {
@@ -831,48 +829,45 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         ConcurrentDictionary<string, byte[]> expectedHashes,
-        CopyJob job)
+        CopyJob job,
+        ResourceGovernor resources)
     {
         var activeSlots = Enumerable.Range(0, workers.Length)
             .Where(slot => workers[slot].IsActive)
             .ToArray();
-        await Parallel.ForEachAsync(
-            activeSlots,
-            new ParallelOptions
+        var tasks = activeSlots.Select(async slot =>
+        {
+            using var lease = await resources.EnterCpuWorkAsync(job.Token).ConfigureAwait(false);
+            progress[slot].SetPhase(DestinationPhase.Verifying);
+            foreach (var entry in copy.Files)
             {
-                MaxDegreeOfParallelism = ResourceGovernor.VerificationParallelism(activeSlots.Length),
-                CancellationToken = job.Token,
-            },
-            async (slot, token) =>
-            {
-                progress[slot].SetPhase(DestinationPhase.Verifying);
-                foreach (var entry in copy.Files)
+                job.Token.ThrowIfCancellationRequested();
+                job.WaitIfPaused(job.Token);
+                if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
+                    continue;
+                var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                if (!File.Exists(destination))
                 {
-                    token.ThrowIfCancellationRequested();
-                    job.WaitIfPaused(token);
-                    if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
-                        continue;
-                    var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                    if (!File.Exists(destination))
-                    {
-                        workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
-                        break;
-                    }
-                    var actual = await HashFileAsync(destination, token).ConfigureAwait(false);
-                    if (!actual.AsSpan().SequenceEqual(expected))
-                    {
-                        workers[slot].Fail($"BLAKE3 no coincide: {destination}");
-                        break;
-                    }
+                    workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
+                    break;
                 }
-            }).ConfigureAwait(false);
+                var actual = await HashFileAsync(destination, job.Token).ConfigureAwait(false);
+                if (!actual.AsSpan().SequenceEqual(expected))
+                {
+                    workers[slot].Fail($"BLAKE3 no coincide: {destination}");
+                    break;
+                }
+            }
+        }).ToArray();
+        await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
     private static async Task<bool[][]> BuildVerifiedSkipMasksAsync(
         PreparedCopy copy,
         DestinationProgress[] progress,
         CopyJob job,
-        CancellationToken token)
+        CancellationToken token,
+        ResourceGovernor resources)
     {
         var masks = CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
@@ -892,23 +887,18 @@ public static class CopyEngine
             if (candidates.Count == 0) continue;
 
             var sourceHash = await HashFileAsync(entry.SourcePath, token).ConfigureAwait(false);
-            await Parallel.ForEachAsync(
-                candidates,
-                new ParallelOptions
+            var checks = candidates.Select(async slot =>
+            {
+                using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
+                var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
+                var destinationHash = await HashFileAsync(destination, token).ConfigureAwait(false);
+                if (destinationHash.AsSpan().SequenceEqual(sourceHash))
                 {
-                    MaxDegreeOfParallelism = ResourceGovernor.VerificationParallelism(candidates.Count),
-                    CancellationToken = token,
-                },
-                async (slot, cancellationToken) =>
-                {
-                    var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
-                    var destinationHash = await HashFileAsync(destination, cancellationToken).ConfigureAwait(false);
-                    if (destinationHash.AsSpan().SequenceEqual(sourceHash))
-                    {
-                        masks[fileIndex][slot] = true;
-                        progress[slot].SetLastFile(entry.RelativePath);
-                    }
-                }).ConfigureAwait(false);
+                    masks[fileIndex][slot] = true;
+                    progress[slot].SetLastFile(entry.RelativePath);
+                }
+            }).ToArray();
+            await Task.WhenAll(checks).ConfigureAwait(false);
         }
         return masks;
     }
@@ -1155,102 +1145,153 @@ public static class CopyEngine
         }
     }
 
-    private static class ResourceGovernor
+    private sealed class ResourceGovernor : IDisposable
     {
-        private static readonly object PriorityGate = new();
-        private static int _activeCopyLeases;
-        private static ProcessPriorityClass? _originalPriority;
+        private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
+        private const double CpuGrowThreshold = 0.60;
+        private const double CpuShrinkThreshold = 0.85;
 
-        public static CopyLease EnterCopy(int destinations)
+        private readonly object _gate = new();
+        private readonly Queue<CpuWaiter> _waiters = new();
+        private readonly Process _process = Process.GetCurrentProcess();
+        private readonly int _processorCount = Math.Max(1, Environment.ProcessorCount);
+        private TimeSpan _lastCpu;
+        private long _lastSampleTimestamp;
+        private int _limit = 1;
+        private int _active;
+        private bool _disposed;
+
+        public ResourceGovernor()
         {
-            EnsureThreadPoolCapacity(destinations);
-            lock (PriorityGate)
+            _lastCpu = _process.TotalProcessorTime;
+            _lastSampleTimestamp = Stopwatch.GetTimestamp();
+        }
+
+        public ValueTask<CpuLease> EnterCpuWorkAsync(CancellationToken token)
+        {
+            lock (_gate)
             {
-                _activeCopyLeases++;
-                if (_activeCopyLeases == 1)
-                    RaiseProcessPriorityForCopy();
+                ThrowIfDisposed();
+                SampleAndAdjustLocked();
+                if (_active < _limit)
+                {
+                    _active++;
+                    return ValueTask.FromResult(new CpuLease(this));
+                }
+
+                var waiter = new CpuWaiter();
+                _waiters.Enqueue(waiter);
+                return new ValueTask<CpuLease>(WaitForLeaseAsync(waiter, token));
             }
-            return new CopyLease();
         }
 
-        public static int VerificationParallelism(int activeDestinations)
+        private async Task<CpuLease> WaitForLeaseAsync(CpuWaiter waiter, CancellationToken token)
         {
-            if (activeDestinations <= 0)
-                return 1;
-            var cpuBound = Math.Max(1, Environment.ProcessorCount / 2);
-            return Math.Min(activeDestinations, Math.Min(AbsoluteMaxVerificationParallelism, cpuBound));
-        }
-
-        private static void EnsureThreadPoolCapacity(int destinations)
-        {
-            var logicalProcessors = Math.Max(1, Environment.ProcessorCount);
-            var destinationDemand = Math.Max(1, destinations) + 4;
-            var targetWorkers = Math.Min(
-                64,
-                Math.Max(logicalProcessors, Math.Min(destinationDemand, logicalProcessors * 2)));
-            ThreadPool.GetMinThreads(out var currentWorkers, out var currentIo);
-            if (targetWorkers > currentWorkers)
-                _ = ThreadPool.SetMinThreads(targetWorkers, currentIo);
-        }
-
-        private static void RaiseProcessPriorityForCopy()
-        {
-            if (!OperatingSystem.IsWindows())
-                return;
             try
             {
-                using var process = Process.GetCurrentProcess();
-                var current = process.PriorityClass;
-                _originalPriority = current;
-                if (current is ProcessPriorityClass.Idle or ProcessPriorityClass.BelowNormal or ProcessPriorityClass.Normal)
-                    process.PriorityClass = ProcessPriorityClass.AboveNormal;
+                await waiter.Ready.Task.WaitAsync(token).ConfigureAwait(false);
+                return new CpuLease(this);
             }
-            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+            catch
             {
-                // Priority is an optimization only. Copy correctness must never depend on it.
-                _originalPriority = null;
+                lock (_gate)
+                {
+                    waiter.Cancelled = true;
+                    PumpLocked();
+                }
+                throw;
             }
         }
 
-        private static void ExitCopy()
+        private void ReleaseCpuWork()
         {
-            lock (PriorityGate)
+            lock (_gate)
             {
-                if (_activeCopyLeases <= 0)
-                    return;
-                _activeCopyLeases--;
-                if (_activeCopyLeases != 0)
-                    return;
-                RestoreProcessPriority();
+                if (_active > 0)
+                    _active--;
+                SampleAndAdjustLocked();
+                PumpLocked();
             }
         }
 
-        private static void RestoreProcessPriority()
+        private void SampleAndAdjustLocked()
         {
-            var original = _originalPriority;
-            _originalPriority = null;
-            if (original is null || !OperatingSystem.IsWindows())
+            var now = Stopwatch.GetTimestamp();
+            var elapsed = Stopwatch.GetElapsedTime(_lastSampleTimestamp, now);
+            if (elapsed < SampleInterval)
                 return;
+
+            TimeSpan cpu;
             try
             {
-                using var process = Process.GetCurrentProcess();
-                process.PriorityClass = original.Value;
+                cpu = _process.TotalProcessorTime;
             }
-            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+            catch (InvalidOperationException)
             {
-                // Best effort. Never fail a completed copy because Windows rejected a priority change.
+                return;
+            }
+
+            var cpuSeconds = Math.Max(0, (cpu - _lastCpu).TotalSeconds);
+            var wallSeconds = Math.Max(0.001, elapsed.TotalSeconds);
+            var utilization = Math.Clamp(cpuSeconds / (wallSeconds * _processorCount), 0.0, 1.0);
+            _lastCpu = cpu;
+            _lastSampleTimestamp = now;
+
+            if (utilization >= CpuShrinkThreshold)
+                _limit = Math.Max(1, _limit - 1);
+            else if (utilization <= CpuGrowThreshold && _waiters.Count > 0)
+                _limit = Math.Min(_processorCount, _limit + 1);
+        }
+
+        private void PumpLocked()
+        {
+            while (_active < _limit && _waiters.Count > 0)
+            {
+                var waiter = _waiters.Dequeue();
+                if (waiter.Cancelled)
+                    continue;
+                _active++;
+                waiter.Ready.TrySetResult();
             }
         }
 
-        internal sealed class CopyLease : IDisposable
+        private void ThrowIfDisposed()
         {
-            private int _disposed;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
+
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+                while (_waiters.Count > 0)
+                {
+                    var waiter = _waiters.Dequeue();
+                    waiter.Ready.TrySetException(new ObjectDisposedException(nameof(ResourceGovernor)));
+                }
+            }
+            _process.Dispose();
+        }
+
+        private sealed class CpuWaiter
+        {
+            public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public bool Cancelled { get; set; }
+        }
+
+        internal sealed class CpuLease : IDisposable
+        {
+            private ResourceGovernor? _owner;
+
+            public CpuLease(ResourceGovernor owner) => _owner = owner;
 
             public void Dispose()
             {
-                if (Interlocked.Exchange(ref _disposed, 1) != 0)
-                    return;
-                ExitCopy();
+                var owner = Interlocked.Exchange(ref _owner, null);
+                owner?.ReleaseCpuWork();
             }
         }
     }

@@ -308,6 +308,27 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task FeedbackGovernedVerificationPreservesIntegrity()
+    {
+        using var temp = new TempDirectory("feedback-governor-integrity");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        for (var index = 0; index < 6; index++)
+        {
+            var payload = new byte[1024 * 1024 + index * 4093 + 17];
+            new Random(24680 + index).NextBytes(payload);
+            await File.WriteAllBytesAsync(Path.Combine(source, $"payload-{index}.bin"), payload);
+        }
+
+        var destinations = Enumerable.Range(0, Math.Max(3, Math.Min(6, Environment.ProcessorCount)))
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+        AssertHealthy(job);
+    }
+
+    [TestMethod]
     public async Task FanOutTenDestinationsRemainExactWithoutWorkerStarvation()
     {
         using var temp = new TempDirectory("fanout-ten-destinations");
