@@ -393,6 +393,29 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task FanOutPrefetchPreservesOrderingAcrossThreeLargeDestinations()
+    {
+        using var temp = new TempDirectory("fanout-prefetch-order");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[40 * 1024 * 1024 + 777];
+        new Random(54321).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "prefetch.bin"), payload);
+        var destinations = Enumerable.Range(0, 3)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
+            .ToArray();
+
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+        AssertHealthy(job);
+
+        foreach (var destination in destinations)
+            CollectionAssert.AreEqual(
+                payload,
+                await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "prefetch.bin")));
+    }
+
+    [TestMethod]
     public async Task FanOutHandlesDenseSmallFileTreeAcrossFourDestinations()
     {
         using var temp = new TempDirectory("fanout-small-files");
