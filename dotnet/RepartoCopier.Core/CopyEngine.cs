@@ -51,8 +51,7 @@ public static class CopyEngine
 {
     private const int BlockSize = 16 * 1024 * 1024;
     private const int ReservedRam = 512 * 1024 * 1024;
-    private const int MinQueue = 2;
-    private const int MaxQueue = 16;
+    private const int QueueDepth = 16;
     private const int Retries = 2;
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
@@ -185,7 +184,7 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
-            var queueDepth = QueueDepthFor(copy.DestinationRoots.Length);
+            var queueDepth = QueueDepth;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(root, index, progress[index], queueDepth))
                 .ToArray();
@@ -295,7 +294,7 @@ public static class CopyEngine
                     Access = FileAccess.Read,
                     Share = FileShare.Read,
                     Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                    BufferSize = 1024 * 1024,
+                    BufferSize = 1,
                 });
 
                 long totalRead = 0;
@@ -514,7 +513,8 @@ public static class CopyEngine
             Access = FileAccess.Write,
             Share = FileShare.None,
             Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-            BufferSize = 1024 * 1024,
+            BufferSize = 1,
+            PreallocationSize = entry.Size,
         });
         return new CurrentFile(entry, destination, part, stream);
     }
@@ -683,7 +683,7 @@ public static class CopyEngine
                 Access = FileAccess.Read,
                 Share = FileShare.Read,
                 Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                BufferSize = 1024 * 1024,
+                BufferSize = 1,
             });
             while (true)
             {
@@ -787,11 +787,6 @@ public static class CopyEngine
             throw new IOException($"{label} no puede ser symlink/junction/reparse point: {path}");
     }
 
-    private static int QueueDepthFor(int destinations) =>
-        destinations <= 0
-            ? MinQueue
-            : Math.Clamp(ReservedRam / (destinations * BlockSize), MinQueue, MaxQueue);
-
     private static string PathKey(string relative) => relative.Replace('/', '\\');
 
     private static long ToUnixNanoseconds(DateTime utc) =>
@@ -805,7 +800,7 @@ public static class CopyEngine
             Access = FileAccess.Write,
             Share = FileShare.None,
             Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-            BufferSize = 1024 * 1024,
+            BufferSize = 1,
         });
         stream.Position = offset;
         return stream;
@@ -854,8 +849,7 @@ public static class CopyEngine
         string RelativePath,
         long Size,
         DateTime LastWriteTimeUtc,
-        long ModifiedUnixNanoseconds)
-    ;
+        long ModifiedUnixNanoseconds);
 
     private abstract record FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : FanoutMessage;
