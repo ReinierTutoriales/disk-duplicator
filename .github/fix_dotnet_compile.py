@@ -14,6 +14,89 @@ for old, new in replacements:
     if count != 1:
         raise SystemExit(f"expected one compile-fix anchor, found {count}: {old[:80]!r}")
     text = text.replace(old, new, 1)
+
+old_deliver = '''    private static async Task DeliverAsync(
+        IReadOnlyCollection<DestinationWorker> recipients,
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job)
+    {
+        foreach (var worker in recipients)
+        {
+            if (!worker.IsActive)
+            {
+                ReleaseIfData(message);
+                continue;
+            }
+
+            FlushPending(worker);
+            while (worker.Pending.Count >= MaxPendingPerDestination)
+            {
+                job.Token.ThrowIfCancellationRequested();
+                job.WaitIfPaused(job.Token);
+                FlushPending(worker);
+                if (!worker.IsActive)
+                {
+                    ReleaseIfData(message);
+                    break;
+                }
+                if (DateTime.UtcNow - worker.LastProgressUtc >= WriteStallThreshold)
+                {
+                    worker.Fail($"Destino atascado: sin progreso durante {WriteStallThreshold.TotalSeconds:0} s.");
+                    DropPending(worker);
+                    ReleaseIfData(message);
+                    break;
+                }
+                await Task.Delay(2, job.Token).ConfigureAwait(false);
+            }
+
+            if (!worker.IsActive) continue;
+            if (countsData) worker.IncrementQueueDepth();
+            if (worker.Pending.Count > 0 || !worker.Channel.Writer.TryWrite(message))
+                worker.Pending.Enqueue(message);
+        }
+    }
+'''
+new_deliver = '''    private static async Task DeliverAsync(
+        IReadOnlyCollection<DestinationWorker> recipients,
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job)
+    {
+        foreach (var worker in recipients)
+        {
+            if (!worker.IsActive)
+            {
+                ReleaseIfData(message);
+                continue;
+            }
+
+            job.Token.ThrowIfCancellationRequested();
+            job.WaitIfPaused(job.Token);
+            if (countsData) worker.IncrementQueueDepth();
+            try
+            {
+                await worker.Channel.Writer.WriteAsync(message, job.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                if (countsData) worker.DecrementQueueDepth();
+                ReleaseIfData(message);
+                throw;
+            }
+            catch (ChannelClosedException)
+            {
+                if (countsData) worker.DecrementQueueDepth();
+                ReleaseIfData(message);
+                if (worker.IsActive)
+                    worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+            }
+        }
+    }
+'''
+if text.count(old_deliver) != 1:
+    raise SystemExit("expected one DeliverAsync anchor")
+text = text.replace(old_deliver, new_deliver, 1)
 engine.write_text(text, encoding="utf-8")
 
 tests = Path("dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs")
@@ -22,4 +105,12 @@ old = "Assert.ThrowsException<ArgumentException>(() =>\n            CopyPlan.Cre
 new = "Assert.ThrowsExactly<ArgumentException>(() =>\n            CopyPlan.Create(\"C:/Origen\", [\"C:/Origen/\"], true, true));"
 if text.count(old) != 1:
     raise SystemExit("expected one MSTest assertion anchor")
-tests.write_text(text.replace(old, new, 1), encoding="utf-8")
+text = text.replace(old, new, 1)
+
+anchor = '''    [TestMethod]\n    public async Task FanOutPreservesRootTreeEmptyDirectoriesAndBytes()'''
+if anchor not in text:
+    raise SystemExit("expected FAN-OUT parity test anchor")
+# Add a regression that necessarily crosses the 16 MiB FAN-OUT block boundary.
+insert = '''    [TestMethod]\n    public async Task FanOutDeliversMultipleBlocksToEveryDestination()\n    {\n        var root = NewTempRoot("fanout-multiblock");\n        try\n        {\n            var source = Directory.CreateDirectory(Path.Combine(root, "Origen")).FullName;\n            var payload = new byte[20 * 1024 * 1024 + 137];\n            new Random(12345).NextBytes(payload);\n            await File.WriteAllBytesAsync(Path.Combine(source, "multi.bin"), payload);\n            var destinations = new[]\n            {\n                Directory.CreateDirectory(Path.Combine(root, "dest-1")).FullName,\n                Directory.CreateDirectory(Path.Combine(root, "dest-2")).FullName,\n            };\n\n            var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: true);\n            await using var job = CopyEngine.Start(plan);\n            await job.Completion;\n\n            foreach (var destination in destinations)\n            {\n                var copied = await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "multi.bin"));\n                CollectionAssert.AreEqual(payload, copied);\n            }\n        }\n        finally\n        {\n            TryDeleteTree(root);\n        }\n    }\n\n'''
+text = text.replace(anchor, insert + anchor, 1)
+tests.write_text(text, encoding="utf-8")
