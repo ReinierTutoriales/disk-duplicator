@@ -1,7 +1,7 @@
 from pathlib import Path
 
-path = Path("dotnet/RepartoCopier.Core/CopyEngine.cs")
-text = path.read_text(encoding="utf-8")
+engine = Path("dotnet/RepartoCopier.Core/CopyEngine.cs")
+text = engine.read_text(encoding="utf-8")
 replacements = [
     ("if (message is DataMessage data && !worker.IsActive)\n                {\n                    worker.DecrementQueueDepth();\n                    data.Block.Release();", "if (message is DataMessage droppedData && !worker.IsActive)\n                {\n                    worker.DecrementQueueDepth();\n                    droppedData.Block.Release();"),
     ("case DataMessage data when current is not null:\n                        try", "case DataMessage chunkData when current is not null:\n                        try"),
@@ -14,4 +14,12 @@ for old, new in replacements:
     if count != 1:
         raise SystemExit(f"expected one compile-fix anchor, found {count}: {old[:80]!r}")
     text = text.replace(old, new, 1)
-path.write_text(text, encoding="utf-8")
+engine.write_text(text, encoding="utf-8")
+
+tests = Path("dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs")
+text = tests.read_text(encoding="utf-8")
+old = "Assert.ThrowsException<ArgumentException>(() =>\n            CopyPlan.Create(\"C:/Origen\", [\"C:/Origen/\"], true, true));"
+new = "Assert.ThrowsExactly<ArgumentException>(() =>\n            CopyPlan.Create(\"C:/Origen\", [\"C:/Origen/\"], true, true));"
+if text.count(old) != 1:
+    raise SystemExit("expected one MSTest assertion anchor")
+tests.write_text(text.replace(old, new, 1), encoding="utf-8")
