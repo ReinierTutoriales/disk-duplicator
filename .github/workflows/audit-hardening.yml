@@ -1,0 +1,47 @@
+name: Concurrency audit hardening
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/apply_audit_hardening.py'
+      - '.github/workflows/audit-hardening.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: concurrency-audit-hardening
+  cancel-in-progress: true
+
+jobs:
+  validate-and-integrate:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Apply audited hardening
+        run: python .github/apply_audit_hardening.py
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+      - name: Commit validated audit fixes
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs
+          if (git diff --cached --quiet) { throw 'No audit hardening changes produced.' }
+          git commit -m "fix: harden adaptive governor cancellation accounting"
+          git push origin HEAD:main
