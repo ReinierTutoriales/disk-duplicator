@@ -4,8 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/apply_telemetry_stress.py'
-      - '.github/fix_telemetry_helper.py'
+      - '.github/apply_telemetry_stress_v2.py'
       - '.github/workflows/telemetry-stress-audit.yml'
   workflow_dispatch:
 
@@ -27,10 +26,8 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
-      - name: Align telemetry helper with current engine
-        run: python .github/fix_telemetry_helper.py
-      - name: Apply telemetry instrumentation and stress harness
-        run: python .github/apply_telemetry_stress.py
+      - name: Apply exact telemetry instrumentation and stress harness
+        run: python .github/apply_telemetry_stress_v2.py
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
       - name: Test core Release
