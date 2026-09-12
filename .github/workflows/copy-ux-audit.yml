@@ -1,0 +1,54 @@
+name: Copy UX and path audit
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/copy_ux_hardening.py'
+      - '.github/workflows/copy-ux-audit.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+          components: clippy,rustfmt
+      - name: Apply cleanup and UX hardening
+        run: python .github/copy_ux_hardening.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Diff check
+        run: git diff --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests release
+        run: cargo test --locked --release
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Commit verified cleanup and remove helpers
+        shell: pwsh
+        run: |
+          Remove-Item .github/copy_ux_hardening.py
+          Remove-Item .github/workflows/copy-ux-audit.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: unify copy validation and add smart drop UX"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh workflow run build.yml --ref main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
