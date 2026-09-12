@@ -131,6 +131,17 @@ public static class StateLayout
     public static string ManifestPath(string destinationRoot) =>
         Path.Combine(StateDirectoryFor(destinationRoot), "manifest.b3");
 
+    public static (string PartPath, string BackupPath) TransientPaths(
+        string destinationRoot,
+        string destinationFile)
+    {
+        var temp = Path.Combine(StateDirectoryFor(destinationRoot), "tmp");
+        var id = TransientId(destinationFile);
+        return (
+            Path.Combine(temp, $"{id}.part"),
+            Path.Combine(temp, $"{id}.bak"));
+    }
+
     public static string PartPath(string destinationRoot, string destinationFile) =>
         Path.Combine(StateDirectoryFor(destinationRoot), "tmp", $"{TransientId(destinationFile)}.part");
 

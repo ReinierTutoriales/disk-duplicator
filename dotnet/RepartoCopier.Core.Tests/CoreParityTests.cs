@@ -124,6 +124,33 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void DenseDirectoryScanStreamsThousandsOfEntriesExactly()
+    {
+        using var temp = new TempDirectory("dense-streaming-scan");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        const int fileCount = 3000;
+        for (var index = 0; index < fileCount; index++)
+            File.WriteAllText(Path.Combine(source, $"file-{index:D4}.txt"), index.ToString());
+
+        var scan = PreflightSafety.ScanDirectory(source);
+        Assert.AreEqual(fileCount, scan.Files.Count);
+        Assert.AreEqual(0, scan.Directories.Count);
+        Assert.AreEqual("file-0000.txt", scan.Files[0].RelativePath);
+        Assert.AreEqual($"file-{fileCount - 1:D4}.txt", scan.Files[^1].RelativePath);
+    }
+
+    [TestMethod]
+    public void TransientPathsReuseOneIdentityWithoutChangingLayout()
+    {
+        using var temp = new TempDirectory("transient-paths");
+        var root = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var destination = Path.Combine(root, "nested", "payload.bin");
+        var pair = StateLayout.TransientPaths(root, destination);
+        Assert.AreEqual(StateLayout.PartPath(root, destination), pair.PartPath);
+        Assert.AreEqual(StateLayout.BackupPath(root, destination), pair.BackupPath);
+    }
+
+    [TestMethod]
     public void SourceTreeSnapshotDetectsStructuralAndMetadataMutation()
     {
         using var temp = new TempDirectory("source-tree-snapshot");

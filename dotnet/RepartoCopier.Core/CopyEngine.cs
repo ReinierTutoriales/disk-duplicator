@@ -800,7 +800,8 @@ public static class CopyEngine
             ?? throw new IOException($"Destino inválido: {destination}");
         Directory.CreateDirectory(parent);
         WindowsPath.EnsureNormalDirectory(parent, "La carpeta de destino");
-        var part = StateLayout.PartPath(worker.Root, destination);
+        var transient = StateLayout.TransientPaths(worker.Root, destination);
+        var part = transient.PartPath;
         TryDelete(part);
         var stream = new FileStream(part, new FileStreamOptions
         {
@@ -811,7 +812,7 @@ public static class CopyEngine
             BufferSize = 1,
             PreallocationSize = entry.Size >= PreallocationThreshold ? entry.Size : 0,
         });
-        return new CurrentFile(entry, destination, part, stream);
+        return new CurrentFile(entry, destination, part, transient.BackupPath, stream);
     }
 
     private static async Task WriteWithRetryAsync(
@@ -893,7 +894,7 @@ public static class CopyEngine
             throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
 
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
-        CommitPart(worker.Root, current.PartPath, current.DestinationPath);
+        CommitPart(current.PartPath, current.DestinationPath, current.BackupPath);
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         recovery.Append(
             new RecoveryFile(
@@ -1037,7 +1038,7 @@ public static class CopyEngine
         }
     }
 
-    private static void CommitPart(string destinationRoot, string part, string destination)
+    private static void CommitPart(string part, string destination, string backup)
     {
         if (!File.Exists(destination))
         {
@@ -1046,7 +1047,6 @@ public static class CopyEngine
         }
 
         WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
-        var backup = StateLayout.BackupPath(destinationRoot, destination);
         TryDelete(backup);
         File.Move(destination, backup);
         try
@@ -1885,11 +1885,13 @@ public static class CopyEngine
         FileEntry entry,
         string destinationPath,
         string partPath,
+        string backupPath,
         FileStream stream)
     {
         public FileEntry Entry { get; } = entry;
         public string DestinationPath { get; } = destinationPath;
         public string PartPath { get; } = partPath;
+        public string BackupPath { get; } = backupPath;
         public FileStream? Stream { get; set; } = stream;
         public long Copied { get; set; }
         public bool Failed { get; set; }

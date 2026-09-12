@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using Blake3;
 
@@ -498,22 +499,31 @@ internal static class RecoveryManager
     {
         WindowsPath.EnsureRegularFile(path, "El archivo para verificación");
         using var hasher = Hasher.New();
-        using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            4 * 1024 * 1024,
-            FileOptions.SequentialScan);
-        var buffer = new byte[4 * 1024 * 1024];
-        while (true)
+        using var stream = new FileStream(path, new FileStreamOptions
         {
-            var read = stream.Read(buffer, 0, buffer.Length);
-            if (read == 0)
-                break;
-            hasher.Update(buffer.AsSpan(0, read));
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.Read,
+            Options = FileOptions.SequentialScan,
+            BufferSize = 1,
+        });
+        const int bufferSize = 4 * 1024 * 1024;
+        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+        try
+        {
+            while (true)
+            {
+                var read = stream.Read(buffer, 0, bufferSize);
+                if (read == 0)
+                    break;
+                hasher.Update(buffer.AsSpan(0, read));
+            }
+            return hasher.Finalize().AsSpan().ToArray();
         }
-        return hasher.Finalize().AsSpan().ToArray();
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static void AppendAndFlush(string path, string line, string label)

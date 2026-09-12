@@ -81,17 +81,7 @@ internal static class PreflightSafety
         while (pending.Count > 0)
         {
             var directory = pending.Pop();
-            IEnumerable<string> entries;
-            try
-            {
-                entries = Directory.EnumerateFileSystemEntries(directory).ToArray();
-            }
-            catch (Exception ex)
-            {
-                throw new IOException($"No se pudo enumerar {directory}: {ex.Message}", ex);
-            }
-
-            foreach (var entry in entries)
+            foreach (var entry in EnumerateDirectoryEntries(directory))
             {
                 FileAttributes attributes;
                 try
@@ -130,6 +120,38 @@ internal static class PreflightSafety
         files.Sort((left, right) =>
             StringComparer.OrdinalIgnoreCase.Compare(left.RelativePath, right.RelativePath));
         return new SourceTreeScan(files, directories);
+    }
+
+    private static IEnumerable<string> EnumerateDirectoryEntries(string directory)
+    {
+        IEnumerator<string> enumerator;
+        try
+        {
+            enumerator = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+        }
+        catch (Exception ex)
+        {
+            throw new IOException($"No se pudo enumerar {directory}: {ex.Message}", ex);
+        }
+
+        using (enumerator)
+        {
+            while (true)
+            {
+                bool moved;
+                try
+                {
+                    moved = enumerator.MoveNext();
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException($"No se pudo enumerar {directory}: {ex.Message}", ex);
+                }
+                if (!moved)
+                    yield break;
+                yield return enumerator.Current;
+            }
+        }
     }
 
     internal static void ValidateSourceTreeSnapshot(string sourceRoot, SourceTreeScan expected)
