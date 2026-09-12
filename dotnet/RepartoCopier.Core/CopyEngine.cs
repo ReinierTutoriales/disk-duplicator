@@ -75,62 +75,67 @@ public static class CopyEngine
 
     private static PreparedCopy Preflight(CopyPlan plan)
     {
-        var source = Path.GetFullPath(plan.Source);
-        var sourceIsDirectory = Directory.Exists(source);
-        var sourceIsFile = File.Exists(source);
+        var requestedSource = Path.GetFullPath(plan.Source);
+        var sourceIsDirectory = Directory.Exists(requestedSource);
+        var sourceIsFile = File.Exists(requestedSource);
         if (!sourceIsDirectory && !sourceIsFile)
             throw new IOException("El origen debe ser un archivo regular o una carpeta existente.");
-        if (WindowsPath.IsReparsePoint(source))
+        if (WindowsPath.IsReparsePoint(requestedSource))
             throw new IOException("El origen no puede ser un symlink/junction/reparse point.");
 
+        var source = PreflightSafety.CanonicalExisting(requestedSource, "origen");
         var sourceName = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
         if (string.IsNullOrWhiteSpace(sourceName))
             throw new IOException("El origen debe tener un nombre; no se puede duplicar una raíz completa.");
 
-        var destinationRoots = plan.Destinations
+        var effectiveDestinations = plan.Destinations
             .Select(Path.GetFullPath)
             .Select(basePath => sourceIsDirectory ? Path.Combine(basePath, sourceName) : basePath)
             .ToArray();
-
-        if (sourceIsDirectory)
-        {
-            foreach (var destination in destinationRoots)
-            {
-                if (IsInside(source, destination))
-                    throw new IOException($"El destino no puede estar dentro del origen: {destination}");
-            }
-        }
+        var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
+            source,
+            effectiveDestinations);
 
         var sourceRoot = sourceIsDirectory
             ? source
-            : Path.GetDirectoryName(source) ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
+            : Path.GetDirectoryName(source)
+                ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
 
-        var directories = new List<string>();
-        var files = new List<FileEntry>();
+        SourceTreeScan scan;
         if (sourceIsDirectory)
         {
-            foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
-            {
-                RejectReparse(directory, "carpeta de origen");
-                directories.Add(Path.GetRelativePath(sourceRoot, directory));
-            }
-            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
-            {
-                RejectReparse(file, "archivo de origen");
-                files.Add(FileEntry.From(sourceRoot, file));
-            }
+            scan = PreflightSafety.ScanDirectory(source);
         }
         else
         {
             RejectReparse(source, "archivo de origen");
-            files.Add(FileEntry.From(sourceRoot, source));
+            var info = new FileInfo(source);
+            scan = new SourceTreeScan(
+                [new ScannedFile(
+                    source,
+                    Path.GetFileName(source),
+                    info.Length,
+                    info.LastWriteTimeUtc)],
+                []);
         }
 
-        var totalBytes = files.Aggregate<FileEntry, ulong>(0, (sum, file) => checked(sum + (ulong)file.Size));
+        var files = scan.Files
+            .Select(file => new FileEntry(
+                file.FullPath,
+                file.RelativePath,
+                file.Size,
+                file.LastWriteTimeUtc,
+                ToUnixNanoseconds(file.LastWriteTimeUtc)))
+            .ToList();
+        var directories = scan.Directories.ToList();
+        var totalBytes = files.Aggregate<FileEntry, ulong>(
+            0,
+            (sum, file) => checked(sum + (ulong)file.Size));
+
         foreach (var root in destinationRoots)
         {
-            Directory.CreateDirectory(root);
-            WindowsPath.EnsureNormalDirectory(root, "El destino");
+            PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files);
+            PreflightSafety.EnsureFreeSpace(root, scan.Files);
             StateLayout.PrepareTempDirectory(root);
             foreach (var relative in directories)
                 EnsureDestinationDirectory(root, relative);
