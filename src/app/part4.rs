@@ -29,6 +29,7 @@ impl eframe::App for CopierApp {
             self.fonts_initialized = true;
         }
         self.poll_startup();
+        self.poll_path_validation();
 
         if self.last_theme_check.elapsed() >= THEME_CHECK_INTERVAL {
             let previous_theme = self.use_light_theme;
@@ -151,23 +152,36 @@ impl eframe::App for CopierApp {
         } else if engine_running {
             ctx.request_repaint_after(STARTING_REPAINT);
         } else {
-            ctx.request_repaint_after(THEME_CHECK_INTERVAL);
+            ctx.request_repaint_after(PATH_CHECK_INTERVAL);
         }
 
         let key = self.paths_key();
-        if key != self.paths_key || self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL {
+        let key_changed = key != self.paths_key;
+        if key_changed {
             self.paths_key = key;
+            self.path_errors.clear();
+            self.validated_paths_key = None;
+            // Drop a stale receiver so a slow old UNC/removable path cannot block
+            // validation of newly selected paths. Its worker exits when the OS call returns.
+            self.path_validation_rx = None;
+        }
+        if busy {
+            self.path_errors.clear();
+            self.path_validation_rx = None;
+        } else if key_changed
+            || (self.path_validation_rx.is_none()
+                && self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL)
+        {
             self.last_path_check = Instant::now();
-            self.path_errors = if busy {
-                Vec::new()
-            } else {
-                self.validate_paths()
-            };
+            self.start_path_validation(key, ctx);
         }
 
         let path_error_count = self.path_errors.len();
-        let start_disabled =
+        let mut start_disabled =
             start_disabled_reason(&self.source, self.dests.len(), path_error_count);
+        if start_disabled.is_none() && self.validated_paths_key != Some(key) {
+            start_disabled = Some("Validando rutas…");
+        }
         let ready_to_start = start_disabled.is_none();
 
         let save_copy_shortcut = ctx.input_mut(|input| {

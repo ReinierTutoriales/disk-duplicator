@@ -380,6 +380,10 @@ fn fanout_worker(
                             bytes,
                             &ctx,
                         );
+                        let queue_depth = control
+                            .queue_depth
+                            .fetch_sub(1, Ordering::AcqRel)
+                            .saturating_sub(1);
                         match result {
                             Ok(()) => {
                                 if !opts.verify {
@@ -391,6 +395,7 @@ fn fanout_worker(
                                     &state,
                                     slot,
                                     written,
+                                    queue_depth,
                                     &mut effective_written,
                                     start,
                                 );
@@ -409,16 +414,26 @@ fn fanout_worker(
                                 if e != "Cancelado" {
                                     record_file_error(&state, slot, e);
                                 }
+                                state.dests.lock().unwrap()[slot].queue_depth = queue_depth;
                                 if !opts.keep_going || state.cancel.load(Ordering::Acquire) {
                                     control.alive.store(false, Ordering::Release);
                                 }
                             }
                         }
+                    } else {
+                        let queue_depth = control
+                            .queue_depth
+                            .fetch_sub(1, Ordering::AcqRel)
+                            .saturating_sub(1);
+                        state.dests.lock().unwrap()[slot].queue_depth = queue_depth;
                     }
+                } else {
+                    let queue_depth = control
+                        .queue_depth
+                        .fetch_sub(1, Ordering::AcqRel)
+                        .saturating_sub(1);
+                    state.dests.lock().unwrap()[slot].queue_depth = queue_depth;
                 }
-                control.queue_depth.fetch_sub(1, Ordering::AcqRel);
-                state.dests.lock().unwrap()[slot].queue_depth =
-                    control.queue_depth.load(Ordering::Acquire);
                 if !control.alive.load(Ordering::Acquire) { break; }
             }
             FanoutItem::End { hash } => {

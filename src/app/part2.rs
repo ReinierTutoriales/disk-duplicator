@@ -7,6 +7,8 @@ pub struct CopierApp {
     job: Option<Arc<JobState>>,
     workers: Vec<JoinHandle<()>>,
     startup_rx: Option<mpsc::Receiver<StartResult>>,
+    path_validation_rx: Option<mpsc::Receiver<PathValidationResult>>,
+    validated_paths_key: Option<u64>,
     show_credits: bool,
     show_settings: bool,
     pending_drop: Option<PendingDrop>,

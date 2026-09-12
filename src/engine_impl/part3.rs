@@ -161,9 +161,12 @@ fn deliver_to_active(
             }
         }
 
-        if counts_data {
-            state.dests.lock().unwrap()[slot].queue_depth =
-                controls[slot].queue_depth.load(Ordering::Acquire);
+    }
+
+    if counts_data {
+        let mut dests = state.dests.lock().unwrap();
+        for (slot, control) in controls.iter().enumerate() {
+            dests[slot].queue_depth = control.queue_depth.load(Ordering::Acquire);
         }
     }
 }
