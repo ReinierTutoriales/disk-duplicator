@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - '.github/single_file_fanout.py'
+      - '.github/single_file_refine.py'
       - '.github/workflows/single-file-audit.yml'
 
 permissions:
@@ -26,6 +27,8 @@ jobs:
           components: clippy,rustfmt
       - name: Apply single-file FAN-OUT support
         run: python .github/single_file_fanout.py
+      - name: Refine supervisor and source UX
+        run: python .github/single_file_refine.py
       - name: Format
         run: cargo fmt --all
       - name: Diff check
@@ -40,6 +43,7 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item .github/single_file_fanout.py
+          Remove-Item .github/single_file_refine.py
           Remove-Item .github/workflows/single-file-audit.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
