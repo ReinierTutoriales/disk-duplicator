@@ -380,6 +380,39 @@ fn progress_fraction(written: u64, total: u64, phase: DestPhase) -> f32 {
     (written as f64 / total as f64).clamp(0.0, 1.0) as f32
 }
 
+fn source_layout_stacked(available_width: f32) -> bool {
+    available_width < 720.0
+}
+
+fn start_disabled_reason(
+    source: &str,
+    destination_count: usize,
+    path_error_count: usize,
+) -> Option<&'static str> {
+    if source.trim().is_empty() {
+        Some("Selecciona una carpeta de origen")
+    } else if destination_count == 0 {
+        Some("Agrega al menos un destino")
+    } else if path_error_count > 0 {
+        Some("Corrige los problemas de ruta antes de iniciar")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+fn contains_mojibake(text: &str) -> bool {
+    [
+        "\u{FFFD}",
+        "\u{00C3}",
+        "\u{00C2}",
+        "\u{00E2}\u{20AC}",
+        "\u{00F0}\u{0178}",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
 fn shown_bps(bps: f64, last_tick: Instant) -> f64 {
     let idle = last_tick.elapsed().as_secs_f64();
     if idle <= SPEED_DECAY_GRACE_SECS {
