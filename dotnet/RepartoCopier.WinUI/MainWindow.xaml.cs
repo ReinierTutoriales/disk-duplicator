@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 
 namespace RepartoCopier.WinUI;
@@ -15,6 +16,7 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<ProgressRow> _progressRows = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
     private CopyJob? _job;
+    private string? _lastDiagnosticsReport;
 
     public MainWindow()
     {
@@ -126,6 +128,8 @@ public sealed partial class MainWindow : Window
         try
         {
             ErrorBar.IsOpen = false;
+            _lastDiagnosticsReport = null;
+            CopyDiagnosticsButton.IsEnabled = false;
             var plan = CopyPlan.Create(
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path),
@@ -184,6 +188,15 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "Cancelando de forma segura…";
     }
 
+    private void CopyDiagnostics_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_lastDiagnosticsReport)) return;
+        var package = new DataPackage();
+        package.SetText(_lastDiagnosticsReport);
+        Clipboard.SetContent(package);
+        StatusText.Text = "Diagnóstico copiado al portapapeles";
+    }
+
     private async Task ObserveJobCompletionAsync(CopyJob observed)
     {
         try
@@ -204,6 +217,11 @@ public sealed partial class MainWindow : Window
                 RefreshProgress();
                 _progressTimer.Stop();
                 var snapshots = observed.Snapshot();
+                _lastDiagnosticsReport = DiagnosticsReport.Format(
+                    SourcePathBox.Text,
+                    snapshots,
+                    observed.DiagnosticsSnapshot());
+                CopyDiagnosticsButton.IsEnabled = true;
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 StatusText.Text = cancelled
