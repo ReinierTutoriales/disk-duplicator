@@ -16,7 +16,6 @@
     <Nullable>enable</Nullable>
     <LangVersion>14.0</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <ApplicationIcon>Assets\RepartoCopier.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
