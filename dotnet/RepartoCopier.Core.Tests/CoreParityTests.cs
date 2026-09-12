@@ -289,6 +289,25 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task EngineFlushesBatchedRecoveryAtJobCompletion()
+    {
+        using var temp = new TempDirectory("recovery-batched-engine");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        for (var index = 0; index < 150; index++)
+            await File.WriteAllTextAsync(Path.Combine(source, $"file-{index:D3}.txt"), $"payload-{index}");
+
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+        AssertHealthy(job);
+
+        var root = Path.Combine(destinationBase, "Origen");
+        Assert.AreEqual(150, File.ReadLines(StateLayout.JournalPath(root)).Count());
+        Assert.AreEqual(150, File.ReadLines(StateLayout.ManifestPath(root)).Count());
+    }
+
+    [TestMethod]
     public async Task FanOutDeliversMultipleBlocksToEveryDestination()
     {
         using var temp = new TempDirectory("fanout-multiblock");

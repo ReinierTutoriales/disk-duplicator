@@ -414,6 +414,7 @@ public static class CopyEngine
         ConcurrentDictionary<string, byte[]> expectedHashes)
     {
         CurrentFile? current = null;
+        using var recovery = new RecoveryCheckpointWriter(worker.Root);
         try
         {
             worker.Progress.SetPhase(DestinationPhase.Copying);
@@ -465,7 +466,7 @@ public static class CopyEngine
                         orphanData.Block.Release();
                         break;
                     case EndMessage end when current is not null:
-                        await FinishFileAsync(worker, current, end.Hash, options, job).ConfigureAwait(false);
+                        await FinishFileAsync(worker, current, end.Hash, options, job, recovery).ConfigureAwait(false);
                         if (!current.Failed)
                             expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
                         current = null;
@@ -562,7 +563,8 @@ public static class CopyEngine
         CurrentFile current,
         byte[] expectedHash,
         CopyOptions options,
-        CopyJob job)
+        CopyJob job,
+        RecoveryCheckpointWriter recovery)
     {
         if (current.Failed) return;
         if (current.Copied != current.Entry.Size)
@@ -593,7 +595,13 @@ public static class CopyEngine
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         CommitPart(worker.Root, current.PartPath, current.DestinationPath);
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
-        AppendRecoveryState(worker.Root, current.Entry, expectedHash);
+        recovery.Append(
+            new RecoveryFile(
+                current.Entry.SourcePath,
+                current.Entry.RelativePath,
+                current.Entry.Size,
+                current.Entry.ModifiedUnixNanoseconds),
+            expectedHash);
         worker.Progress.MarkDone();
     }
 
@@ -698,16 +706,6 @@ public static class CopyEngine
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
-
-    private static void AppendRecoveryState(string root, FileEntry entry, byte[] hash) =>
-        RecoveryManager.AppendDurable(
-            root,
-            new RecoveryFile(
-                entry.SourcePath,
-                entry.RelativePath,
-                entry.Size,
-                entry.ModifiedUnixNanoseconds),
-            hash);
 
     private static void CommitPart(string destinationRoot, string part, string destination)
     {
