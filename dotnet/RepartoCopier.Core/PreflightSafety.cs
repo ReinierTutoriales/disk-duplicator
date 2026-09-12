@@ -44,6 +44,8 @@ internal static class PreflightSafety
         foreach (var requested in effectiveDestinations)
         {
             var full = Path.GetFullPath(requested);
+            if (PathsOverlap(source, full))
+                throw new IOException($"El destino {requested} se solapa con el origen.");
             Directory.CreateDirectory(full);
             RejectReparse(full, "destino");
             var destination = CanonicalExisting(full, "destino");

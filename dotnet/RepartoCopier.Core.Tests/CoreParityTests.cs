@@ -64,6 +64,76 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void PreflightRejectsSingleFileDestinationContainingSource()
+    {
+        using var temp = new TempDirectory("preflight-file-overlap");
+        var sourceDirectory = Directory.CreateDirectory(Path.Combine(temp.Path, "source")).FullName;
+        var source = Path.Combine(sourceDirectory, "selected.bin");
+        File.WriteAllBytes(source, [1, 2, 3]);
+
+        var plan = CopyPlan.Create(source, [sourceDirectory], skipSame: false, keepGoing: false);
+        var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
+        StringAssert.Contains(error.Message, "solapa");
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, File.ReadAllBytes(source));
+    }
+
+    [TestMethod]
+    public void PreflightRejectsDestinationInsideSourceBeforeCreatingEffectiveRoot()
+    {
+        using var temp = new TempDirectory("preflight-source-overlap");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Proyecto")).FullName;
+        File.WriteAllText(Path.Combine(source, "data.txt"), "safe");
+        var baseInsideSource = Path.Combine(source, "backup");
+        var forbiddenEffectiveRoot = Path.Combine(baseInsideSource, "Proyecto");
+
+        var plan = CopyPlan.Create(source, [baseInsideSource], skipSame: false, keepGoing: false);
+        var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
+        StringAssert.Contains(error.Message, "solapa");
+        Assert.IsFalse(Directory.Exists(forbiddenEffectiveRoot));
+    }
+
+    [TestMethod]
+    public void PreflightRejectsOverlappingDestinations()
+    {
+        using var temp = new TempDirectory("preflight-destination-overlap");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        File.WriteAllText(Path.Combine(source, "a.txt"), "a");
+        var firstBase = Path.Combine(temp.Path, "dest");
+        var secondBase = Path.Combine(firstBase, "Origen", "nested");
+
+        var plan = CopyPlan.Create(source, [firstBase, secondBase], skipSame: false, keepGoing: false);
+        var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
+        StringAssert.Contains(error.Message, "solapan entre sí");
+    }
+
+    [TestMethod]
+    public void PreflightRejectsDestinationFileDirectoryConflict()
+    {
+        using var temp = new TempDirectory("preflight-layout-conflict");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        File.WriteAllText(Path.Combine(source, "a.txt"), "a");
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var effectiveRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Origen")).FullName;
+        Directory.CreateDirectory(Path.Combine(effectiveRoot, "a.txt"));
+
+        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
+        StringAssert.Contains(error.Message, "requiere un archivo");
+    }
+
+    [TestMethod]
+    public void PreflightSpaceMathMatchesRustRules()
+    {
+        Assert.AreEqual(0UL, PreflightSafety.RoundUp(0, 4096));
+        Assert.AreEqual(4096UL, PreflightSafety.RoundUp(1, 4096));
+        Assert.AreEqual(8192UL, PreflightSafety.RoundUp(4097, 4096));
+        Assert.AreEqual(1UL * 1024 * 1024 * 1024,
+            PreflightSafety.ReserveForVolume(10UL * 1024 * 1024 * 1024));
+        Assert.AreEqual(16UL * 1024 * 1024 * 1024,
+            PreflightSafety.ReserveForVolume(100UL * 1024 * 1024 * 1024 * 1024));
+    }
+
+    [TestMethod]
     public async Task FanOutDeliversMultipleBlocksToEveryDestination()
     {
         using var temp = new TempDirectory("fanout-multiblock");
