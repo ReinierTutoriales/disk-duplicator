@@ -1,0 +1,56 @@
+name: Runtime UI polish trigger
+
+on:
+  push:
+    paths:
+      - '.github/workflows/runtime-ui-polish-trigger.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Apply runtime UI polish
+        shell: pwsh
+        run: python .github/runtime_ui_polish.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Diff check
+        shell: pwsh
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests release
+        run: cargo test --release --all-targets
+      - name: Build release
+        run: cargo build --release
+      - name: Commit verified runtime UI polish and clean helpers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Remove-Item .github/runtime_ui_polish.py -Force
+          Remove-Item .github/workflows/runtime-ui-polish.yml -Force
+          Remove-Item .github/workflows/runtime-ui-polish-trigger.yml -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/app/part1.rs src/app/part4.rs src/app/part5.rs .github/runtime_ui_polish.py .github/workflows/runtime-ui-polish.yml .github/workflows/runtime-ui-polish-trigger.yml
+          git commit -m "ui: zero terminal speed and clarify drag drop"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin HEAD:main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh workflow run build.yml --ref main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
