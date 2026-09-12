@@ -99,9 +99,9 @@ impl eframe::App for CopierApp {
         }
 
         let path_error_count = self.path_errors.len();
-        let ready_to_start = !self.source.trim().is_empty()
-            && !self.dests.is_empty()
-            && path_error_count == 0;
+        let start_disabled =
+            start_disabled_reason(&self.source, self.dests.len(), path_error_count);
+        let ready_to_start = start_disabled.is_none();
 
         egui::TopBottomPanel::top("header_v2").show(ctx, |ui| {
             ui.add_space(SPACING_XS);
@@ -158,34 +158,66 @@ impl eframe::App for CopierApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(2.0);
 
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("ORIGEN")
-                        .size(10.5)
-                        .strong()
-                        .color(Theme::muted(self.use_light_theme)),
-                );
-                let button_width = 88.0;
-                let label_width = 54.0;
-                let field_width =
-                    (ui.available_width() - button_width - label_width - SPACING_SM).max(150.0);
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.add_sized(
-                        [field_width, 28.0],
-                        egui::TextEdit::singleline(&mut self.source)
-                            .hint_text("Carpeta que quieres copiar"),
+            let stacked_source = source_layout_stacked(ui.available_width());
+            if stacked_source {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("ORIGEN")
+                            .size(10.5)
+                            .strong()
+                            .color(Theme::muted(self.use_light_theme)),
                     );
-                    if ui
-                        .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                        .on_hover_text("Seleccionar carpeta de origen")
-                        .clicked()
-                    {
-                        if let Some(path) = self.pick_source_dir() {
-                            self.source = path;
-                        }
-                    }
+                    ui.add_enabled_ui(!busy, |ui| {
+                        let button_width = 88.0;
+                        let field_width = (ui.available_width() - button_width - SPACING_SM).max(150.0);
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [field_width, 28.0],
+                                egui::TextEdit::singleline(&mut self.source)
+                                    .hint_text("Carpeta que quieres copiar"),
+                            );
+                            if ui
+                                .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
+                                .on_hover_text("Seleccionar carpeta de origen")
+                                .clicked()
+                            {
+                                if let Some(path) = self.pick_source_dir() {
+                                    self.source = path;
+                                }
+                            }
+                        });
+                    });
                 });
-            });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("ORIGEN")
+                            .size(10.5)
+                            .strong()
+                            .color(Theme::muted(self.use_light_theme)),
+                    );
+                    let button_width = 88.0;
+                    let label_width = 54.0;
+                    let field_width =
+                        (ui.available_width() - button_width - label_width - SPACING_SM).max(150.0);
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.add_sized(
+                            [field_width, 28.0],
+                            egui::TextEdit::singleline(&mut self.source)
+                                .hint_text("Carpeta que quieres copiar"),
+                        );
+                        if ui
+                            .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
+                            .on_hover_text("Seleccionar carpeta de origen")
+                            .clicked()
+                        {
+                            if let Some(path) = self.pick_source_dir() {
+                                self.source = path;
+                            }
+                        }
+                    });
+                });
+            }
 
             ui.add_space(SPACING_XS);
 
@@ -369,9 +401,11 @@ impl eframe::App for CopierApp {
                         .fill(Theme::accent(self.use_light_theme))
                         .stroke(egui::Stroke::NONE)
                         .min_size(egui::vec2(116.0, 30.0));
+                        let start_hint = start_disabled
+                            .unwrap_or("Iniciar copia a todos los destinos");
                         if ui
                             .add_enabled(ready_to_start, button)
-                            .on_hover_text("Iniciar copia a todos los destinos")
+                            .on_hover_text(start_hint)
                             .clicked()
                         {
                             self.start();

@@ -38,6 +38,56 @@ mod tests {
     }
 
     #[test]
+    fn source_layout_stacks_at_narrow_widths() {
+        assert!(source_layout_stacked(680.0));
+        assert!(source_layout_stacked(719.0));
+        assert!(!source_layout_stacked(720.0));
+        assert!(!source_layout_stacked(960.0));
+    }
+
+    #[test]
+    fn disabled_start_always_has_a_specific_reason() {
+        assert_eq!(
+            start_disabled_reason("", 0, 0),
+            Some("Selecciona una carpeta de origen")
+        );
+        assert_eq!(
+            start_disabled_reason(r"C:\Origen", 0, 0),
+            Some("Agrega al menos un destino")
+        );
+        assert_eq!(
+            start_disabled_reason(r"C:\Origen", 1, 2),
+            Some("Corrige los problemas de ruta antes de iniciar")
+        );
+        assert_eq!(start_disabled_reason(r"C:\Origen", 1, 0), None);
+    }
+
+    #[test]
+    fn unicode_paths_survive_display_and_compaction() {
+        let path = r"C:\Música\Niño\日本語\Документы\archivo-especial.txt";
+        let compact = compact_path(path, 28);
+        assert!(compact.starts_with("C:"));
+        assert!(compact.ends_with("especial.txt"));
+        assert!(compact.contains('…'));
+        assert!(!compact.contains('�'));
+
+        let extended = r"\\?\C:\Música\Niño\日本語";
+        assert_eq!(display_path(extended), r"C:\Música\Niño\日本語");
+    }
+
+    #[test]
+    fn ui_sources_do_not_contain_common_mojibake_sequences() {
+        for source in [
+            include_str!("part1.rs"),
+            include_str!("part2.rs"),
+            include_str!("part3.rs"),
+            include_str!("part4.rs"),
+        ] {
+            assert!(!contains_mojibake(source));
+        }
+    }
+
+    #[test]
     fn compact_path_preserves_both_ends() {
         let value = compact_path(r"C:\very\long\folder\tree\important-file.bin", 24);
         assert!(value.starts_with("C:"));
