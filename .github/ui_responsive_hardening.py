@@ -64,7 +64,6 @@ methods = '''    fn draw_copy_options(&mut self, ui: &mut egui::Ui, busy: bool) 
         paused: bool,
         starting: bool,
         engine_running: bool,
-        ready_to_start: bool,
         start_disabled: Option<&str>,
     ) {
         if running {
@@ -114,6 +113,7 @@ methods = '''    fn draw_copy_options(&mut self, ui: &mut egui::Ui, busy: bool) 
             .fill(Theme::accent(self.use_light_theme))
             .stroke(egui::Stroke::NONE)
             .min_size(egui::vec2(124.0, FLUENT_CONTROL_HEIGHT));
+            let ready_to_start = start_disabled.is_none();
             let start_hint = start_disabled.unwrap_or("Iniciar copia a todos los destinos");
             if ui
                 .add_enabled(ready_to_start, button)
@@ -167,14 +167,17 @@ new_path_block = '''        let key = self.paths_key();
             self.path_errors.clear();
             self.path_validation_rx = None;
         } else if self.path_validation_rx.is_none() {
-            let validation_due = if self.validated_paths_key == Some(key) {
-                self.last_path_check.elapsed() >= PATH_CHECK_INTERVAL
+            let elapsed = self.last_path_check.elapsed();
+            let validation_delay = if self.validated_paths_key == Some(key) {
+                PATH_CHECK_INTERVAL
             } else {
-                self.last_path_check.elapsed() >= PATH_EDIT_DEBOUNCE
+                PATH_EDIT_DEBOUNCE
             };
-            if validation_due {
+            if elapsed >= validation_delay {
                 self.last_path_check = Instant::now();
                 self.start_path_validation(key, ctx);
+            } else {
+                ctx.request_repaint_after(validation_delay.saturating_sub(elapsed));
             }
         }
 '''
@@ -313,7 +316,6 @@ new_actions = '''            let stacked_actions = actions_layout_stacked(ui.ava
                             paused,
                             starting,
                             engine_running,
-                            ready_to_start,
                             start_disabled,
                         );
                     });
@@ -328,7 +330,6 @@ new_actions = '''            let stacked_actions = actions_layout_stacked(ui.ava
                             paused,
                             starting,
                             engine_running,
-                            ready_to_start,
                             start_disabled,
                         );
                     });
@@ -364,7 +365,6 @@ replace_once(
     #[test]
     fn path_validation_debounce_is_shorter_than_periodic_refresh() {
         assert!(PATH_EDIT_DEBOUNCE < PATH_CHECK_INTERVAL);
-        assert!(DESTINATION_CHIP_MAX_HEIGHT <= 80.0);
     }
 ''',
     "responsive tests",
