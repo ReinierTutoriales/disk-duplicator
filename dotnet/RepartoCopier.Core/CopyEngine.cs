@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading.Channels;
 using System.Runtime.InteropServices;
 using Blake3;
@@ -68,7 +69,7 @@ public static class CopyEngine
     private const int AdaptiveMaxQueue = 8;
     private const int FastSamplesToGrow = 8;
     private const int Retries = 2;
-    private const int MaxVerificationParallelism = 8;
+    private const int AbsoluteMaxVerificationParallelism = 8;
     private static readonly TimeSpan FastBlockWrite = TimeSpan.FromMilliseconds(40);
     private static readonly TimeSpan SlowBlockWrite = TimeSpan.FromMilliseconds(250);
 
@@ -207,8 +208,9 @@ public static class CopyEngine
                 .Select((root, index) => new DestinationWorker(root, index, progress[index], queueDepth))
                 .ToArray();
 
+            using var copyResources = ResourceGovernor.EnterCopy(workers.Length);
             var writerTasks = workers
-                .Select(worker => Task.Run(() => WriterLoopAsync(worker, options, job, expectedHashes), CancellationToken.None))
+                .Select(worker => WriterLoopAsync(worker, options, job, expectedHashes))
                 .ToArray();
 
             Exception? producerError = null;
@@ -241,6 +243,7 @@ public static class CopyEngine
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
 
+            copyResources.Dispose();
             if (options.Verify && !token.IsCancellationRequested)
                 await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job).ConfigureAwait(false);
 
@@ -837,7 +840,7 @@ public static class CopyEngine
             activeSlots,
             new ParallelOptions
             {
-                MaxDegreeOfParallelism = Math.Min(MaxVerificationParallelism, Math.Max(1, activeSlots.Length)),
+                MaxDegreeOfParallelism = ResourceGovernor.VerificationParallelism(activeSlots.Length),
                 CancellationToken = job.Token,
             },
             async (slot, token) =>
@@ -893,7 +896,7 @@ public static class CopyEngine
                 candidates,
                 new ParallelOptions
                 {
-                    MaxDegreeOfParallelism = Math.Min(MaxVerificationParallelism, candidates.Count),
+                    MaxDegreeOfParallelism = ResourceGovernor.VerificationParallelism(candidates.Count),
                     CancellationToken = token,
                 },
                 async (slot, cancellationToken) =>
@@ -1149,6 +1152,106 @@ public static class CopyEngine
             var buffer = Interlocked.Exchange(ref _buffer, null);
             if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
             _budget.Release(_reservedBytes);
+        }
+    }
+
+    private static class ResourceGovernor
+    {
+        private static readonly object PriorityGate = new();
+        private static int _activeCopyLeases;
+        private static ProcessPriorityClass? _originalPriority;
+
+        public static CopyLease EnterCopy(int destinations)
+        {
+            EnsureThreadPoolCapacity(destinations);
+            lock (PriorityGate)
+            {
+                _activeCopyLeases++;
+                if (_activeCopyLeases == 1)
+                    RaiseProcessPriorityForCopy();
+            }
+            return new CopyLease();
+        }
+
+        public static int VerificationParallelism(int activeDestinations)
+        {
+            if (activeDestinations <= 0)
+                return 1;
+            var cpuBound = Math.Max(1, Environment.ProcessorCount / 2);
+            return Math.Min(activeDestinations, Math.Min(AbsoluteMaxVerificationParallelism, cpuBound));
+        }
+
+        private static void EnsureThreadPoolCapacity(int destinations)
+        {
+            var logicalProcessors = Math.Max(1, Environment.ProcessorCount);
+            var destinationDemand = Math.Max(1, destinations) + 4;
+            var targetWorkers = Math.Min(
+                64,
+                Math.Max(logicalProcessors, Math.Min(destinationDemand, logicalProcessors * 2)));
+            ThreadPool.GetMinThreads(out var currentWorkers, out var currentIo);
+            if (targetWorkers > currentWorkers)
+                _ = ThreadPool.SetMinThreads(targetWorkers, currentIo);
+        }
+
+        private static void RaiseProcessPriorityForCopy()
+        {
+            if (!OperatingSystem.IsWindows())
+                return;
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                var current = process.PriorityClass;
+                _originalPriority = current;
+                if (current is ProcessPriorityClass.Idle or ProcessPriorityClass.BelowNormal or ProcessPriorityClass.Normal)
+                    process.PriorityClass = ProcessPriorityClass.AboveNormal;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+            {
+                // Priority is an optimization only. Copy correctness must never depend on it.
+                _originalPriority = null;
+            }
+        }
+
+        private static void ExitCopy()
+        {
+            lock (PriorityGate)
+            {
+                if (_activeCopyLeases <= 0)
+                    return;
+                _activeCopyLeases--;
+                if (_activeCopyLeases != 0)
+                    return;
+                RestoreProcessPriority();
+            }
+        }
+
+        private static void RestoreProcessPriority()
+        {
+            var original = _originalPriority;
+            _originalPriority = null;
+            if (original is null || !OperatingSystem.IsWindows())
+                return;
+            try
+            {
+                using var process = Process.GetCurrentProcess();
+                process.PriorityClass = original.Value;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+            {
+                // Best effort. Never fail a completed copy because Windows rejected a priority change.
+            }
+        }
+
+        internal sealed class CopyLease : IDisposable
+        {
+            private int _disposed;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                    return;
+                ExitCopy();
+            }
         }
     }
 
