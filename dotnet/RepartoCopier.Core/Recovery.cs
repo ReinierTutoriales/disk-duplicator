@@ -9,6 +9,108 @@ internal sealed record RecoveryFile(
     long Size,
     long ModifiedUnixNanoseconds);
 
+internal sealed class RecoveryCheckpointWriter : IDisposable
+{
+    private const int BatchFiles = 128;
+    private const long MaxCheckpointMilliseconds = 1_000;
+
+    private readonly string _destinationRoot;
+    private FileStream? _manifest;
+    private FileStream? _journal;
+    private int _pending;
+    private long _lastCheckpoint = Environment.TickCount64;
+    private bool _disposed;
+
+    internal RecoveryCheckpointWriter(string destinationRoot) =>
+        _destinationRoot = destinationRoot;
+
+    internal void Append(RecoveryFile file, ReadOnlySpan<byte> hash)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (hash.Length != 32)
+            throw new ArgumentException("BLAKE3 debe contener exactamente 32 bytes.", nameof(hash));
+
+        EnsureOpen();
+        var manifestLine = Encoding.UTF8.GetBytes(
+            $"{Convert.ToHexString(hash).ToLowerInvariant()}  {RecoveryManager.ManifestKey(file.RelativePath)}{Environment.NewLine}");
+        var journalLine = Encoding.UTF8.GetBytes(
+            $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}{Environment.NewLine}");
+        _manifest!.Write(manifestLine);
+        _journal!.Write(journalLine);
+        _pending++;
+
+        if (_pending >= BatchFiles || Environment.TickCount64 - _lastCheckpoint >= MaxCheckpointMilliseconds)
+            FlushCheckpoint();
+    }
+
+    internal void FlushCheckpoint()
+    {
+        if (_pending == 0)
+            return;
+
+        // Durability ordering is intentional. A journal entry is trusted only after
+        // its manifest hash has already reached stable storage.
+        _manifest!.Flush(flushToDisk: true);
+        _journal!.Flush(flushToDisk: true);
+        _pending = 0;
+        _lastCheckpoint = Environment.TickCount64;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        try
+        {
+            FlushCheckpoint();
+        }
+        finally
+        {
+            _journal?.Dispose();
+            _manifest?.Dispose();
+            _disposed = true;
+        }
+    }
+
+    private void EnsureOpen()
+    {
+        if (_manifest is not null)
+            return;
+
+        StateLayout.PrepareStateDirectory(_destinationRoot);
+        _manifest = OpenAppend(StateLayout.ManifestPath(_destinationRoot), "manifest");
+        try
+        {
+            _journal = OpenAppend(StateLayout.JournalPath(_destinationRoot), "state");
+        }
+        catch
+        {
+            _manifest.Dispose();
+            _manifest = null;
+            throw;
+        }
+    }
+
+    private static FileStream OpenAppend(string path, string label)
+    {
+        var parent = Path.GetDirectoryName(path)
+            ?? throw new IOException($"Ruta inválida de {label}: {path}");
+        Directory.CreateDirectory(parent);
+        WindowsPath.EnsureNormalDirectory(parent, $"La carpeta de {label}");
+        if (Directory.Exists(path) || (File.Exists(path) && WindowsPath.IsReparsePoint(path)))
+            throw new IOException($"Entrada de estado no segura para {label}: {path}");
+
+        return new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Append,
+            Access = FileAccess.Write,
+            Share = FileShare.Read,
+            Options = FileOptions.SequentialScan,
+            BufferSize = 64 * 1024,
+        });
+    }
+}
+
 internal static class RecoveryManager
 {
     private const int PreviousStateIdHex = 32;
