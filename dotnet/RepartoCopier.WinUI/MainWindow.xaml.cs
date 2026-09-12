@@ -15,6 +15,7 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<DestinationRow> _destinations = [];
     private readonly ObservableCollection<ProgressRow> _progressRows = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
+    private readonly Button _copyDiagnosticsButton = new() { Content = "Copiar diagnóstico", IsEnabled = false };
     private CopyJob? _job;
     private string? _lastDiagnosticsReport;
 
@@ -23,6 +24,8 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         DestinationList.ItemsSource = _destinations;
         ProgressList.ItemsSource = _progressRows;
+        _copyDiagnosticsButton.Click += CopyDiagnostics_Click;
+        CommandPanel.Children.Add(_copyDiagnosticsButton);
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.Resize(new SizeInt32(960, 620));
@@ -129,7 +132,7 @@ public sealed partial class MainWindow : Window
         {
             ErrorBar.IsOpen = false;
             _lastDiagnosticsReport = null;
-            CopyDiagnosticsButton.IsEnabled = false;
+            _copyDiagnosticsButton.IsEnabled = false;
             var plan = CopyPlan.Create(
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path),
@@ -221,7 +224,7 @@ public sealed partial class MainWindow : Window
                     SourcePathBox.Text,
                     snapshots,
                     observed.DiagnosticsSnapshot());
-                CopyDiagnosticsButton.IsEnabled = true;
+                _copyDiagnosticsButton.IsEnabled = true;
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 StatusText.Text = cancelled
