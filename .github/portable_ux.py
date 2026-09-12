@@ -17,8 +17,8 @@ part4 = p4.read_text(encoding='utf-8')
 
 main = replace_one(
     main,
-    'use std::sync::Arc;\n',
-    'use std::ffi::OsString;\nuse std::path::PathBuf;\nuse std::sync::Arc;\n',
+    'use app::CopierApp;\nuse eframe::egui;\nuse std::sync::Arc;\n',
+    'use app::CopierApp;\nuse eframe::egui;\nuse std::ffi::OsString;\nuse std::path::PathBuf;\nuse std::sync::Arc;\n',
     'main imports',
 )
 
