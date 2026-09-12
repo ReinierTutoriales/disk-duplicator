@@ -96,9 +96,9 @@ public static class WindowsPath
         {
             return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return false;
+            throw new IOException($"No se pudo validar de forma segura la ruta: {path}", ex);
         }
     }
 
