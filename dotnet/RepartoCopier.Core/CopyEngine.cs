@@ -52,7 +52,7 @@ public sealed class CopyJob : IAsyncDisposable
 public static class CopyEngine
 {
     private const int BlockSize = 16 * 1024 * 1024;
-    private const int SourcePrefetchDepth = 2;
+    private const int SourcePrefetchPhysicalCapacity = 4;
     private const int SourcePrefetchThreshold = 16 * 1024 * 1024;
     private const int WriteChunkSize = 4 * 1024 * 1024;
     private const int SmallBufferSize = 64 * 1024;
@@ -192,6 +192,7 @@ public static class CopyEngine
         var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
+        var pipeline = new PipelineGovernor();
         try
         {
             var skipMasks = options.SkipSame
@@ -215,7 +216,7 @@ public static class CopyEngine
             Exception? producerError = null;
             try
             {
-                await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job).ConfigureAwait(false);
+                await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job, pipeline).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -279,7 +280,8 @@ public static class CopyEngine
         DestinationProgress[] progress,
         bool[][] skipMasks,
         ConcurrentDictionary<string, byte[]> expectedHashes,
-        CopyJob job)
+        CopyJob job,
+        PipelineGovernor pipeline)
     {
         var token = job.Token;
         var bufferBudget = AdaptiveByteBudget.CreateForSystem();
@@ -307,8 +309,8 @@ public static class CopyEngine
                 await DeliverAsync(active, new BeginMessage(entry), countsData: false, job).ConfigureAwait(false);
 
                 var sourceResult = entry.Size >= SourcePrefetchThreshold
-                    ? await ReadAndFanOutPrefetchedAsync(entry, active, bufferBudget, job).ConfigureAwait(false)
-                    : await ReadAndFanOutSequentialAsync(entry, active, bufferBudget, job).ConfigureAwait(false);
+                    ? await ReadAndFanOutPrefetchedAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false)
+                    : await ReadAndFanOutSequentialAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false);
                 if (sourceResult is null)
                     continue;
 
@@ -334,7 +336,8 @@ public static class CopyEngine
         FileEntry entry,
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
-        CopyJob job)
+        CopyJob job,
+        PipelineGovernor pipeline)
     {
         using var hasher = Hasher.New();
         await using var source = OpenSourceStream(entry.SourcePath);
@@ -345,12 +348,16 @@ public static class CopyEngine
         {
             job.Token.ThrowIfCancellationRequested();
             job.WaitIfPaused(job.Token);
+            var budgetStarted = Stopwatch.GetTimestamp();
             await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
+            pipeline.RecordBudgetWait(Stopwatch.GetElapsedTime(budgetStarted));
             var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
             int read;
             try
             {
+                var readStarted = Stopwatch.GetTimestamp();
                 read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
+                pipeline.RecordSourceRead(Stopwatch.GetElapsedTime(readStarted));
             }
             catch
             {
@@ -377,7 +384,9 @@ public static class CopyEngine
             }
 
             var block = new SharedBlock(rented, read, readBufferSize, recipients.Length, bufferBudget);
+            var deliveryStarted = Stopwatch.GetTimestamp();
             await DeliverAsync(recipients, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
+            pipeline.RecordDeliveryWait(Stopwatch.GetElapsedTime(deliveryStarted));
             active.RemoveAll(worker => !worker.IsActive);
             if (active.Count == 0)
                 return null;
@@ -391,10 +400,11 @@ public static class CopyEngine
         FileEntry entry,
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
-        CopyJob job)
+        CopyJob job,
+        PipelineGovernor pipeline)
     {
         using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
-        var sourceQueue = Channel.CreateBounded<SourceReadBlock>(new BoundedChannelOptions(SourcePrefetchDepth)
+        var sourceQueue = Channel.CreateBounded<SourceReadBlock>(new BoundedChannelOptions(SourcePrefetchPhysicalCapacity)
         {
             SingleReader = true,
             SingleWriter = true,
@@ -406,14 +416,22 @@ public static class CopyEngine
             sourceQueue.Writer,
             bufferBudget,
             job,
+            pipeline,
             prefetchCancel.Token);
 
         Exception? deliveryError = null;
         var stoppedEarly = false;
         try
         {
-            await foreach (var sourceBlock in sourceQueue.Reader.ReadAllAsync(job.Token).ConfigureAwait(false))
+            while (true)
             {
+                var consumerStarted = Stopwatch.GetTimestamp();
+                if (!await sourceQueue.Reader.WaitToReadAsync(job.Token).ConfigureAwait(false))
+                    break;
+                pipeline.RecordConsumerWait(Stopwatch.GetElapsedTime(consumerStarted));
+                if (!sourceQueue.Reader.TryRead(out var sourceBlock))
+                    continue;
+                pipeline.ReleasePrefetchSlot();
                 var recipients = active.Where(worker => worker.IsActive).ToArray();
                 if (recipients.Length == 0)
                 {
@@ -424,7 +442,9 @@ public static class CopyEngine
                 }
 
                 var shared = sourceBlock.TransferToShared(recipients.Length);
+                var deliveryStarted = Stopwatch.GetTimestamp();
                 await DeliverAsync(recipients, new DataMessage(shared), countsData: true, job).ConfigureAwait(false);
+                pipeline.RecordDeliveryWait(Stopwatch.GetElapsedTime(deliveryStarted));
                 active.RemoveAll(worker => !worker.IsActive);
                 if (active.Count == 0)
                 {
@@ -455,7 +475,10 @@ public static class CopyEngine
         finally
         {
             while (sourceQueue.Reader.TryRead(out var leftover))
+            {
+                pipeline.ReleasePrefetchSlot();
                 leftover.Release();
+            }
         }
 
         if (deliveryError is not null)
@@ -471,6 +494,7 @@ public static class CopyEngine
         ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
+        PipelineGovernor pipeline,
         CancellationToken token)
     {
         Exception? completionError = null;
@@ -484,17 +508,31 @@ public static class CopyEngine
             {
                 token.ThrowIfCancellationRequested();
                 job.WaitIfPaused(token);
-                await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
+                await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
+                var budgetStarted = Stopwatch.GetTimestamp();
+                try
+                {
+                    await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
+                    pipeline.RecordBudgetWait(Stopwatch.GetElapsedTime(budgetStarted));
+                }
+                catch
+                {
+                    pipeline.ReleasePrefetchSlot();
+                    throw;
+                }
                 var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
                 int read;
                 try
                 {
+                    var readStarted = Stopwatch.GetTimestamp();
                     read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
+                    pipeline.RecordSourceRead(Stopwatch.GetElapsedTime(readStarted));
                 }
                 catch
                 {
                     ArrayPool<byte>.Shared.Return(rented);
                     bufferBudget.Release(readBufferSize);
+                    pipeline.ReleasePrefetchSlot();
                     throw;
                 }
 
@@ -502,6 +540,7 @@ public static class CopyEngine
                 {
                     ArrayPool<byte>.Shared.Return(rented);
                     bufferBudget.Release(readBufferSize);
+                    pipeline.ReleasePrefetchSlot();
                     break;
                 }
 
@@ -515,6 +554,7 @@ public static class CopyEngine
                 catch
                 {
                     block.Release();
+                    pipeline.ReleasePrefetchSlot();
                     throw;
                 }
             }
@@ -1142,6 +1182,113 @@ public static class CopyEngine
             var buffer = Interlocked.Exchange(ref _buffer, null);
             if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
             _budget.Release(_reservedBytes);
+        }
+    }
+
+    private sealed class PipelineGovernor
+    {
+        private const int MinPrefetch = 1;
+        private const int InitialPrefetch = 2;
+        private const int MaxPrefetch = SourcePrefetchPhysicalCapacity;
+        private const int SamplesPerDecision = 8;
+
+        private readonly object _gate = new();
+        private readonly Queue<TaskCompletionSource> _slotWaiters = new();
+        private int _prefetchLimit = InitialPrefetch;
+        private int _inFlight;
+        private int _samples;
+        private double _consumerWaitMs;
+        private double _deliveryWaitMs;
+        private double _budgetWaitMs;
+        private double _readMs;
+
+        public ValueTask AcquirePrefetchSlotAsync(CancellationToken token)
+        {
+            lock (_gate)
+            {
+                if (_inFlight < _prefetchLimit && _slotWaiters.Count == 0)
+                {
+                    _inFlight++;
+                    return ValueTask.CompletedTask;
+                }
+                var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _slotWaiters.Enqueue(waiter);
+                return new ValueTask(waiter.Task.WaitAsync(token));
+            }
+        }
+
+        public void ReleasePrefetchSlot()
+        {
+            TaskCompletionSource? ready = null;
+            lock (_gate)
+            {
+                if (_inFlight > 0)
+                    _inFlight--;
+                EvaluateLocked();
+                if (_inFlight < _prefetchLimit && _slotWaiters.Count > 0)
+                {
+                    ready = _slotWaiters.Dequeue();
+                    _inFlight++;
+                }
+            }
+            ready?.TrySetResult();
+        }
+
+        public void RecordConsumerWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Consumer);
+        public void RecordDeliveryWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Delivery);
+        public void RecordBudgetWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Budget);
+        public void RecordSourceRead(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Read);
+
+        private void RecordSample(double milliseconds, SampleKind kind)
+        {
+            lock (_gate)
+            {
+                switch (kind)
+                {
+                    case SampleKind.Consumer: _consumerWaitMs += milliseconds; break;
+                    case SampleKind.Delivery: _deliveryWaitMs += milliseconds; break;
+                    case SampleKind.Budget: _budgetWaitMs += milliseconds; break;
+                    case SampleKind.Read: _readMs += milliseconds; break;
+                }
+                _samples++;
+                EvaluateLocked();
+            }
+        }
+
+        private void EvaluateLocked()
+        {
+            if (_samples < SamplesPerDecision)
+                return;
+
+            var starvation = _consumerWaitMs;
+            var pressure = _deliveryWaitMs + _budgetWaitMs;
+            var sourceCost = _readMs;
+
+            if (pressure > starvation * 1.5 && pressure > sourceCost)
+                _prefetchLimit = Math.Max(MinPrefetch, _prefetchLimit - 1);
+            else if (starvation > pressure * 1.5 && starvation > sourceCost * 0.25)
+                _prefetchLimit = Math.Min(MaxPrefetch, _prefetchLimit + 1);
+
+            _samples = 0;
+            _consumerWaitMs = 0;
+            _deliveryWaitMs = 0;
+            _budgetWaitMs = 0;
+            _readMs = 0;
+
+            while (_inFlight < _prefetchLimit && _slotWaiters.Count > 0)
+            {
+                var waiter = _slotWaiters.Dequeue();
+                _inFlight++;
+                waiter.TrySetResult();
+            }
+        }
+
+        private enum SampleKind
+        {
+            Consumer,
+            Delivery,
+            Budget,
+            Read,
         }
     }
 
