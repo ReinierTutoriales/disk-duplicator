@@ -47,8 +47,8 @@ jobs:
           Remove-Item .github/workflows/runtime-ui-polish-trigger.yml -Force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/app/part1.rs src/app/part4.rs src/app/part5.rs .github/runtime_ui_polish.py .github/workflows/runtime-ui-polish.yml .github/workflows/runtime-ui-polish-trigger.yml
-          git commit -m "ui: zero terminal speed and clarify drag drop"
+          git add src/app/part1.rs src/app/part3.rs src/app/part4.rs src/app/part5.rs .github/runtime_ui_polish.py .github/workflows/runtime-ui-polish.yml .github/workflows/runtime-ui-polish-trigger.yml
+          git commit -m "ui: finalize terminal state and polish copy targets"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git push origin HEAD:main
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
