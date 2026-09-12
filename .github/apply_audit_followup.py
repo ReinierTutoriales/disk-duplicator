@@ -90,7 +90,6 @@ new_hash_update = '''                if (read == 0) break;
                     hasher.Update(buffer.AsSpan(0, read));
                 }
 '''
-# Only HashFileAsync occurrence should be changed here: locate inside method.
 hash_index = s.index(new_hash_sig)
 tail = s[hash_index:]
 if old_hash_update not in tail:
@@ -129,9 +128,17 @@ s = s.replace(old_decrement, new_decrement, 1)
 
 engine.write_text(s, encoding='utf-8')
 
-# TaskCanceledException derives from OperationCanceledException; tests should assert the contract, not exact subtype.
+# TaskCanceledException is an OperationCanceledException subtype; assert the cancellation contract explicitly.
 tests = Path('dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs')
 t = tests.read_text(encoding='utf-8')
-t = t.replace('Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await blocked);',
-              'Assert.ThrowsExceptionAsync<OperationCanceledException>(async () => await blocked);')
+needle = 'await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await blocked);'
+replacement = '''try
+        {
+            await blocked;
+            Assert.Fail("Se esperaba cancelación.");
+        }
+        catch (OperationCanceledException)
+        {
+        }'''
+t = t.replace(needle, replacement)
 tests.write_text(t, encoding='utf-8')
