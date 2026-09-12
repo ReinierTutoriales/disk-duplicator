@@ -296,7 +296,11 @@ public static class CopyEngine
         }
         finally
         {
-            bufferBudget.Dispose();
+            // SharedBlock instances can outlive the producer while destination writers
+            // drain their bounded channels. Disposing the semaphore here races with the
+            // final SharedBlock.Release() calls and can abort otherwise valid copies.
+            // The semaphore is intentionally left for GC once the last shared block and
+            // this producer scope release their references.
         }
     }
 
@@ -314,31 +318,26 @@ public static class CopyEngine
                 continue;
             }
 
-            FlushPending(worker);
-            while (worker.Pending.Count >= MaxPendingPerDestination)
-            {
-                job.Token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(job.Token);
-                FlushPending(worker);
-                if (!worker.IsActive)
-                {
-                    ReleaseIfData(message);
-                    break;
-                }
-                if (DateTime.UtcNow - worker.LastProgressUtc >= WriteStallThreshold)
-                {
-                    worker.Fail($"Destino atascado: sin progreso durante {WriteStallThreshold.TotalSeconds:0} s.");
-                    DropPending(worker);
-                    ReleaseIfData(message);
-                    break;
-                }
-                await Task.Delay(2, job.Token).ConfigureAwait(false);
-            }
-
-            if (!worker.IsActive) continue;
+            job.Token.ThrowIfCancellationRequested();
+            job.WaitIfPaused(job.Token);
             if (countsData) worker.IncrementQueueDepth();
-            if (worker.Pending.Count > 0 || !worker.Channel.Writer.TryWrite(message))
-                worker.Pending.Enqueue(message);
+            try
+            {
+                await worker.Channel.Writer.WriteAsync(message, job.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                if (countsData) worker.DecrementQueueDepth();
+                ReleaseIfData(message);
+                throw;
+            }
+            catch (ChannelClosedException)
+            {
+                if (countsData) worker.DecrementQueueDepth();
+                ReleaseIfData(message);
+                if (worker.IsActive)
+                    worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+            }
         }
     }
 
@@ -354,10 +353,10 @@ public static class CopyEngine
             worker.Progress.SetPhase(DestinationPhase.Copying);
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
-                if (message is DataMessage data && !worker.IsActive)
+                if (message is DataMessage droppedData && !worker.IsActive)
                 {
                     worker.DecrementQueueDepth();
-                    data.Block.Release();
+                    droppedData.Block.Release();
                     continue;
                 }
                 if (!worker.IsActive) continue;
@@ -369,14 +368,14 @@ public static class CopyEngine
                     case BeginMessage begin:
                         current = BeginFile(worker, begin.Entry);
                         break;
-                    case DataMessage data when current is not null:
+                    case DataMessage chunkData when current is not null:
                         try
                         {
                             if (!current.Failed)
                             {
-                                await WriteWithRetryAsync(worker, current, data.Block.Memory, job).ConfigureAwait(false);
-                                current.Copied += data.Block.Length;
-                                worker.Progress.AddWritten(data.Block.Length);
+                                await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
+                                current.Copied += chunkData.Block.Length;
+                                worker.Progress.AddWritten(chunkData.Block.Length);
                             }
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -392,12 +391,12 @@ public static class CopyEngine
                         finally
                         {
                             worker.DecrementQueueDepth();
-                            data.Block.Release();
+                            chunkData.Block.Release();
                         }
                         break;
-                    case DataMessage data:
+                    case DataMessage orphanData:
                         worker.DecrementQueueDepth();
-                        data.Block.Release();
+                        orphanData.Block.Release();
                         break;
                     case EndMessage end when current is not null:
                         await FinishFileAsync(worker, current, end.Hash, options, job).ConfigureAwait(false);
@@ -753,7 +752,7 @@ public static class CopyEngine
     private static void FlushPending(DestinationWorker worker)
     {
         while (worker.Pending.TryPeek(out var message) && worker.Channel.Writer.TryWrite(message))
-            worker.Pending.Dequeue();
+            worker.Pending.TryDequeue(out _);
     }
 
     private static void DropPending(DestinationWorker worker)
