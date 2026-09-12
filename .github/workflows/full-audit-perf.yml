@@ -1,6 +1,6 @@
 name: Full performance and state audit
 
-# attempt 3: stale engine-only phase expectation aligned with deferred verification
+# attempt 4: corrected skip_same phase matcher
 on:
   push:
     paths:
