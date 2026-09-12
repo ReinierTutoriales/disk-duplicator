@@ -53,9 +53,7 @@ public static class CopyEngine
     private const int ReservedRam = 512 * 1024 * 1024;
     private const int MinQueue = 2;
     private const int MaxQueue = 16;
-    private const int MaxPendingPerDestination = 32;
     private const int Retries = 2;
-    private static readonly TimeSpan WriteStallThreshold = TimeSpan.FromSeconds(30);
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
@@ -196,9 +194,35 @@ public static class CopyEngine
                 .Select(worker => Task.Run(() => WriterLoopAsync(worker, options, job, expectedHashes), CancellationToken.None))
                 .ToArray();
 
-            await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job).ConfigureAwait(false);
-            foreach (var worker in workers) worker.Channel.Writer.TryComplete();
-            await Task.WhenAll(writerTasks).ConfigureAwait(false);
+            Exception? producerError = null;
+            try
+            {
+                await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                producerError = ex;
+            }
+            finally
+            {
+                foreach (var worker in workers)
+                    worker.Channel.Writer.TryComplete(producerError);
+            }
+
+            Exception? writerError = null;
+            try
+            {
+                await Task.WhenAll(writerTasks).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                writerError = ex;
+            }
+
+            if (producerError is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
+            if (writerError is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
 
             if (options.Verify && !token.IsCancellationRequested)
                 await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job).ConfigureAwait(false);
@@ -343,8 +367,10 @@ public static class CopyEngine
         bool countsData,
         CopyJob job)
     {
-        foreach (var worker in recipients)
+        var targets = recipients as DestinationWorker[] ?? recipients.ToArray();
+        for (var index = 0; index < targets.Length; index++)
         {
+            var worker = targets[index];
             if (!worker.IsActive)
             {
                 ReleaseIfData(message);
@@ -362,6 +388,7 @@ public static class CopyEngine
             {
                 if (countsData) worker.DecrementQueueDepth();
                 ReleaseIfData(message);
+                ReleaseUndeliveredData(message, targets.Length - index - 1);
                 throw;
             }
             catch (ChannelClosedException)
@@ -370,6 +397,13 @@ public static class CopyEngine
                 ReleaseIfData(message);
                 if (worker.IsActive)
                     worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+            }
+            catch
+            {
+                if (countsData) worker.DecrementQueueDepth();
+                ReleaseIfData(message);
+                ReleaseUndeliveredData(message, targets.Length - index - 1);
+                throw;
             }
         }
     }
@@ -418,8 +452,8 @@ public static class CopyEngine
                             current.Stream = null;
                             TryDelete(current.PartPath);
                             if (current.Copied > 0) worker.Progress.RollbackWritten((ulong)current.Copied);
-                            worker.Progress.MarkError(ex.Message);
-                            if (!options.KeepGoing) worker.Fail(ex.Message);
+                            if (options.KeepGoing) worker.Progress.MarkError(ex.Message);
+                            else worker.Fail(ex.Message);
                         }
                         finally
                         {
@@ -538,8 +572,9 @@ public static class CopyEngine
             current.Stream = null;
             TryDelete(current.PartPath);
             worker.Progress.RollbackWritten((ulong)current.Copied);
-            worker.Progress.MarkError($"Tamaño inesperado en {current.Entry.RelativePath}");
-            if (!options.KeepGoing) worker.Fail("Tamaño inesperado en temporal.");
+            var error = $"Tamaño inesperado en {current.Entry.RelativePath}";
+            if (options.KeepGoing) worker.Progress.MarkError(error);
+            else worker.Fail(error);
             return;
         }
 
@@ -752,13 +787,6 @@ public static class CopyEngine
             throw new IOException($"{label} no puede ser symlink/junction/reparse point: {path}");
     }
 
-    private static bool IsInside(string parent, string candidate)
-    {
-        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent)) + Path.DirectorySeparatorChar;
-        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate)) + Path.DirectorySeparatorChar;
-        return target.StartsWith(root, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static int QueueDepthFor(int destinations) =>
         destinations <= 0
             ? MinQueue
@@ -783,27 +811,8 @@ public static class CopyEngine
         return stream;
     }
 
-    private static void FlushPending(DestinationWorker worker)
-    {
-        while (worker.Pending.TryPeek(out var message) && worker.Channel.Writer.TryWrite(message))
-            worker.Pending.TryDequeue(out _);
-    }
-
-    private static void DropPending(DestinationWorker worker)
-    {
-        while (worker.Pending.TryDequeue(out var message))
-        {
-            if (message is DataMessage data)
-            {
-                worker.DecrementQueueDepth();
-                data.Block.Release();
-            }
-        }
-    }
-
     private static void DrainAndRelease(DestinationWorker worker)
     {
-        DropPending(worker);
         while (worker.Channel.Reader.TryRead(out var message))
         {
             if (message is DataMessage data)
@@ -817,6 +826,13 @@ public static class CopyEngine
     private static void ReleaseIfData(FanoutMessage message)
     {
         if (message is DataMessage data) data.Block.Release();
+    }
+
+    private static void ReleaseUndeliveredData(FanoutMessage message, int count)
+    {
+        if (message is not DataMessage data) return;
+        for (var index = 0; index < count; index++)
+            data.Block.Release();
     }
 
     private static void TryDelete(string path)
@@ -839,19 +855,7 @@ public static class CopyEngine
         long Size,
         DateTime LastWriteTimeUtc,
         long ModifiedUnixNanoseconds)
-    {
-        public static FileEntry From(string sourceRoot, string sourcePath)
-        {
-            var info = new FileInfo(sourcePath);
-            var modified = info.LastWriteTimeUtc;
-            return new FileEntry(
-                sourcePath,
-                Path.GetRelativePath(sourceRoot, sourcePath),
-                info.Length,
-                modified,
-                ToUnixNanoseconds(modified));
-        }
-    }
+    ;
 
     private abstract record FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : FanoutMessage;
@@ -907,7 +911,6 @@ public static class CopyEngine
         public int Slot { get; }
         public DestinationProgress Progress { get; }
         public Channel<FanoutMessage> Channel { get; }
-        public ConcurrentQueue<FanoutMessage> Pending { get; } = new();
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
 
