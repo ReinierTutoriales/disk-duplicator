@@ -30,6 +30,14 @@ jobs:
           shared-key: session-audit
       - name: Apply session hardening
         run: python .github/session_hardening.py
+      - name: Apply Rust 1.98 Clippy fixes
+        shell: pwsh
+        run: |
+          $path = 'src/session.rs'
+          $text = Get-Content $path -Raw
+          $text = $text.Replace('if bytes.len() % 2 != 0 {', 'if !bytes.len().is_multiple_of(2) {')
+          $text = $text.Replace('for pair in bytes.chunks_exact(2) {', 'for pair in bytes.as_chunks::<2>().0 {')
+          Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
       - name: Format
         run: cargo fmt --all
       - name: Diff check
