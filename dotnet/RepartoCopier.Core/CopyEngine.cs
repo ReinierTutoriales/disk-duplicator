@@ -53,6 +53,7 @@ public static class CopyEngine
     private const int ReservedRam = 512 * 1024 * 1024;
     private const int QueueDepth = 16;
     private const int Retries = 2;
+    private const int MaxVerificationParallelism = 8;
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
@@ -466,7 +467,7 @@ public static class CopyEngine
                         orphanData.Block.Release();
                         break;
                     case EndMessage end when current is not null:
-                        await FinishFileAsync(worker, current, end.Hash, options, job, recovery).ConfigureAwait(false);
+                        FinishFile(worker, current, end.Hash, options, recovery);
                         if (!current.Failed)
                             expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
                         current = null;
@@ -558,12 +559,11 @@ public static class CopyEngine
         throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
     }
 
-    private static async Task FinishFileAsync(
+    private static void FinishFile(
         DestinationWorker worker,
         CurrentFile current,
         byte[] expectedHash,
         CopyOptions options,
-        CopyJob job,
         RecoveryCheckpointWriter recovery)
     {
         if (current.Failed) return;
@@ -582,7 +582,7 @@ public static class CopyEngine
 
         if (current.Stream is not null)
         {
-            await current.Stream.FlushAsync(job.Token).ConfigureAwait(false);
+            // BufferSize=1 disables FileStream buffering; one durable flush is enough.
             current.Stream.Flush(flushToDisk: true);
             current.Stream.Dispose();
             current.Stream = null;
@@ -612,30 +612,39 @@ public static class CopyEngine
         ConcurrentDictionary<string, byte[]> expectedHashes,
         CopyJob job)
     {
-        for (var slot = 0; slot < workers.Length; slot++)
-        {
-            if (!workers[slot].IsActive) continue;
-            progress[slot].SetPhase(DestinationPhase.Verifying);
-            foreach (var entry in copy.Files)
+        var activeSlots = Enumerable.Range(0, workers.Length)
+            .Where(slot => workers[slot].IsActive)
+            .ToArray();
+        await Parallel.ForEachAsync(
+            activeSlots,
+            new ParallelOptions
             {
-                job.Token.ThrowIfCancellationRequested();
-                job.WaitIfPaused(job.Token);
-                if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
-                    continue;
-                var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                if (!File.Exists(destination))
+                MaxDegreeOfParallelism = Math.Min(MaxVerificationParallelism, Math.Max(1, activeSlots.Length)),
+                CancellationToken = job.Token,
+            },
+            async (slot, token) =>
+            {
+                progress[slot].SetPhase(DestinationPhase.Verifying);
+                foreach (var entry in copy.Files)
                 {
-                    workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
-                    break;
+                    token.ThrowIfCancellationRequested();
+                    job.WaitIfPaused(token);
+                    if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
+                        continue;
+                    var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                    if (!File.Exists(destination))
+                    {
+                        workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
+                        break;
+                    }
+                    var actual = await HashFileAsync(destination, token).ConfigureAwait(false);
+                    if (!actual.AsSpan().SequenceEqual(expected))
+                    {
+                        workers[slot].Fail($"BLAKE3 no coincide: {destination}");
+                        break;
+                    }
                 }
-                var actual = await HashFileAsync(destination, job.Token).ConfigureAwait(false);
-                if (!actual.AsSpan().SequenceEqual(expected))
-                {
-                    workers[slot].Fail($"BLAKE3 no coincide: {destination}");
-                    break;
-                }
-            }
-        }
+            }).ConfigureAwait(false);
     }
 
     private static async Task<bool[][]> BuildVerifiedSkipMasksAsync(
@@ -662,16 +671,23 @@ public static class CopyEngine
             if (candidates.Count == 0) continue;
 
             var sourceHash = await HashFileAsync(entry.SourcePath, token).ConfigureAwait(false);
-            foreach (var slot in candidates)
-            {
-                var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
-                var destinationHash = await HashFileAsync(destination, token).ConfigureAwait(false);
-                if (destinationHash.AsSpan().SequenceEqual(sourceHash))
+            await Parallel.ForEachAsync(
+                candidates,
+                new ParallelOptions
                 {
-                    masks[fileIndex][slot] = true;
-                    progress[slot].SetLastFile(entry.RelativePath);
-                }
-            }
+                    MaxDegreeOfParallelism = Math.Min(MaxVerificationParallelism, candidates.Count),
+                    CancellationToken = token,
+                },
+                async (slot, cancellationToken) =>
+                {
+                    var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
+                    var destinationHash = await HashFileAsync(destination, cancellationToken).ConfigureAwait(false);
+                    if (destinationHash.AsSpan().SequenceEqual(sourceHash))
+                    {
+                        masks[fileIndex][slot] = true;
+                        progress[slot].SetLastFile(entry.RelativePath);
+                    }
+                }).ConfigureAwait(false);
         }
         return masks;
     }
