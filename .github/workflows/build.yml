@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     steps:
     - uses: actions/checkout@v7.0.1
     - name: Install Rust 1.98.1
@@ -36,8 +36,44 @@ jobs:
       with:
         name: RepartoCopier
         path: target/release/RepartoCopier.exe
+
+  stable-compat:
+    name: Stable compatibility
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7.0.1
+    - name: Install latest stable Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+        components: clippy
+    - name: Cache Rust stable build
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: stable-compat
+    - name: Clippy on latest stable
+      run: cargo clippy --locked --all-targets -- -D warnings
+    - name: Test release on latest stable
+      run: cargo test --locked --release --verbose
+
+  release:
+    name: Publish release after validation
+    needs: [build, stable-compat]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v7.0.1
+    - name: Download validated executable
+      uses: actions/download-artifact@v8.0.1
+      with:
+        name: RepartoCopier
+        path: release-artifact
     - name: Publish GitHub release when version is new
-      if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
       shell: pwsh
       env:
         GH_TOKEN: ${{ github.token }}
@@ -81,30 +117,7 @@ jobs:
         - Ejecutable autónomo: `RepartoCopier.exe`
         "@ | Set-Content -Path release-notes.md -Encoding utf8
 
-        gh release create $tag target/release/RepartoCopier.exe `
+        gh release create $tag release-artifact/RepartoCopier.exe `
           --target "$env:GITHUB_SHA" `
           --title "RepartoCopier $tag" `
           --notes-file release-notes.md
-
-  stable-compat:
-    name: Stable compatibility (non-blocking)
-    runs-on: windows-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-    steps:
-    - uses: actions/checkout@v7.0.1
-    - name: Install latest stable Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: x86_64-pc-windows-msvc
-        components: clippy
-    - name: Cache Rust stable build
-      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      with:
-        shared-key: stable-compat
-    - name: Clippy on latest stable
-      run: cargo clippy --locked --all-targets -- -D warnings
-    - name: Test release on latest stable
-      run: cargo test --locked --release --verbose
