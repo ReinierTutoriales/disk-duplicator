@@ -42,12 +42,11 @@ for old,new in repls:
     s = s.replace(old,new,1)
 p.write_text(s, encoding='utf-8')
 
-# Add a regression test proving the Fluent sizing contract remains intentional.
 p = Path('src/app/part5.rs')
 s = p.read_text(encoding='utf-8')
-needle = "#[test]\nfn source_layout_stacks_at_narrow_widths()"
+needle = "    #[test]\n    fn source_layout_stacks_at_narrow_widths()"
 if needle not in s:
     raise SystemExit('part5 anchor not found')
-test = "#[test]\nfn fluent_metrics_keep_windows_control_density() {\n    assert_eq!(FLUENT_CONTROL_HEIGHT, 32.0);\n    assert_eq!(FLUENT_RADIUS_SM, 6.0);\n    assert_eq!(FLUENT_RADIUS_MD, 8.0);\n    assert_eq!(FLUENT_RADIUS_LG, 12.0);\n}\n\n"
+test = "    #[test]\n    fn fluent_metrics_keep_windows_control_density() {\n        assert_eq!(FLUENT_CONTROL_HEIGHT, 32.0);\n        assert_eq!(FLUENT_RADIUS_SM, 6.0);\n        assert_eq!(FLUENT_RADIUS_MD, 8.0);\n        assert_eq!(FLUENT_RADIUS_LG, 12.0);\n    }\n\n"
 s = s.replace(needle, test + needle, 1)
 p.write_text(s, encoding='utf-8')
