@@ -88,6 +88,15 @@ mod tests {
     }
 
     #[test]
+    fn source_picker_supports_file_and_folder_semantics() {
+        let source_file = include_str!("part3.rs");
+        assert!(source_file.contains("pick_source_dir"));
+        assert!(source_file.contains("pick_source_file"));
+        assert!(source_file.contains("Carpeta…"));
+        assert!(source_file.contains("Archivo…"));
+    }
+
+    #[test]
     fn source_layout_stacks_at_narrow_widths() {
         assert!(source_layout_stacked(680.0));
         assert!(source_layout_stacked(719.0));

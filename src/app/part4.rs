@@ -108,7 +108,7 @@ impl eframe::App for CopierApp {
                             2.0_f32,
                             Theme::accent(self.use_light_theme),
                         ))
-                        .rounding(egui::Rounding::same(14.0))
+                        .rounding(egui::Rounding::same(FLUENT_RADIUS_LG))
                         .inner_margin(egui::Margin::symmetric(26.0, 20.0))
                         .show(ui, |ui| {
                             ui.set_min_width(360.0);
@@ -284,7 +284,7 @@ impl eframe::App for CopierApp {
                 ui.colored_label(color, compact_path(status, max_chars));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_sized([82.0, 24.0], egui::Button::new("Acerca de"))
+                        .add_sized([82.0, FLUENT_CONTROL_HEIGHT], egui::Button::new("Acerca de"))
                         .clicked()
                     {
                         self.show_credits = true;
@@ -311,19 +311,15 @@ impl eframe::App for CopierApp {
                         let field_width = (ui.available_width() - button_width - SPACING_SM).max(150.0);
                         ui.horizontal(|ui| {
                             ui.add_sized(
-                                [field_width, 28.0],
+                                [field_width, FLUENT_CONTROL_HEIGHT],
                                 egui::TextEdit::singleline(&mut self.source)
                                     .hint_text("Archivo o carpeta que quieres copiar"),
                             );
-                            if ui
-                                .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                                .on_hover_text("Seleccionar carpeta de origen · Ctrl+O · también puedes arrastrar un archivo")
-                                .clicked()
-                            {
-                                if let Some(path) = self.pick_source_dir() {
-                                    self.source = path;
-                                }
-                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(button_width, FLUENT_CONTROL_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| self.source_picker_menu(ui),
+                            );
                         });
                     });
                 });
@@ -341,19 +337,15 @@ impl eframe::App for CopierApp {
                         (ui.available_width() - button_width - label_width - SPACING_SM).max(150.0);
                     ui.add_enabled_ui(!busy, |ui| {
                         ui.add_sized(
-                            [field_width, 28.0],
+                            [field_width, FLUENT_CONTROL_HEIGHT],
                             egui::TextEdit::singleline(&mut self.source)
                                 .hint_text("Archivo o carpeta que quieres copiar"),
                         );
-                        if ui
-                            .add_sized([button_width, 28.0], egui::Button::new("Examinar"))
-                            .on_hover_text("Seleccionar carpeta de origen · Ctrl+O · también puedes arrastrar un archivo")
-                            .clicked()
-                        {
-                            if let Some(path) = self.pick_source_dir() {
-                                self.source = path;
-                            }
-                        }
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(button_width, FLUENT_CONTROL_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| self.source_picker_menu(ui),
+                        );
                     });
                 });
             }
@@ -370,7 +362,7 @@ impl eframe::App for CopierApp {
                 ui.add_enabled_ui(!busy, |ui| {
                     if ui
                         .add_sized(
-                            [154.0, 34.0],
+                            [154.0, FLUENT_CONTROL_HEIGHT],
                             egui::Button::new(
                                 RichText::new("+  Agregar destinos")
                                     .strong()
@@ -403,7 +395,7 @@ impl eframe::App for CopierApp {
                 if self.dests.len() > 1 && !busy {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_sized([84.0, 26.0], egui::Button::new("Quitar todos"))
+                            .add_sized([84.0, FLUENT_CONTROL_HEIGHT], egui::Button::new("Quitar todos"))
                             .on_hover_text("Eliminar todos los destinos")
                             .clicked()
                         {
