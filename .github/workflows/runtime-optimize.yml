@@ -1,0 +1,56 @@
+name: Runtime responsiveness optimization
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/runtime_optimize.py'
+      - '.github/workflows/runtime-optimize.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: runtime-responsiveness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  optimize:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+          components: clippy,rustfmt
+
+      - name: Apply runtime responsiveness optimization
+        run: python .github/runtime_optimize.py
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests release
+        run: cargo test --locked --release --verbose
+
+      - name: Build release
+        run: cargo build --locked --release --verbose
+
+      - name: Commit verified runtime optimization and clean helpers
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          Remove-Item .github/runtime_optimize.py
+          Remove-Item .github/workflows/runtime-optimize.yml
+          git add src/app/part1.rs src/app/part2.rs src/app/part3.rs src/app/part4.rs src/engine_impl/part1.rs src/engine_impl/part2.rs src/engine_impl/part3.rs .github/runtime_optimize.py .github/workflows/runtime-optimize.yml
+          git commit -m "perf: keep UI responsive and reduce FAN-OUT lock contention"
+          git push origin HEAD:main
