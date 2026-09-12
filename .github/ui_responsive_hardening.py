@@ -182,6 +182,12 @@ new_path_block = '''        let key = self.paths_key();
         }
 '''
 replace_once(part4, old_path_block, new_path_block, "path validation debounce")
+replace_once(
+    part4,
+    "        let ready_to_start = start_disabled.is_none();\n\n        let save_copy_shortcut",
+    "        let save_copy_shortcut",
+    "remove stale readiness variable",
+)
 
 replace_once(
     part4,
