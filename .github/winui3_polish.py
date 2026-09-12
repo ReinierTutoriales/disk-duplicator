@@ -30,7 +30,7 @@ repls = [
 ("ui.menu_button(\"Copia\", |ui| {", "ui.menu_button(RichText::new(\"Copia\").strong(), |ui| {"),
 ("[146.0, 32.0]", "[154.0, 34.0]"),
 (".rounding(egui::Rounding::same(10.0)),", ".rounding(egui::Rounding::same(FLUENT_RADIUS_MD)),"),
-(".rounding(egui::Rounding::same(6.0))\n                            .inner_margin(egui::Margin::symmetric(7.0, 3.0))", ".rounding(egui::Rounding::same(FLUENT_RADIUS_MD))\n                            .inner_margin(egui::Margin::symmetric(9.0, 5.0))"),
+(".rounding(egui::Rounding::same(6.0))\n                            .inner_margin(egui::Margin::symmetric(7.0, 3.0))", ".rounding(egui::Rounding::same(FLUENT_RADIUS_SM))\n                            .inner_margin(egui::Margin::symmetric(9.0, 5.0))"),
 ("[88.0, 30.0]", "[92.0, 34.0]"),
 ("[92.0, 30.0]", "[98.0, 34.0]"),
 (".min_size(egui::vec2(116.0, 30.0));", ".min_size(egui::vec2(124.0, 34.0));"),
