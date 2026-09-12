@@ -1,14 +1,22 @@
 impl CopierApp {
-    pub fn new() -> Self {
+    pub fn new_with_source(launch_source: Option<PathBuf>) -> Self {
         refresh_system_accent();
         let settings = load_settings();
         let use_light_theme = resolve_theme(settings.theme);
+        let source = launch_source
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let status = if source.is_empty() {
+            "Listo para copiar una carpeta a múltiples destinos".to_owned()
+        } else {
+            "Origen precargado · agrega uno o más destinos".to_owned()
+        };
         Self {
-            source: String::new(),
+            source,
             dests: Vec::new(),
             skip_same: true,
             keep_going: true,
-            status: "Listo para copiar una carpeta a múltiples destinos".to_owned(),
+            status,
             job: None,
             workers: Vec::new(),
             startup_rx: None,

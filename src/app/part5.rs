@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn destination_batch_skips_source_and_duplicates() {
-        let mut app = CopierApp::new();
+        let mut app = CopierApp::new_with_source(None);
         app.source = r"E:\source".to_owned();
         app.dests = vec![r"F:\".to_owned()];
 
@@ -143,7 +143,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn destination_batch_rejects_equivalent_windows_paths() {
-        let mut app = CopierApp::new();
+        let mut app = CopierApp::new_with_source(None);
         app.source = r"E:\source".to_owned();
 
         let added = app.add_destinations(vec![
