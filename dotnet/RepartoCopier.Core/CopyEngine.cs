@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using System.Runtime.InteropServices;
 using Blake3;
 
 namespace RepartoCopier.Core;
@@ -57,7 +58,10 @@ public static class CopyEngine
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
     private const int PreallocationThreshold = 4 * 1024 * 1024;
-    private const int ReservedRam = 512 * 1024 * 1024;
+    private const long MinimumBufferBudget = 256L * 1024 * 1024;
+    private const long InitialBufferBudget = 512L * 1024 * 1024;
+    private const long MaximumBufferBudget = 4L * 1024 * 1024 * 1024;
+    private const long BufferBudgetGrowthStep = 256L * 1024 * 1024;
     private const int ChannelCapacity = 16;
     private const int AdaptiveInitialQueue = 4;
     private const int AdaptiveMinQueue = 2;
@@ -277,7 +281,7 @@ public static class CopyEngine
         CopyJob job)
     {
         var token = job.Token;
-        var bufferBudget = new SemaphoreSlim(Math.Max(8, ReservedRam / BlockSize));
+        var bufferBudget = AdaptiveByteBudget.CreateForSystem();
         try
         {
             for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
@@ -328,7 +332,7 @@ public static class CopyEngine
     private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
         FileEntry entry,
         List<DestinationWorker> active,
-        SemaphoreSlim bufferBudget,
+        AdaptiveByteBudget bufferBudget,
         CopyJob job)
     {
         using var hasher = Hasher.New();
@@ -340,7 +344,7 @@ public static class CopyEngine
         {
             job.Token.ThrowIfCancellationRequested();
             job.WaitIfPaused(job.Token);
-            await bufferBudget.WaitAsync(job.Token).ConfigureAwait(false);
+            await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
             var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
             int read;
             try
@@ -350,14 +354,14 @@ public static class CopyEngine
             catch
             {
                 ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release();
+                bufferBudget.Release(readBufferSize);
                 throw;
             }
 
             if (read == 0)
             {
                 ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release();
+                bufferBudget.Release(readBufferSize);
                 break;
             }
 
@@ -367,11 +371,11 @@ public static class CopyEngine
             if (recipients.Length == 0)
             {
                 ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release();
+                bufferBudget.Release(readBufferSize);
                 return null;
             }
 
-            var block = new SharedBlock(rented, read, recipients.Length, bufferBudget);
+            var block = new SharedBlock(rented, read, readBufferSize, recipients.Length, bufferBudget);
             await DeliverAsync(recipients, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
             active.RemoveAll(worker => !worker.IsActive);
             if (active.Count == 0)
@@ -385,7 +389,7 @@ public static class CopyEngine
     private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
         FileEntry entry,
         List<DestinationWorker> active,
-        SemaphoreSlim bufferBudget,
+        AdaptiveByteBudget bufferBudget,
         CopyJob job)
     {
         using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
@@ -464,7 +468,7 @@ public static class CopyEngine
         FileEntry entry,
         int readBufferSize,
         ChannelWriter<SourceReadBlock> output,
-        SemaphoreSlim bufferBudget,
+        AdaptiveByteBudget bufferBudget,
         CopyJob job,
         CancellationToken token)
     {
@@ -479,7 +483,7 @@ public static class CopyEngine
             {
                 token.ThrowIfCancellationRequested();
                 job.WaitIfPaused(token);
-                await bufferBudget.WaitAsync(token).ConfigureAwait(false);
+                await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
                 var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
                 int read;
                 try
@@ -489,20 +493,20 @@ public static class CopyEngine
                 catch
                 {
                     ArrayPool<byte>.Shared.Return(rented);
-                    bufferBudget.Release();
+                    bufferBudget.Release(readBufferSize);
                     throw;
                 }
 
                 if (read == 0)
                 {
                     ArrayPool<byte>.Shared.Return(rented);
-                    bufferBudget.Release();
+                    bufferBudget.Release(readBufferSize);
                     break;
                 }
 
                 totalRead += read;
                 hasher.Update(rented.AsSpan(0, read));
-                var block = new SourceReadBlock(rented, read, bufferBudget);
+                var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
                 try
                 {
                     await output.WriteAsync(block, token).ConfigureAwait(false);
@@ -1083,12 +1087,14 @@ public static class CopyEngine
     private sealed class SourceReadBlock
     {
         private byte[]? _buffer;
-        private readonly SemaphoreSlim _budget;
+        private readonly int _reservedBytes;
+        private readonly AdaptiveByteBudget _budget;
 
-        public SourceReadBlock(byte[] buffer, int length, SemaphoreSlim budget)
+        public SourceReadBlock(byte[] buffer, int length, int reservedBytes, AdaptiveByteBudget budget)
         {
             _buffer = buffer;
             Length = length;
+            _reservedBytes = reservedBytes;
             _budget = budget;
         }
 
@@ -1100,7 +1106,7 @@ public static class CopyEngine
                 throw new ArgumentOutOfRangeException(nameof(references));
             var buffer = Interlocked.Exchange(ref _buffer, null)
                 ?? throw new ObjectDisposedException(nameof(SourceReadBlock));
-            return new SharedBlock(buffer, Length, references, _budget);
+            return new SharedBlock(buffer, Length, _reservedBytes, references, _budget);
         }
 
         public void Release()
@@ -1109,7 +1115,7 @@ public static class CopyEngine
             if (buffer is null)
                 return;
             ArrayPool<byte>.Shared.Return(buffer);
-            _budget.Release();
+            _budget.Release(_reservedBytes);
         }
     }
 
@@ -1122,12 +1128,14 @@ public static class CopyEngine
     {
         private byte[]? _buffer;
         private int _references;
-        private readonly SemaphoreSlim _budget;
+        private readonly int _reservedBytes;
+        private readonly AdaptiveByteBudget _budget;
 
-        public SharedBlock(byte[] buffer, int length, int references, SemaphoreSlim budget)
+        public SharedBlock(byte[] buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
         {
             _buffer = buffer;
             Length = length;
+            _reservedBytes = reservedBytes;
             _references = references;
             _budget = budget;
         }
@@ -1140,8 +1148,182 @@ public static class CopyEngine
             if (Interlocked.Decrement(ref _references) != 0) return;
             var buffer = Interlocked.Exchange(ref _buffer, null);
             if (buffer is not null) ArrayPool<byte>.Shared.Return(buffer);
-            _budget.Release();
+            _budget.Release(_reservedBytes);
         }
+    }
+
+    private sealed class AdaptiveByteBudget
+    {
+        private readonly object _gate = new();
+        private readonly Queue<Waiter> _waiters = new();
+        private readonly long _maximumBytes;
+        private long _targetBytes;
+        private long _usedBytes;
+
+        private AdaptiveByteBudget(long initialBytes, long maximumBytes)
+        {
+            _targetBytes = initialBytes;
+            _maximumBytes = maximumBytes;
+        }
+
+        public static AdaptiveByteBudget CreateForSystem()
+        {
+            var memory = GetMemoryStatus();
+            var total = checked((long)Math.Min(memory.ullTotalPhys, (ulong)long.MaxValue));
+            var available = checked((long)Math.Min(memory.ullAvailPhys, (ulong)long.MaxValue));
+            var maximum = Math.Clamp(total / 8, MinimumBufferBudget, MaximumBufferBudget);
+            var reserve = Math.Max(2L * 1024 * 1024 * 1024, total / 4);
+            var safeNow = Math.Max(MinimumBufferBudget, available - reserve);
+            maximum = Math.Max(MinimumBufferBudget, Math.Min(maximum, safeNow));
+            var initial = Math.Min(InitialBufferBudget, maximum);
+            return new AdaptiveByteBudget(initial, maximum);
+        }
+
+        public ValueTask AcquireAsync(int bytes, CancellationToken token)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            lock (_gate)
+            {
+                if (_waiters.Count == 0 && TryAcquireLocked(bytes))
+                    return ValueTask.CompletedTask;
+
+                var waiter = new Waiter(bytes);
+                _waiters.Enqueue(waiter);
+                return new ValueTask(WaitAsync(waiter, token));
+            }
+        }
+
+        public void Release(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            List<Waiter>? ready = null;
+            lock (_gate)
+            {
+                _usedBytes = Math.Max(0, _usedBytes - bytes);
+                ready = PumpWaitersLocked();
+            }
+            Complete(ready);
+        }
+
+        private async Task WaitAsync(Waiter waiter, CancellationToken token)
+        {
+            try
+            {
+                await waiter.Completion.Task.WaitAsync(token).ConfigureAwait(false);
+            }
+            catch
+            {
+                List<Waiter>? ready = null;
+                lock (_gate)
+                {
+                    waiter.Cancelled = true;
+                    ready = PumpWaitersLocked();
+                }
+                Complete(ready);
+                throw;
+            }
+        }
+
+        private bool TryAcquireLocked(int bytes)
+        {
+            if (_usedBytes + bytes <= _targetBytes)
+            {
+                _usedBytes += bytes;
+                return true;
+            }
+
+            if (TryGrowLocked(bytes) && _usedBytes + bytes <= _targetBytes)
+            {
+                _usedBytes += bytes;
+                return true;
+            }
+            return false;
+        }
+
+        private bool TryGrowLocked(int bytes)
+        {
+            if (_targetBytes >= _maximumBytes)
+                return false;
+
+            var memory = GetMemoryStatus();
+            var available = checked((long)Math.Min(memory.ullAvailPhys, (ulong)long.MaxValue));
+            var total = checked((long)Math.Min(memory.ullTotalPhys, (ulong)long.MaxValue));
+            var reserve = Math.Max(2L * 1024 * 1024 * 1024, total / 4);
+            var headroom = available - reserve;
+            if (headroom < BufferBudgetGrowthStep)
+                return false;
+
+            var requestedTarget = Math.Max(_targetBytes + BufferBudgetGrowthStep, _usedBytes + bytes);
+            var safeTarget = _usedBytes + headroom;
+            var next = Math.Min(_maximumBytes, Math.Min(requestedTarget, safeTarget));
+            if (next <= _targetBytes)
+                return false;
+            _targetBytes = next;
+            return true;
+        }
+
+        private List<Waiter>? PumpWaitersLocked()
+        {
+            List<Waiter>? ready = null;
+            while (_waiters.Count > 0)
+            {
+                var waiter = _waiters.Peek();
+                if (waiter.Cancelled)
+                {
+                    _waiters.Dequeue();
+                    continue;
+                }
+                if (!TryAcquireLocked(waiter.Bytes))
+                    break;
+                _waiters.Dequeue();
+                (ready ??= []).Add(waiter);
+            }
+            return ready;
+        }
+
+        private static void Complete(List<Waiter>? ready)
+        {
+            if (ready is null)
+                return;
+            foreach (var waiter in ready)
+                waiter.Completion.TrySetResult();
+        }
+
+        private static MemoryStatusEx GetMemoryStatus()
+        {
+            var status = new MemoryStatusEx
+            {
+                dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>(),
+            };
+            if (!GlobalMemoryStatusEx(ref status))
+                throw new IOException($"No se pudo consultar la memoria física de Windows: {Marshal.GetLastWin32Error()}.");
+            return status;
+        }
+
+        private sealed class Waiter(int bytes)
+        {
+            public int Bytes { get; } = bytes;
+            public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public bool Cancelled { get; set; }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct MemoryStatusEx
+        {
+            public uint dwLength;
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx lpBuffer);
     }
 
     private sealed class DestinationWorker
