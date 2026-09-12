@@ -51,7 +51,7 @@ fn parse_bool(value: &str, field: &str) -> Result<bool, String> {
     }
 }
 
-fn render(session: &CopySession) -> Result<String, String> {
+fn render(session: &CopySession) -> String {
     let mut out = String::new();
     out.push_str(MAGIC);
     out.push('\n');
@@ -73,7 +73,7 @@ fn render(session: &CopySession) -> Result<String, String> {
         out.push_str(&encode_hex(dest.trim()));
         out.push('\n');
     }
-    Ok(out)
+    out
 }
 
 fn parse(text: &str) -> Result<CopySession, String> {
@@ -141,7 +141,7 @@ pub fn with_default_extension(path: PathBuf) -> PathBuf {
 }
 
 pub fn save(path: &Path, session: &CopySession) -> Result<(), String> {
-    let text = render(session)?;
+    let text = render(session);
     storage::atomic_write(path, text.as_bytes(), "la copia guardada")
 }
 
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn unicode_and_unc_roundtrip() {
         let original = sample();
-        let text = render(&original).unwrap();
+        let text = render(&original);
         assert_eq!(parse(&text).unwrap(), original);
         assert!(!text.contains("Música"));
     }
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn parser_rejects_bad_version_duplicate_fields_and_bad_hex() {
         assert!(parse("RepartoCopierSession/9\n").is_err());
-        let valid = render(&sample()).unwrap();
+        let valid = render(&sample());
         let duplicated = valid.replacen("skip_same=1\n", "skip_same=1\nskip_same=1\n", 1);
         assert!(parse(&duplicated).unwrap_err().contains("duplica"));
         let bad = valid.replacen("source=", "source=z", 1);
