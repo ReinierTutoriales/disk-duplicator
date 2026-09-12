@@ -26,18 +26,25 @@ jobs:
           components: clippy,rustfmt
       - name: Apply cleanup and UX hardening
         run: python .github/copy_ux_hardening.py
-      - name: Remove superseded session limit
+      - name: Remove superseded and dead helpers
         shell: pwsh
         run: |
-          $path = 'src/session.rs'
-          $text = Get-Content $path -Raw
-          $old = "const MAX_DESTINATIONS: usize = 256;`r`n"
-          if (-not $text.Contains($old)) {
-            $old = "const MAX_DESTINATIONS: usize = 256;`n"
-          }
-          if (-not $text.Contains($old)) { throw 'Old MAX_DESTINATIONS constant was not found exactly once.' }
-          $text = $text.Replace($old, '')
-          Set-Content -Path $path -Value $text -Encoding utf8 -NoNewline
+          $sessionPath = 'src/session.rs'
+          $session = Get-Content $sessionPath -Raw
+          $oldLimit = "const MAX_DESTINATIONS: usize = 256;`r`n"
+          if (-not $session.Contains($oldLimit)) { $oldLimit = "const MAX_DESTINATIONS: usize = 256;`n" }
+          if (-not $session.Contains($oldLimit)) { throw 'Old MAX_DESTINATIONS constant was not found.' }
+          $session = $session.Replace($oldLimit, '')
+          Set-Content -Path $sessionPath -Value $session -Encoding utf8 -NoNewline
+
+          $planPath = 'src/copy_plan.rs'
+          $plan = Get-Content $planPath -Raw
+          $plan = $plan.Replace("use std::path::Path;`r`n`r`n", '')
+          $plan = $plan.Replace("use std::path::Path;`n`n", '')
+          $pattern = '(?s)\r?\npub fn source_name\(path: &str\) -> Option<String> \{.*?\r?\n\}\r?\n(?=\r?\n#\[cfg\(test\)\])'
+          $updated = [regex]::Replace($plan, $pattern, '')
+          if ($updated -eq $plan) { throw 'Dead source_name helper was not found.' }
+          Set-Content -Path $planPath -Value $updated -Encoding utf8 -NoNewline
       - name: Format
         run: cargo fmt --all
       - name: Diff check
