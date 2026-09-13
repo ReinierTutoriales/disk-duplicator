@@ -1142,8 +1142,7 @@ public static class CopyEngine
             return;
         }
 
-        using var firstLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-        using var secondLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+        using var pairLease = await worker.DeviceScheduler.AcquireIoPairAsync(job.Token).ConfigureAwait(false);
 
         var firstOffset = current.Copied;
         var secondOffset = checked(firstOffset + firstLength);
