@@ -1,0 +1,46 @@
+name: Apply explicit offset writes
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-explicit-offset-writes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Patch CopyEngine explicit-offset writes
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('dotnet/RepartoCopier.Core/CopyEngine.cs')
+          s = p.read_text(encoding='utf-8')
+          old1 = '''                    using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);\n                    await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);\n                    job.Telemetry.RecordWriteOperation();'''
+          new1 = '''                    using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);\n                    await ExplicitOffsetWriter.WriteOneAsync(\n                        current.Stream.SafeFileHandle,\n                        data,\n                        current.Copied,\n                        job.Token).ConfigureAwait(false);\n                    job.Telemetry.RecordWriteOperation();'''
+          old2 = '''            using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);\n            await stream.WriteAsync(data, job.Token).ConfigureAwait(false);\n            job.Telemetry.RecordWriteOperation();\n            return;'''
+          new2 = '''            using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);\n            await ExplicitOffsetWriter.WriteOneAsync(\n                stream.SafeFileHandle,\n                data,\n                current.Copied,\n                job.Token).ConfigureAwait(false);\n            job.Telemetry.RecordWriteOperation();\n            return;'''
+          old3 = '''        var firstWrite = RandomAccess.WriteAsync(\n            handle,\n            data[..firstLength],\n            firstOffset,\n            job.Token);\n        var secondWrite = RandomAccess.WriteAsync(\n            handle,\n            data.Slice(firstLength, secondLength),\n            secondOffset,\n            job.Token);\n\n        await Task.WhenAll(firstWrite.AsTask(), secondWrite.AsTask()).ConfigureAwait(false);'''
+          new3 = '''        await ExplicitOffsetWriter.WriteTwoAsync(\n            handle,\n            data[..firstLength],\n            firstOffset,\n            data.Slice(firstLength, secondLength),\n            secondOffset,\n            job.Token).ConfigureAwait(false);'''
+          for old, new, label in [(old1,new1,'QD1'),(old2,new2,'QD2 fallback'),(old3,new3,'QD2 pair')]:
+              if old not in s:
+                  raise SystemExit(f'Expected {label} block not found')
+              s = s.replace(old, new, 1)
+          if '.WriteAsync(data, job.Token)' in s:
+              raise SystemExit('A cursor-based destination WriteAsync remains')
+          p.write_text(s, encoding='utf-8')
+      - name: Remove temporary workflow and commit
+        shell: bash
+        run: |
+          rm .github/workflows/apply-explicit-offset-writes.yml
+          git config user.name 'ReinierTutoriales'
+          git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
+          git add dotnet/RepartoCopier.Core/CopyEngine.cs .github/workflows/apply-explicit-offset-writes.yml
+          git commit -m 'fix: use explicit offsets for all destination writes'
+          git push origin HEAD:main
