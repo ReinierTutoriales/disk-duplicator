@@ -1,0 +1,267 @@
+name: Apply physical backlog gate
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-device-backlog-gate.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Patch CopyEngine backlog integration
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $text = [System.IO.File]::ReadAllText($path)
+
+          $old = @'
+        var index = 0;
+        try
+        {
+            for (; index < recipients.Count; index++)
+                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);
+        }
+'@
+          $new = @'
+        if (countsData && message is DataMessage dataMessage)
+        {
+            await DeliverDataAsync(recipients, dataMessage, job).ConfigureAwait(false);
+            return;
+        }
+
+        var index = 0;
+        try
+        {
+            for (; index < recipients.Count; index++)
+                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);
+        }
+'@
+          if (-not $text.Contains($old)) { throw 'DeliverAsync insertion point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $marker = @'
+    private static async ValueTask DeliverOneAsync(
+        DestinationWorker worker,
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job)
+'@
+          $insert = @'
+    private static async Task DeliverDataAsync(
+        IReadOnlyList<DestinationWorker> recipients,
+        DataMessage message,
+        CopyJob job)
+    {
+        List<DestinationWorker>? deferred = null;
+        var index = 0;
+        try
+        {
+            // First pass never waits: every uncongested physical device receives the
+            // SharedBlock immediately. Slow devices are collected and awaited only
+            // after the fast branches have been fed, preserving FAN-OUT independence.
+            for (; index < recipients.Count; index++)
+            {
+                var worker = recipients[index];
+                if (!worker.IsActive)
+                {
+                    message.Block.Release();
+                    continue;
+                }
+
+                if (worker.DeviceScheduler.TryReserveBacklog(message.Block.Length))
+                {
+                    await DeliverOneAsync(worker, message, countsData: true, job, backlogReserved: true).ConfigureAwait(false);
+                    continue;
+                }
+
+                (deferred ??= []).Add(worker);
+            }
+
+            if (deferred is null)
+                return;
+
+            foreach (var worker in deferred)
+            {
+                var waitStarted = Stopwatch.GetTimestamp();
+                await worker.DeviceScheduler.ReserveBacklogAsync(message.Block.Length, job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordQueueWait(Stopwatch.GetElapsedTime(waitStarted));
+                await DeliverOneAsync(worker, message, countsData: true, job, backlogReserved: true).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // References that were never enqueued still belong to this dispatcher.
+            // Immediate/deferred deliveries already completed own their references.
+            if (deferred is null)
+            {
+                for (var remaining = index + 1; remaining < recipients.Count; remaining++)
+                    message.Block.Release();
+            }
+            else
+            {
+                var deliveredDeferred = deferred.TakeWhile(worker => worker.Progress.Snapshot().QueueDepth > 0).Count();
+                for (var remaining = deliveredDeferred; remaining < deferred.Count; remaining++)
+                    message.Block.Release();
+            }
+            throw;
+        }
+    }
+
+    private static async ValueTask DeliverOneAsync(
+        DestinationWorker worker,
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job,
+        bool backlogReserved = false)
+'@
+          if (-not $text.Contains($marker)) { throw 'DeliverOneAsync marker not found.' }
+          $text = $text.Replace($marker, $insert)
+
+          $old = @'
+        if (!worker.IsActive)
+        {
+            ReleaseIfData(message);
+            return;
+        }
+'@
+          $new = @'
+        if (!worker.IsActive)
+        {
+            if (backlogReserved && message is DataMessage inactiveData)
+                worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
+            ReleaseIfData(message);
+            return;
+        }
+'@
+          if (-not $text.Contains($old)) { throw 'Inactive delivery block not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+            if (!worker.IsActive)
+            {
+                worker.ControlBudget.Release();
+                controlOwned = false;
+                ReleaseIfData(message);
+                return;
+            }
+'@
+          $new = @'
+            if (!worker.IsActive)
+            {
+                worker.ControlBudget.Release();
+                controlOwned = false;
+                if (backlogReserved && message is DataMessage inactiveData)
+                    worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
+                ReleaseIfData(message);
+                return;
+            }
+'@
+          if (-not $text.Contains($old)) { throw 'Raced inactive block not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+            worker.ControlBudget.Release();
+            controlOwned = false;
+            ReleaseIfData(message);
+            if (worker.IsActive)
+'@
+          $new = @'
+            worker.ControlBudget.Release();
+            controlOwned = false;
+            if (backlogReserved && message is DataMessage rejectedData)
+                worker.DeviceScheduler.ReleaseBacklog(rejectedData.Block.Length);
+            ReleaseIfData(message);
+            if (worker.IsActive)
+'@
+          if (-not $text.Contains($old)) { throw 'TryWrite rejection block not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+        catch (OperationCanceledException)
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
+            ReleaseIfData(message);
+            throw;
+        }
+        catch
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
+            ReleaseIfData(message);
+            throw;
+        }
+'@
+          $new = @'
+        catch (OperationCanceledException)
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
+            if (backlogReserved && message is DataMessage cancelledData)
+                worker.DeviceScheduler.ReleaseBacklog(cancelledData.Block.Length);
+            ReleaseIfData(message);
+            throw;
+        }
+        catch
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (controlOwned) worker.ControlBudget.Release();
+            if (backlogReserved && message is DataMessage failedData)
+                worker.DeviceScheduler.ReleaseBacklog(failedData.Block.Length);
+            ReleaseIfData(message);
+            throw;
+        }
+'@
+          if (-not $text.Contains($old)) { throw 'DeliverOne catch block not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+                worker.DecrementQueueDepth();
+                worker.ControlBudget.Release();
+                var data = message as DataMessage;
+'@
+          $new = @'
+                worker.DecrementQueueDepth();
+                worker.ControlBudget.Release();
+                var data = message as DataMessage;
+                if (data is not null)
+                    worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
+'@
+          if (-not $text.Contains($old)) { throw 'Writer dequeue block not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+        while (worker.Channel.Reader.TryRead(out var message))
+        {
+            worker.DecrementQueueDepth();
+            worker.ControlBudget.Release();
+            ReleaseIfData(message);
+        }
+'@
+          $new = @'
+        while (worker.Channel.Reader.TryRead(out var message))
+        {
+            worker.DecrementQueueDepth();
+            worker.ControlBudget.Release();
+            if (message is DataMessage data)
+                worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
+            ReleaseIfData(message);
+        }
+'@
+          if (-not $text.Contains($old)) { throw 'DrainAndRelease block not found.' }
+          $text = $text.Replace($old, $new)
+
+          [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          Remove-Item '.github/workflows/apply-device-backlog-gate.yml'
+          git config user.name 'ReinierTutoriales'
+          git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
+          git add $path '.github/workflows/apply-device-backlog-gate.yml'
+          git commit -m 'feat: gate fanout backlog by physical device'
+          git push origin HEAD:main
