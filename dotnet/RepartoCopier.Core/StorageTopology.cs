@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace RepartoCopier.Core;
@@ -28,7 +29,25 @@ public sealed record StorageDeviceInfo(
     string FileSystem = "Unknown",
     DriveType DriveType = DriveType.Unknown,
     bool IsNetwork = false,
-    bool SupportsPreallocation = false);
+    bool SupportsPreallocation = false,
+    bool? TrimEnabled = null,
+    uint? SectorAlignmentOffsetBytes = null,
+    uint? VolumeFlags = null,
+    uint? MaximumComponentLength = null,
+    long? AvailableFreeSpaceBytes = null,
+    long? TotalSpaceBytes = null)
+{
+    public string PhysicalDeviceId => PhysicalDeviceNumber is uint number
+        ? $"PhysicalDisk{number}"
+        : IsNetwork
+            ? $"Network:{VolumeRoot}"
+            : $"Volume:{VolumeRoot}";
+
+    public bool HasKnownSectorAlignment =>
+        LogicalSectorBytes is > 0 &&
+        PhysicalSectorBytes is > 0 &&
+        SectorAlignmentOffsetBytes.HasValue;
+}
 
 public sealed record SharedPhysicalDeviceGroup(
     uint PhysicalDeviceNumber,
@@ -58,7 +77,7 @@ public static class StorageTopology
     {
         var materialized = devices.ToArray();
         var shared = materialized
-            .Where(item => item.PhysicalDeviceNumber.HasValue)
+            .Where(item => item.ProbeSucceeded && item.PhysicalDeviceNumber.HasValue)
             .GroupBy(item => item.PhysicalDeviceNumber!.Value)
             .Where(group => group.Count() > 1)
             .Select(group => new SharedPhysicalDeviceGroup(
@@ -74,7 +93,9 @@ public static class StorageTopology
         var annotated = materialized
             .Select(item => item with
             {
-                SharesPhysicalDevice = item.PhysicalDeviceNumber is uint number && sharedNumbers.Contains(number),
+                SharesPhysicalDevice = item.ProbeSucceeded &&
+                                       item.PhysicalDeviceNumber is uint number &&
+                                       sharedNumbers.Contains(number),
             })
             .ToArray();
         return new StorageTopologySnapshot(annotated, shared);
@@ -88,7 +109,10 @@ public static class StorageTopology
 
         var fileSystem = "Unknown";
         var driveType = DriveType.Unknown;
+        long? availableFreeSpace = null;
+        long? totalSpace = null;
         var volumeWarnings = new List<string>();
+
         if (!string.IsNullOrWhiteSpace(volumeRoot))
         {
             try
@@ -96,11 +120,15 @@ public static class StorageTopology
                 var drive = new DriveInfo(volumeRoot);
                 driveType = drive.DriveType;
                 if (drive.IsReady)
+                {
                     fileSystem = drive.DriveFormat;
+                    availableFreeSpace = drive.AvailableFreeSpace;
+                    totalSpace = drive.TotalSize;
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {
-                volumeWarnings.Add("No se pudo consultar el sistema de archivos: " + ex.Message);
+                volumeWarnings.Add("No se pudo consultar el volumen administrado: " + ex.Message);
             }
         }
 
@@ -124,7 +152,13 @@ public static class StorageTopology
                 fileSystem,
                 driveType,
                 true,
-                false);
+                false,
+                null,
+                null,
+                null,
+                null,
+                availableFreeSpace,
+                totalSpace);
         }
 
         if (volumeRoot.Length < 2 || volumeRoot[1] != ':')
@@ -132,7 +166,16 @@ public static class StorageTopology
             var note = "El destino no es un volumen local con letra de unidad.";
             if (volumeWarnings.Count > 0)
                 note += " " + string.Join(" ", volumeWarnings);
-            return Unknown(full, volumeRoot, note, fileSystem, driveType, false, supportsPreallocation);
+            return Unknown(
+                full,
+                volumeRoot,
+                note,
+                fileSystem,
+                driveType,
+                false,
+                supportsPreallocation,
+                availableFreeSpace,
+                totalSpace);
         }
 
         var devicePath = $@"\\.\{char.ToUpperInvariant(volumeRoot[0])}:";
@@ -154,7 +197,24 @@ public static class StorageTopology
                 fileSystem,
                 driveType,
                 false,
-                supportsPreallocation);
+                supportsPreallocation,
+                availableFreeSpace,
+                totalSpace);
+        }
+
+        uint? volumeFlags = null;
+        uint? maximumComponentLength = null;
+        if (TryGetVolumeInformation(handle, out var nativeFileSystem, out var maxComponent, out var flags, out var volumeError))
+        {
+            if (!string.IsNullOrWhiteSpace(nativeFileSystem))
+                fileSystem = nativeFileSystem;
+            maximumComponentLength = maxComponent;
+            volumeFlags = flags;
+            supportsPreallocation = SupportsSafePreallocation(fileSystem, isNetwork: false);
+        }
+        else
+        {
+            volumeWarnings.Add(volumeError);
         }
 
         if (!TryGetDeviceNumber(handle, out var physicalDevice, out var partition, out var deviceNumberError))
@@ -166,14 +226,20 @@ public static class StorageTopology
                 fileSystem,
                 driveType,
                 false,
-                supportsPreallocation);
+                supportsPreallocation,
+                availableFreeSpace,
+                totalSpace,
+                volumeFlags,
+                maximumComponentLength);
         }
 
         var busType = "Unknown";
         bool? removable = null;
         var mediaKind = StorageMediaKind.Unknown;
+        bool? trimEnabled = null;
         uint? logicalSector = null;
         uint? physicalSector = null;
+        uint? sectorAlignmentOffset = null;
         var warnings = new List<string>(volumeWarnings);
 
         if (TryQueryProperty(handle, StoragePropertyId.Device, 64, out var deviceDescriptor, out var deviceError))
@@ -205,12 +271,25 @@ public static class StorageTopology
             warnings.Add(seekError);
         }
 
+        if (TryQueryProperty(handle, StoragePropertyId.Trim, 16, out var trimDescriptor, out var trimError))
+        {
+            if (trimDescriptor.Length >= 9)
+                trimEnabled = trimDescriptor[8] != 0;
+            else
+                warnings.Add("Descriptor de TRIM demasiado corto.");
+        }
+        else
+        {
+            warnings.Add(trimError);
+        }
+
         if (TryQueryProperty(handle, StoragePropertyId.AccessAlignment, 32, out var alignmentDescriptor, out var alignmentError))
         {
-            if (alignmentDescriptor.Length >= 24)
+            if (alignmentDescriptor.Length >= 28)
             {
                 logicalSector = BinaryPrimitives.ReadUInt32LittleEndian(alignmentDescriptor.AsSpan(16, 4));
                 physicalSector = BinaryPrimitives.ReadUInt32LittleEndian(alignmentDescriptor.AsSpan(20, 4));
+                sectorAlignmentOffset = BinaryPrimitives.ReadUInt32LittleEndian(alignmentDescriptor.AsSpan(24, 4));
             }
             else
             {
@@ -238,7 +317,13 @@ public static class StorageTopology
             fileSystem,
             driveType,
             false,
-            supportsPreallocation);
+            supportsPreallocation,
+            trimEnabled,
+            sectorAlignmentOffset,
+            volumeFlags,
+            maximumComponentLength,
+            availableFreeSpace,
+            totalSpace);
     }
 
     internal static bool SupportsSafePreallocation(string? fileSystem, bool isNetwork) =>
@@ -258,13 +343,17 @@ public static class StorageTopology
         string fileSystem = "Unknown",
         DriveType driveType = DriveType.Unknown,
         bool isNetwork = false,
-        bool supportsPreallocation = false) =>
+        bool supportsPreallocation = false,
+        long? availableFreeSpace = null,
+        long? totalSpace = null,
+        uint? volumeFlags = null,
+        uint? maximumComponentLength = null) =>
         new(
             destinationRoot,
             volumeRoot,
             null,
             null,
-            isNetwork ? "Network" : "Unknown",
+            "Unknown",
             StorageMediaKind.Unknown,
             null,
             null,
@@ -275,7 +364,13 @@ public static class StorageTopology
             fileSystem,
             driveType,
             isNetwork,
-            supportsPreallocation);
+            supportsPreallocation,
+            null,
+            null,
+            volumeFlags,
+            maximumComponentLength,
+            availableFreeSpace,
+            totalSpace);
 
     private static bool TryGetDeviceNumber(
         SafeFileHandle handle,
@@ -292,12 +387,20 @@ public static class StorageTopology
                 output,
                 (uint)output.Length,
                 out var returned,
-                IntPtr.Zero) || returned < 12)
+                IntPtr.Zero))
         {
             physicalDevice = 0;
             partition = 0;
             error = "No se pudo obtener el número de disco físico: " +
                     new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            return false;
+        }
+
+        if (returned < 12)
+        {
+            physicalDevice = 0;
+            partition = 0;
+            error = $"Descriptor de número de dispositivo demasiado corto: {returned} bytes.";
             return false;
         }
 
@@ -339,6 +442,38 @@ public static class StorageTopology
         return true;
     }
 
+    private static bool TryGetVolumeInformation(
+        SafeFileHandle handle,
+        out string fileSystem,
+        out uint maximumComponentLength,
+        out uint fileSystemFlags,
+        out string error)
+    {
+        var volumeName = new StringBuilder(261);
+        var fileSystemName = new StringBuilder(261);
+        if (!NativeMethods.GetVolumeInformationByHandleW(
+                handle,
+                volumeName,
+                (uint)volumeName.Capacity,
+                out _,
+                out maximumComponentLength,
+                out fileSystemFlags,
+                fileSystemName,
+                (uint)fileSystemName.Capacity))
+        {
+            fileSystem = "Unknown";
+            maximumComponentLength = 0;
+            fileSystemFlags = 0;
+            error = "No se pudo consultar información nativa del volumen: " +
+                    new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            return false;
+        }
+
+        fileSystem = fileSystemName.ToString();
+        error = string.Empty;
+        return true;
+    }
+
     private static string BusTypeName(int value) => value switch
     {
         1 => "SCSI",
@@ -369,6 +504,7 @@ public static class StorageTopology
         Device = 0,
         AccessAlignment = 6,
         SeekPenalty = 7,
+        Trim = 8,
     }
 
     private static class NativeMethods
@@ -377,7 +513,7 @@ public static class StorageTopology
         internal const uint IoctlStorageGetDeviceNumber = 0x002D1080;
         internal const uint IoctlStorageQueryProperty = 0x002D1400;
 
-#pragma warning disable SYSLIB1054 // SafeHandle + byte-array marshalling keeps this interop small and auditable.
+#pragma warning disable SYSLIB1054 // SafeHandle + small marshalled buffers keep this interop auditable.
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern SafeFileHandle CreateFileW(
@@ -401,6 +537,19 @@ public static class StorageTopology
             uint outBufferSize,
             out uint bytesReturned,
             IntPtr overlapped);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetVolumeInformationByHandleW(
+            SafeFileHandle file,
+            StringBuilder volumeNameBuffer,
+            uint volumeNameSize,
+            out uint volumeSerialNumber,
+            out uint maximumComponentLength,
+            out uint fileSystemFlags,
+            StringBuilder fileSystemNameBuffer,
+            uint fileSystemNameSize);
 #pragma warning restore SYSLIB1054
     }
 }
