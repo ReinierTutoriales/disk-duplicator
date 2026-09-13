@@ -67,7 +67,7 @@ internal sealed class CopyTelemetry
     private long _copyPhaseTicks, _verifyPhaseTicks;
 
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
-        _deviceSchedulers = schedulers;
+        _deviceSchedulers = schedulers.ToArray();
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
