@@ -37,6 +37,42 @@ public sealed record DestinationSnapshot(
     int QueueDepth,
     ulong Retries)
 {
+    public DestinationSnapshot(
+        string label,
+        ulong written,
+        ulong total,
+        ulong filesDone,
+        ulong filesSkipped,
+        ulong filesErrored,
+        double bytesPerSecond,
+        double recentBytesPerSecond,
+        DestinationPhase phase,
+        string? error,
+        string lastFile,
+        int queueDepth,
+        ulong retries)
+        : this(
+            label,
+            written,
+            total,
+            filesDone,
+            filesDone,
+            filesSkipped,
+            filesErrored,
+            0,
+            0,
+            0,
+            0,
+            bytesPerSecond,
+            recentBytesPerSecond,
+            phase,
+            error,
+            lastFile,
+            queueDepth,
+            retries)
+    {
+    }
+
     public double CopyFraction =>
         Total == 0 ? 1.0 : Math.Clamp((double)Written / Total, 0.0, 1.0);
 
