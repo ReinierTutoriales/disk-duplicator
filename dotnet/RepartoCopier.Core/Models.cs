@@ -56,7 +56,7 @@ internal sealed class DestinationProgress
     private ulong _verifyFilesDone;
     private ulong _verifyFilesTotal;
 
-    public DestinationProgress(string label, ulong total, ulong filesTotal)
+    public DestinationProgress(string label, ulong total, ulong filesTotal = 0)
     {
         Label = label;
         Total = total;
