@@ -1092,14 +1092,22 @@ public static class CopyEngine
             try
             {
                 current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
-                // SharedBlock is already sized for the sequential I/O pipeline. Send the
-                // whole block to FileStream in one asynchronous operation instead of
-                // fragmenting a 16 MiB block into four separately awaited 4 MiB writes.
-                // This reduces syscalls/IOCP completions and managed async overhead while
-                // preserving the existing retry boundary at current.Copied.
-                using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordWriteOperation();
+                var queueDepth = StorageWritePolicy.BufferedLargeWriteQueueDepth(
+                    worker.Device,
+                    worker.DeviceScheduler.MaxOutstandingIo,
+                    current.Entry.Size,
+                    data.Length);
+
+                if (queueDepth >= 2)
+                {
+                    await WriteQueueDepthTwoAsync(worker, current, data, job).ConfigureAwait(false);
+                }
+                else
+                {
+                    using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+                    await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                    job.Telemetry.RecordWriteOperation();
+                }
                 worker.NoteProgress();
                 return;
             }
@@ -1122,6 +1130,51 @@ public static class CopyEngine
             }
         }
         throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
+    }
+
+    private static async Task WriteQueueDepthTwoAsync(
+        DestinationWorker worker,
+        CurrentFile current,
+        ReadOnlyMemory<byte> data,
+        CopyJob job)
+    {
+        var stream = current.Stream
+            ?? throw new InvalidOperationException("El .part no está abierto para escritura QD2.");
+        var firstLength = data.Length / 2;
+        var secondLength = data.Length - firstLength;
+        if (firstLength < StorageWritePolicy.MinimumParallelSliceBytes ||
+            secondLength < StorageWritePolicy.MinimumParallelSliceBytes)
+        {
+            using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+            await stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+            job.Telemetry.RecordWriteOperation();
+            return;
+        }
+
+        // QD2 is enabled only for one destination owning this physical scheduler.
+        // Shared physical disks and source/destination-on-same-disk profiles remain QD1,
+        // so acquiring both slots here cannot deadlock against a sibling destination.
+        using var firstLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+        using var secondLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+
+        var firstOffset = current.Copied;
+        var secondOffset = checked(firstOffset + firstLength);
+        var handle = stream.SafeFileHandle;
+
+        var firstWrite = RandomAccess.WriteAsync(
+            handle,
+            data[..firstLength],
+            firstOffset,
+            job.Token);
+        var secondWrite = RandomAccess.WriteAsync(
+            handle,
+            data.Slice(firstLength, secondLength),
+            secondOffset,
+            job.Token);
+
+        await Task.WhenAll(firstWrite.AsTask(), secondWrite.AsTask()).ConfigureAwait(false);
+        job.Telemetry.RecordWriteOperation();
+        job.Telemetry.RecordWriteOperation();
     }
 
     private static void FinishFile(
