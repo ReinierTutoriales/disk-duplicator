@@ -1,0 +1,38 @@
+name: Apply storage preallocation safety patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-storage-preallocation-safety.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Patch CopyEngine and remove one-shot workflow
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $text = [System.IO.File]::ReadAllText($path)
+          $old = 'entry.Size >= PreallocationThreshold ? entry.Size : 0);'
+          $new = 'StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold));'
+          if (-not $text.Contains($old)) {
+            throw "Expected preallocation expression was not found. Refusing to patch."
+          }
+          $patched = $text.Replace($old, $new)
+          if ($patched -eq $text) {
+            throw "CopyEngine patch made no change."
+          }
+          [System.IO.File]::WriteAllText($path, $patched, [System.Text.UTF8Encoding]::new($false))
+          Remove-Item '.github/workflows/apply-storage-preallocation-safety.yml'
+          git config user.name 'ReinierTutoriales'
+          git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
+          git add $path '.github/workflows/apply-storage-preallocation-safety.yml'
+          git commit -m 'fix: preallocate only on safe local filesystems'
+          git push origin HEAD:main
