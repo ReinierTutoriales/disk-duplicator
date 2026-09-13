@@ -81,6 +81,7 @@ public static class DiagnosticsReport
             foreach (var device in metrics.DeviceSchedulers)
             {
                 sb.Append("- ").Append(device.DeviceId)
+                    .Append(" | identityConfidence=").Append(device.IdentityConfidence)
                     .Append(" | qd=").Append(device.OutstandingIo.ToString(CultureInfo.InvariantCulture))
                     .Append('/').Append(device.MaxOutstandingIo.ToString(CultureInfo.InvariantCulture))
                     .Append(" | peakQD=").Append(device.PeakOutstandingIo.ToString(CultureInfo.InvariantCulture))
@@ -89,6 +90,10 @@ public static class DiagnosticsReport
                     .Append(" | backlogTargetBytes=").Append(device.BacklogTargetBytes.ToString(CultureInfo.InvariantCulture))
                     .Append(" | backlogPressure=").Append(device.BacklogPressure.ToString("0.###", CultureInfo.InvariantCulture))
                     .AppendLine();
+                if (device.IdentityConfidence is not DeviceIdentityConfidence.Exact)
+                {
+                    sb.AppendLine("  identity-warning: no se pudo demostrar la identidad del disco físico; la detección de destinos que comparten hardware puede ser incompleta.");
+                }
             }
         }
 
@@ -121,10 +126,12 @@ public static class DiagnosticsReport
         foreach (var device in topology.Destinations)
         {
             var profile = StorageIoProfile.For(device);
+            var identityConfidence = StorageDeviceIdentity.ConfidenceFor(device);
             sb.Append("- ").Append(device.DestinationRoot)
                 .Append(" | disk=").Append(device.PhysicalDeviceNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | partition=").Append(device.PartitionNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | deviceId=").Append(device.PhysicalDeviceId)
+                .Append(" | identityConfidence=").Append(identityConfidence)
                 .Append(" | bus=").Append(device.BusType)
                 .Append(" | media=").Append(device.MediaKind)
                 .Append(" | filesystem=").Append(device.FileSystem)
@@ -144,6 +151,8 @@ public static class DiagnosticsReport
                 .AppendLine();
             if (!string.IsNullOrWhiteSpace(device.ProbeError))
                 sb.Append("  probe-note: ").AppendLine(device.ProbeError);
+            if (identityConfidence is not DeviceIdentityConfidence.Exact)
+                sb.AppendLine("  identity-warning: no se pudo demostrar la identidad del disco físico.");
         }
 
         foreach (var group in topology.SharedPhysicalDevices)
