@@ -57,6 +57,24 @@ public static class DiagnosticsReport
         sb.Append("PeakBufferedBytes: ").AppendLine(metrics.PeakBufferedBytes.ToString(CultureInfo.InvariantCulture));
         sb.Append("MaximumObservedBufferTargetBytes: ").AppendLine(metrics.MaximumObservedBufferTargetBytes.ToString(CultureInfo.InvariantCulture));
 
+        if (metrics.PipelineGovernor is { } pipeline)
+        {
+            sb.AppendLine("PipelineGovernor:");
+            sb.Append("- prefetch=").Append(pipeline.CurrentPrefetchLimit.ToString(CultureInfo.InvariantCulture))
+                .Append(" | min=").Append(pipeline.MinimumObservedPrefetchLimit.ToString(CultureInfo.InvariantCulture))
+                .Append(" | max=").Append(pipeline.MaximumObservedPrefetchLimit.ToString(CultureInfo.InvariantCulture))
+                .Append(" | inFlight=").Append(pipeline.InFlight.ToString(CultureInfo.InvariantCulture))
+                .Append(" | decisions=").Append(pipeline.DecisionCount.ToString(CultureInfo.InvariantCulture))
+                .Append(" | upshifts=").Append(pipeline.Upshifts.ToString(CultureInfo.InvariantCulture))
+                .Append(" | downshifts=").Append(pipeline.Downshifts.ToString(CultureInfo.InvariantCulture))
+                .Append(" | lastDecision=").Append(pipeline.LastDecision)
+                .AppendLine();
+            AppendDuration(sb, "PipelineConsumerWait", pipeline.ConsumerWaitTime);
+            AppendDuration(sb, "PipelineDeliveryWait", pipeline.DeliveryWaitTime);
+            AppendDuration(sb, "PipelineBudgetWait", pipeline.BudgetWaitTime);
+            AppendDuration(sb, "PipelineSourceRead", pipeline.SourceReadTime);
+        }
+
         if (metrics.DeviceSchedulers.Count > 0)
         {
             sb.AppendLine("DeviceSchedulers:");
