@@ -3,6 +3,20 @@ using System.Threading;
 
 namespace RepartoCopier.Core;
 
+public sealed record PipelineGovernorSnapshot(
+    int CurrentPrefetchLimit,
+    int MinimumObservedPrefetchLimit,
+    int MaximumObservedPrefetchLimit,
+    int InFlight,
+    int DecisionCount,
+    int Upshifts,
+    int Downshifts,
+    string LastDecision,
+    TimeSpan ConsumerWaitTime,
+    TimeSpan DeliveryWaitTime,
+    TimeSpan BudgetWaitTime,
+    TimeSpan SourceReadTime);
+
 public sealed record CopyDiagnosticsSnapshot(
     long SourceReadBytes,
     TimeSpan SourceReadTime,
@@ -43,6 +57,7 @@ public sealed record CopyDiagnosticsSnapshot(
     public double SustainedWrite5sBytesPerSecond { get; init; }
     public double SustainedWrite10sBytesPerSecond { get; init; }
     public IReadOnlyList<DeviceIoSnapshot> DeviceSchedulers { get; init; } = [];
+    public PipelineGovernorSnapshot? PipelineGovernor { get; init; }
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -54,6 +69,7 @@ internal sealed class CopyTelemetry
     private readonly object _rateGate = new();
     private readonly Queue<WriteRateSample> _writeSamples = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
+    private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
     private long _sourceHashBytes, _sourceHashTicks;
     private long _bufferWaitTicks, _fanoutWaitTicks, _queueWaitTicks, _controlBacklogWaitTicks;
@@ -68,6 +84,12 @@ internal sealed class CopyTelemetry
 
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
         _deviceSchedulers = schedulers.ToArray();
+
+    internal void AttachPipelineGovernor(Func<PipelineGovernorSnapshot> snapshotProvider)
+    {
+        ArgumentNullException.ThrowIfNull(snapshotProvider);
+        _pipelineGovernorSnapshot = snapshotProvider;
+    }
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
@@ -122,6 +144,7 @@ internal sealed class CopyTelemetry
             .Select(item => item.Snapshot())
             .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
             .ToArray() ?? [];
+        var pipeline = _pipelineGovernorSnapshot?.Invoke();
 
         return new CopyDiagnosticsSnapshot(
             Interlocked.Read(ref _sourceReadBytes), ToTimeSpan(Interlocked.Read(ref _sourceReadTicks)),
@@ -146,6 +169,7 @@ internal sealed class CopyTelemetry
             SustainedWrite5sBytesPerSecond = sustained5,
             SustainedWrite10sBytesPerSecond = sustained10,
             DeviceSchedulers = devices,
+            PipelineGovernor = pipeline,
         };
     }
 
