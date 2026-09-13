@@ -24,7 +24,11 @@ public sealed record StorageDeviceInfo(
     uint? PhysicalSectorBytes,
     bool ProbeSucceeded,
     string? ProbeError,
-    bool SharesPhysicalDevice = false);
+    bool SharesPhysicalDevice = false,
+    string FileSystem = "Unknown",
+    DriveType DriveType = DriveType.Unknown,
+    bool IsNetwork = false,
+    bool SupportsPreallocation = false);
 
 public sealed record SharedPhysicalDeviceGroup(
     uint PhysicalDeviceNumber,
@@ -40,7 +44,7 @@ public sealed record StorageTopologySnapshot(
 /// <summary>
 /// Best-effort Windows storage topology inspection. A topology probe must never
 /// make an otherwise valid copy fail; unsupported/network volumes are reported
-/// as unknown and the copy engine keeps its existing behavior.
+/// conservatively and the copy engine keeps a safe fallback profile.
 /// </summary>
 public static class StorageTopology
 {
@@ -81,9 +85,54 @@ public static class StorageTopology
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationRoot);
         var full = Path.GetFullPath(destinationRoot);
         var volumeRoot = Path.GetPathRoot(full) ?? string.Empty;
+
+        var fileSystem = "Unknown";
+        var driveType = DriveType.Unknown;
+        var volumeWarnings = new List<string>();
+        if (!string.IsNullOrWhiteSpace(volumeRoot))
+        {
+            try
+            {
+                var drive = new DriveInfo(volumeRoot);
+                driveType = drive.DriveType;
+                if (drive.IsReady)
+                    fileSystem = drive.DriveFormat;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                volumeWarnings.Add("No se pudo consultar el sistema de archivos: " + ex.Message);
+            }
+        }
+
+        var isNetwork = IsNetworkDestination(full, driveType);
+        var supportsPreallocation = SupportsSafePreallocation(fileSystem, isNetwork);
+        if (isNetwork)
+        {
+            return new StorageDeviceInfo(
+                full,
+                volumeRoot,
+                null,
+                null,
+                "Network",
+                StorageMediaKind.Unknown,
+                null,
+                null,
+                null,
+                true,
+                volumeWarnings.Count == 0 ? null : string.Join(" ", volumeWarnings),
+                false,
+                fileSystem,
+                driveType,
+                true,
+                false);
+        }
+
         if (volumeRoot.Length < 2 || volumeRoot[1] != ':')
         {
-            return Unknown(full, volumeRoot, "El destino no es un volumen local con letra de unidad.");
+            var note = "El destino no es un volumen local con letra de unidad.";
+            if (volumeWarnings.Count > 0)
+                note += " " + string.Join(" ", volumeWarnings);
+            return Unknown(full, volumeRoot, note, fileSystem, driveType, false, supportsPreallocation);
         }
 
         var devicePath = $@"\\.\{char.ToUpperInvariant(volumeRoot[0])}:";
@@ -98,18 +147,34 @@ public static class StorageTopology
         if (handle.IsInvalid)
         {
             var error = new Win32Exception(Marshal.GetLastWin32Error()).Message;
-            return Unknown(full, volumeRoot, $"No se pudo abrir el volumen para consultar topología: {error}");
+            return Unknown(
+                full,
+                volumeRoot,
+                $"No se pudo abrir el volumen para consultar topología: {error}",
+                fileSystem,
+                driveType,
+                false,
+                supportsPreallocation);
         }
 
         if (!TryGetDeviceNumber(handle, out var physicalDevice, out var partition, out var deviceNumberError))
-            return Unknown(full, volumeRoot, deviceNumberError);
+        {
+            return Unknown(
+                full,
+                volumeRoot,
+                deviceNumberError,
+                fileSystem,
+                driveType,
+                false,
+                supportsPreallocation);
+        }
 
         var busType = "Unknown";
         bool? removable = null;
         var mediaKind = StorageMediaKind.Unknown;
         uint? logicalSector = null;
         uint? physicalSector = null;
-        var warnings = new List<string>();
+        var warnings = new List<string>(volumeWarnings);
 
         if (TryQueryProperty(handle, StoragePropertyId.Device, 64, out var deviceDescriptor, out var deviceError))
         {
@@ -168,22 +233,49 @@ public static class StorageTopology
             logicalSector,
             physicalSector,
             true,
-            warnings.Count == 0 ? null : string.Join(" ", warnings));
+            warnings.Count == 0 ? null : string.Join(" ", warnings),
+            false,
+            fileSystem,
+            driveType,
+            false,
+            supportsPreallocation);
     }
 
-    private static StorageDeviceInfo Unknown(string destinationRoot, string volumeRoot, string error) =>
+    internal static bool SupportsSafePreallocation(string? fileSystem, bool isNetwork) =>
+        !isNetwork &&
+        (string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(fileSystem, "ReFS", StringComparison.OrdinalIgnoreCase));
+
+    internal static bool IsNetworkDestination(string fullPath, DriveType driveType) =>
+        driveType == DriveType.Network ||
+        fullPath.StartsWith(@"\\", StringComparison.Ordinal) ||
+        fullPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase);
+
+    private static StorageDeviceInfo Unknown(
+        string destinationRoot,
+        string volumeRoot,
+        string error,
+        string fileSystem = "Unknown",
+        DriveType driveType = DriveType.Unknown,
+        bool isNetwork = false,
+        bool supportsPreallocation = false) =>
         new(
             destinationRoot,
             volumeRoot,
             null,
             null,
-            "Unknown",
+            isNetwork ? "Network" : "Unknown",
             StorageMediaKind.Unknown,
             null,
             null,
             null,
             false,
-            error);
+            error,
+            false,
+            fileSystem,
+            driveType,
+            isNetwork,
+            supportsPreallocation);
 
     private static bool TryGetDeviceNumber(
         SafeFileHandle handle,
