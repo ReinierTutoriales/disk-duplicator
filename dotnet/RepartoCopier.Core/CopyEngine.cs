@@ -171,6 +171,12 @@ public static class CopyEngine
             source,
             effectiveDestinations);
 
+        var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
+        var destinationDevices = destinationTopology.Destinations.ToArray();
+        if (destinationDevices.Length != destinationRoots.Length)
+            throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
+        var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
+
         var sourceRoot = sourceIsDirectory
             ? source
             : Path.GetDirectoryName(source)
@@ -240,7 +246,9 @@ public static class CopyEngine
             directories,
             totalBytes,
             preverifiedSkips,
-            sourceIsDirectory ? scan : null);
+            sourceIsDirectory ? scan : null,
+            sourceDevice,
+            destinationDevices);
     }
 
     private static async Task RunAsync(
@@ -255,6 +263,7 @@ public static class CopyEngine
         using var resources = new ResourceGovernor();
         var pipeline = new PipelineGovernor();
         var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
+        using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         try
         {
             var skipMasks = options.SkipSame
@@ -267,7 +276,13 @@ public static class CopyEngine
             }
 
             workers = copy.DestinationRoots
-                .Select((root, index) => new DestinationWorker(root, index, progress[index], controlBudget))
+                .Select((root, index) => new DestinationWorker(
+                    root,
+                    index,
+                    progress[index],
+                    controlBudget,
+                    copy.DestinationDevices[index],
+                    deviceSchedulers.For(copy.DestinationDevices[index])))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -984,6 +999,7 @@ public static class CopyEngine
                 // fragmenting a 16 MiB block into four separately awaited 4 MiB writes.
                 // This reduces syscalls/IOCP completions and managed async overhead while
                 // preserving the existing retry boundary at current.Copied.
+                using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
                 await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
                 job.Telemetry.RecordWriteOperation();
                 worker.NoteProgress();
@@ -1358,7 +1374,9 @@ public static class CopyEngine
         IReadOnlyList<string> Directories,
         ulong TotalBytes,
         bool[][] PreverifiedSkips,
-        SourceTreeScan? SourceScan);
+        SourceTreeScan? SourceScan,
+        StorageDeviceInfo SourceDevice,
+        StorageDeviceInfo[] DestinationDevices);
 
     private sealed record FileEntry(
         string SourcePath,
@@ -1970,12 +1988,16 @@ public static class CopyEngine
             string root,
             int slot,
             DestinationProgress progress,
-            GlobalControlBacklogBudget controlBudget)
+            GlobalControlBacklogBudget controlBudget,
+            StorageDeviceInfo device,
+            DeviceScheduler deviceScheduler)
         {
             Root = root;
             Slot = slot;
             Progress = progress;
             ControlBudget = controlBudget;
+            Device = device;
+            DeviceScheduler = deviceScheduler;
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -1988,6 +2010,8 @@ public static class CopyEngine
         public int Slot { get; }
         public DestinationProgress Progress { get; }
         public GlobalControlBacklogBudget ControlBudget { get; }
+        public StorageDeviceInfo Device { get; }
+        public DeviceScheduler DeviceScheduler { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
