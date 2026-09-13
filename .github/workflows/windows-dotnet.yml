@@ -1,6 +1,7 @@
 name: Windows .NET CI
 
 # Permanent gate for the integrated FAN-OUT engine and Windows application.
+# Validates physical-device scheduling/backlog changes on every main update.
 on:
   push:
     branches: [main]
