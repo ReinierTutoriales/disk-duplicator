@@ -1,0 +1,124 @@
+name: Apply QD2 large writes
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-q2-large-writes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Patch CopyEngine QD2 path
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $text = [System.IO.File]::ReadAllText($path)
+
+          $old = @'
+                current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+                // SharedBlock is already sized for the sequential I/O pipeline. Send the
+                // whole block to FileStream in one asynchronous operation instead of
+                // fragmenting a 16 MiB block into four separately awaited 4 MiB writes.
+                // This reduces syscalls/IOCP completions and managed async overhead while
+                // preserving the existing retry boundary at current.Copied.
+                using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordWriteOperation();
+                worker.NoteProgress();
+                return;
+'@
+
+          $new = @'
+                current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+                var queueDepth = StorageWritePolicy.BufferedLargeWriteQueueDepth(
+                    worker.Device,
+                    worker.DeviceScheduler.MaxOutstandingIo,
+                    current.Entry.Size,
+                    data.Length);
+
+                if (queueDepth >= 2)
+                {
+                    await WriteQueueDepthTwoAsync(worker, current, data, job).ConfigureAwait(false);
+                }
+                else
+                {
+                    using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+                    await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                    job.Telemetry.RecordWriteOperation();
+                }
+                worker.NoteProgress();
+                return;
+'@
+
+          if (-not $text.Contains($old)) { throw 'WriteWithRetry replacement point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $marker = @'
+    private static void FinishFile(
+'@
+
+          $helper = @'
+    private static async Task WriteQueueDepthTwoAsync(
+        DestinationWorker worker,
+        CurrentFile current,
+        ReadOnlyMemory<byte> data,
+        CopyJob job)
+    {
+        var stream = current.Stream
+            ?? throw new InvalidOperationException("El .part no está abierto para escritura QD2.");
+        var firstLength = data.Length / 2;
+        var secondLength = data.Length - firstLength;
+        if (firstLength < StorageWritePolicy.MinimumParallelSliceBytes ||
+            secondLength < StorageWritePolicy.MinimumParallelSliceBytes)
+        {
+            using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+            await stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+            job.Telemetry.RecordWriteOperation();
+            return;
+        }
+
+        // QD2 is enabled only when this destination owns the physical scheduler
+        // exclusively. Acquiring both slots before issuing I/O therefore cannot
+        // deadlock with another destination sharing the same disk.
+        using var firstLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+        using var secondLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+
+        var firstOffset = current.Copied;
+        var secondOffset = checked(firstOffset + firstLength);
+        var handle = stream.SafeFileHandle;
+
+        var firstWrite = RandomAccess.WriteAsync(
+            handle,
+            data[..firstLength],
+            firstOffset,
+            job.Token);
+        var secondWrite = RandomAccess.WriteAsync(
+            handle,
+            data.Slice(firstLength, secondLength),
+            secondOffset,
+            job.Token);
+
+        await Task.WhenAll(firstWrite.AsTask(), secondWrite.AsTask()).ConfigureAwait(false);
+        job.Telemetry.RecordWriteOperation();
+        job.Telemetry.RecordWriteOperation();
+    }
+
+'@
+
+          if (-not $text.Contains($marker)) { throw 'FinishFile marker not found.' }
+          $text = $text.Replace($marker, $helper + $marker)
+
+          [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          Remove-Item '.github/workflows/apply-q2-large-writes.yml'
+          git config user.name 'ReinierTutoriales'
+          git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
+          git add $path '.github/workflows/apply-q2-large-writes.yml'
+          git commit -m 'perf: add QD2 RandomAccess large-file writes'
+          git push origin HEAD:main
