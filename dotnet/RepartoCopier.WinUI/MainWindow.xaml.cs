@@ -9,7 +9,6 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
 using Windows.Graphics;
-using Windows.Storage.Streams;
 
 namespace RepartoCopier.WinUI;
 
@@ -33,13 +32,11 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         AppWindow.Resize(new SizeInt32(1180, 760));
 
-
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
 
         ApplySavedTheme();
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
-        _ = LoadBrandLogoAsync();
         TryLoadLaunchSource();
     }
 
@@ -52,26 +49,6 @@ public sealed partial class MainWindow : Window
             ThemePreference.Dark => ElementTheme.Dark,
             _ => ElementTheme.Default,
         };
-    }
-
-    private async Task LoadBrandLogoAsync()
-    {
-        try
-        {
-            var bytes = Convert.FromBase64String(BrandAssets.LogoPngBase64);
-            using var stream = new InMemoryRandomAccessStream();
-            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
-            {
-                writer.WriteBytes(bytes);
-                await writer.StoreAsync();
-                writer.DetachStream();
-            }
-            stream.Seek(0);
-            var bitmap = new BitmapImage();
-            await bitmap.SetSourceAsync(stream);
-            LogoImage.Source = bitmap;
-        }
-        catch { }
     }
 
     private void TryLoadLaunchSource()
@@ -163,7 +140,10 @@ public sealed partial class MainWindow : Window
                 _destinations.Select(item => item.Path),
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true);
-            var options = new CopyOptions(Verify: false, SkipSame: plan.SkipSame, KeepGoing: plan.KeepGoing);
+            var options = new CopyOptions(
+                Verify: VerifyCheck.IsChecked == true,
+                SkipSame: plan.SkipSame,
+                KeepGoing: plan.KeepGoing);
 
             SetEditingEnabled(false);
             StartButton.IsEnabled = false;
@@ -175,10 +155,10 @@ public sealed partial class MainWindow : Window
             CurrentPathText.Text = SourcePathBox.Text;
             SpeedMetricText.Text = "0 MiB/s";
             RemainingMetricText.Text = "--:--:--";
-            FilesMetricText.Text = "0";
+            FilesMetricText.Text = "0/0";
             OverallProgressBar.Value = 0;
             OverallPercentText.Text = "0%";
-            OverallDetailText.Text = "Preparando...";
+            OverallDetailText.Text = options.Verify ? "Preparando copia con verificación de integridad..." : "Preparando...";
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
@@ -212,8 +192,16 @@ public sealed partial class MainWindow : Window
         _job.SetPaused(paused);
         PauseButtonText.Text = paused ? "Continuar" : "Pausar";
         PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
-        OperationTitleText.Text = paused ? "Pausado" : "Copiando...";
-        StatusText.Text = paused ? "Pausado" : "Copiando…";
+        if (paused)
+        {
+            OperationTitleText.Text = "Pausado";
+            StatusText.Text = "Pausado";
+            return;
+        }
+
+        var verifying = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Verifying);
+        OperationTitleText.Text = verifying ? "Comprobando integridad..." : "Copiando...";
+        StatusText.Text = verifying ? "Verificando integridad…" : "Copiando…";
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -242,6 +230,14 @@ public sealed partial class MainWindow : Window
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
                 var completedWithErrors = failed > 0 || erroredFiles > 0;
+                var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
+                var filesDone = snapshots.Count == 0 ? 0UL : snapshots
+                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                    .Select(item => item.FilesDone)
+                    .DefaultIfEmpty(snapshots.Max(item => item.FilesDone))
+                    .Min();
+                var sourceBytes = snapshots.Count == 0 ? 0UL : snapshots[0].Total;
+                var elapsed = _copyStartedAt is null ? TimeSpan.Zero : DateTimeOffset.Now - _copyStartedAt.Value;
 
                 OperationTitleText.Text = cancelled
                     ? "Cancelado"
@@ -250,6 +246,9 @@ public sealed partial class MainWindow : Window
                 StatusText.Text = cancelled
                     ? "Copia cancelada"
                     : completedWithErrors ? "La copia terminó con algunos errores" : "Copia completada";
+                CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
+                CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
+                SpeedMetricText.Text = "0.0 B/s";
                 RemainingMetricText.Text = "00:00:00";
                 PauseButton.IsEnabled = false;
                 CancelButton.IsEnabled = false;
@@ -275,32 +274,58 @@ public sealed partial class MainWindow : Window
         for (var index = 0; index < snapshots.Count; index++)
             _progressRows[index].Update(snapshots[index]);
 
-        var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Total);
-        var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Written);
-        var speed = snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
-        var percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
+        var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
+        double percent;
+        if (verifying)
+        {
+            var verifyTotal = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifyBytesTotal));
+            var verified = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifiedBytes));
+            percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
+            OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
+            SpeedMetricText.Text = "—";
+            RemainingMetricText.Text = "--:--:--";
+            if (!_job.IsPaused)
+            {
+                OperationTitleText.Text = "Comprobando integridad...";
+                StatusText.Text = "Verificando integridad de los destinos…";
+            }
+        }
+        else
+        {
+            var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Total));
+            var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Written));
+            var speed = snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
+            percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
+            OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
+            SpeedMetricText.Text = Throughput.Format(speed);
+            var remaining = total > written ? total - written : 0;
+            RemainingMetricText.Text = speed > 1
+                ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
+                : "--:--:--";
+            if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
+            {
+                OperationTitleText.Text = "Copiando...";
+                StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
+            }
+        }
+
         OverallProgressBar.Value = percent;
         OverallPercentText.Text = $"{percent:0}%";
-        OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
-        SpeedMetricText.Text = Throughput.Format(speed);
-        var filesDone = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesDone);
-        FilesMetricText.Text = $"{filesDone}";
 
-        var remaining = total > written ? total - written : 0;
-        RemainingMetricText.Text = speed > 1
-            ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
-            : "--:--:--";
+        var activeFileSnapshots = snapshots
+            .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+            .ToArray();
+        var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
+        var filesDone = activeFileSnapshots.Length == 0
+            ? snapshots.Select(item => item.FilesDone).DefaultIfEmpty(0).Max()
+            : activeFileSnapshots.Min(item => item.FilesDone);
+        FilesMetricText.Text = $"{filesDone}/{filesTotal}";
+
         if (_copyStartedAt is not null)
             ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
 
         var current = snapshots.Select(item => item.LastFile).FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
         if (!string.IsNullOrWhiteSpace(current)) CurrentFileText.Text = Path.GetFileName(current);
-
-        if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
-        {
-            OperationTitleText.Text = "Copiando...";
-            StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
-        }
     }
 
     private async void LoadProfile_Click(object sender, RoutedEventArgs e)
@@ -322,6 +347,7 @@ public sealed partial class MainWindow : Window
             foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
             DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             SkipSameCheck.IsChecked = profile.SkipExisting;
+            VerifyCheck.IsChecked = true;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
             StatusText.Text = "Configuración cargada";
@@ -410,120 +436,137 @@ public sealed partial class MainWindow : Window
 
     private async void About_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new ContentDialog
+        var previousBackground = AboutMenuButton.Background;
+        AboutMenuButton.Background = ResolveBrush("AccentFillColorSecondaryBrush");
+        try
         {
-            XamlRoot = Root.XamlRoot,
-            PrimaryButtonText = "Cerrar",
-            DefaultButton = ContentDialogButton.Primary,
-        };
-
-        var root = new Grid { Width = 470 };
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-        var closeButton = new Button
-        {
-            Width = 32,
-            Height = 32,
-            Padding = new Thickness(0),
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Content = new FontIcon { Glyph = "\uE711", FontSize = 13 },
-        };
-        ToolTipService.SetToolTip(closeButton, "Cerrar");
-        closeButton.Click += (_, _) => dialog.Hide();
-        root.Children.Add(closeButton);
-
-        var header = new Grid { Margin = new Thickness(0, 14, 42, 16), ColumnSpacing = 16 };
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var logoTile = new Border
-        {
-            Width = 64,
-            Height = 64,
-            CornerRadius = new CornerRadius(12),
-            Background = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"],
-            Child = new Image
+            var dialog = new ContentDialog
             {
-                Width = 54,
-                Height = 54,
-                Stretch = Stretch.Uniform,
-                Source = LogoImage.Source,
-            },
-        };
-        header.Children.Add(logoTile);
+                XamlRoot = Root.XamlRoot,
+                PrimaryButtonText = "Cerrar",
+                DefaultButton = ContentDialogButton.Primary,
+            };
 
-        var brand = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
-        brand.Children.Add(new TextBlock
-        {
-            Text = "RepartoCopier",
-            FontSize = 22,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        });
-        brand.Children.Add(new TextBlock
-        {
-            Text = "Copias rápidas y seguras para Windows.",
-            FontSize = 13,
-            Opacity = 0.70,
-        });
-        Grid.SetColumn(brand, 1);
-        header.Children.Add(brand);
-        Grid.SetRow(header, 1);
-        root.Children.Add(header);
+            var root = new Grid { Width = 470 };
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-        var body = new StackPanel { Spacing = 8 };
-        body.Children.Add(new TextBlock { Text = "Versión 2.0.0", FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-        body.Children.Add(new TextBlock { Text = "© 2026 ReinierTutoriales\nTodos los derechos reservados.", FontSize = 13, Opacity = 0.82 });
-        body.Children.Add(new Border
-        {
-            Height = 1,
-            Margin = new Thickness(0, 8, 0, 8),
-            Background = (Brush)Application.Current.Resources["DividerStrokeColorDefaultBrush"],
-        });
-        body.Children.Add(new TextBlock { Text = "Gracias por usar RepartoCopier. ❤️", FontSize = 13 });
-        body.Children.Add(new TextBlock { Text = "¡Dale ❤️ al proyecto en GitHub!", FontSize = 13 });
-
-        var actions = new Grid { Margin = new Thickness(0, 8, 0, 0), ColumnSpacing = 10 };
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var githubButton = new Button
-        {
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            HorizontalContentAlignment = HorizontalAlignment.Center,
-            Height = 40,
-            Content = new StackPanel
+            var closeButton = new Button
             {
-                Orientation = Orientation.Horizontal,
-                Spacing = 8,
-                Children =
+                Width = 32,
+                Height = 32,
+                Padding = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                Content = new FontIcon { Glyph = "\uE711", FontSize = 13 },
+            };
+            ToolTipService.SetToolTip(closeButton, "Cerrar");
+            closeButton.Click += (_, _) => dialog.Hide();
+            root.Children.Add(closeButton);
+
+            var header = new Grid { Margin = new Thickness(0, 14, 42, 16), ColumnSpacing = 16 };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var logoTile = new Border
+            {
+                Width = 64,
+                Height = 64,
+                CornerRadius = new CornerRadius(12),
+                Child = new Image
                 {
-                    new FontIcon { Glyph = "\uE943", FontSize = 15 },
-                    new TextBlock { Text = "Ver en GitHub" },
+                    Width = 64,
+                    Height = 64,
+                    Stretch = Stretch.Uniform,
+                    Source = new SvgImageSource { UriSource = new Uri("ms-appx:///Assets/AppLogo.svg") },
                 },
-            },
-        };
-        githubButton.Click += (_, _) => OpenExternalUrl(ProjectUrl);
-        actions.Children.Add(githubButton);
+            };
+            header.Children.Add(logoTile);
 
-        var licenseButton = new Button
+            var brand = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+            brand.Children.Add(new TextBlock
+            {
+                Text = "RepartoCopier",
+                FontSize = 22,
+                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            });
+            brand.Children.Add(new TextBlock
+            {
+                Text = "Copias rápidas y seguras para Windows.",
+                FontSize = 13,
+                Opacity = 0.70,
+            });
+            Grid.SetColumn(brand, 1);
+            header.Children.Add(brand);
+            Grid.SetRow(header, 1);
+            root.Children.Add(header);
+
+            var version = typeof(MainWindow).Assembly.GetName().Version;
+            var displayVersion = version is null
+                ? "desconocida"
+                : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+            var body = new StackPanel { Spacing = 8 };
+            body.Children.Add(new TextBlock { Text = $"Versión {displayVersion}", FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            body.Children.Add(new TextBlock { Text = "© 2026 ReinierTutoriales\nTodos los derechos reservados.", FontSize = 13, Opacity = 0.82 });
+            body.Children.Add(new Border
+            {
+                Height = 1,
+                Margin = new Thickness(0, 8, 0, 8),
+                Background = ResolveBrush("DividerStrokeColorDefaultBrush"),
+            });
+            body.Children.Add(new TextBlock { Text = "Gracias por usar RepartoCopier. ❤️", FontSize = 13 });
+            body.Children.Add(new TextBlock { Text = "¡Dale ❤️ al proyecto en GitHub!", FontSize = 13 });
+
+            var actions = new Grid { Margin = new Thickness(0, 8, 0, 0), ColumnSpacing = 10 };
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var githubButton = new Button
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                Height = 40,
+                Content = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 8,
+                    Children =
+                    {
+                        new Image
+                        {
+                            Width = 17,
+                            Height = 17,
+                            Source = new SvgImageSource { UriSource = new Uri("ms-appx:///Assets/GitHubMark.svg") },
+                        },
+                        new TextBlock { Text = "Ver en GitHub" },
+                    },
+                },
+            };
+            githubButton.Click += (_, _) => OpenExternalUrl(ProjectUrl);
+            actions.Children.Add(githubButton);
+
+            var licenseButton = new Button
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                Height = 40,
+                Content = "Licencias de terceros",
+            };
+            licenseButton.Click += (_, _) => OpenExternalUrl(LicenseUrl);
+            Grid.SetColumn(licenseButton, 1);
+            actions.Children.Add(licenseButton);
+            body.Children.Add(actions);
+
+            Grid.SetRow(body, 2);
+            root.Children.Add(body);
+            dialog.Content = root;
+            await dialog.ShowAsync();
+        }
+        finally
         {
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            HorizontalContentAlignment = HorizontalAlignment.Center,
-            Height = 40,
-            Content = "Licencias de terceros",
-        };
-        licenseButton.Click += (_, _) => OpenExternalUrl(LicenseUrl);
-        Grid.SetColumn(licenseButton, 1);
-        actions.Children.Add(licenseButton);
-        body.Children.Add(actions);
-
-        Grid.SetRow(body, 2);
-        root.Children.Add(body);
-        dialog.Content = root;
-        await dialog.ShowAsync();
+            AboutMenuButton.Background = previousBackground;
+        }
     }
 
     private static void OpenExternalUrl(string url)
@@ -546,7 +589,7 @@ public sealed partial class MainWindow : Window
             Content = "El equipo se apagará en 60 segundos. Puedes cancelar el apagado desde Windows con shutdown /a.",
             PrimaryButtonText = "Apagar",
             CloseButtonText = "No apagar",
-            DefaultButton = ContentDialogButton.Primary,
+            DefaultButton = ContentDialogButton.Close,
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
             Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
@@ -571,6 +614,7 @@ public sealed partial class MainWindow : Window
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
+        VerifyCheck.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
     }
 
@@ -606,6 +650,9 @@ public sealed partial class MainWindow : Window
         return $"{value:0.##} {units[unit]}";
     }
 
+    private static Brush ResolveBrush(string resourceKey) =>
+        (Brush)Application.Current.Resources[resourceKey];
+
     public sealed record DestinationRow(string Path);
 
     public sealed class ProgressRow : INotifyPropertyChanged
@@ -613,6 +660,7 @@ public sealed partial class MainWindow : Window
         private string _label = string.Empty;
         private string _phaseText = string.Empty;
         private string _statusGlyph = "●";
+        private Brush _statusBrush = ResolveBrush("SystemFillColorNeutralBrush");
         private string _detail = string.Empty;
         private string _speed = string.Empty;
         private string _percentText = string.Empty;
@@ -623,6 +671,7 @@ public sealed partial class MainWindow : Window
         public string Label { get => _label; private set => Set(ref _label, value); }
         public string PhaseText { get => _phaseText; private set => Set(ref _phaseText, value); }
         public string StatusGlyph { get => _statusGlyph; private set => Set(ref _statusGlyph, value); }
+        public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
         public string Detail { get => _detail; private set => Set(ref _detail, value); }
         public string Speed { get => _speed; private set => Set(ref _speed, value); }
         public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
@@ -649,12 +698,26 @@ public sealed partial class MainWindow : Window
                 DestinationPhase.Cancelled => "×",
                 _ => "●",
             };
-            Percent = snapshot.Total == 0
+            StatusBrush = snapshot.Phase switch
+            {
+                DestinationPhase.Copying or DestinationPhase.Verifying => ResolveBrush("AccentFillColorDefaultBrush"),
+                DestinationPhase.Done => ResolveBrush("SystemFillColorSuccessBrush"),
+                DestinationPhase.Failed => ResolveBrush("SystemFillColorCriticalBrush"),
+                _ => ResolveBrush("SystemFillColorNeutralBrush"),
+            };
+
+            var verifyProgress = snapshot.Phase == DestinationPhase.Verifying ||
+                (snapshot.Phase == DestinationPhase.Failed && snapshot.VerifyBytesTotal > 0);
+            Percent = snapshot.Phase == DestinationPhase.Done
                 ? 100
-                : Math.Clamp(snapshot.Written * 100.0 / snapshot.Total, 0, 100);
+                : verifyProgress
+                    ? snapshot.VerifyFraction * 100.0
+                    : snapshot.CopyFraction * 100.0;
             PercentText = $"{Percent:0}%";
-            Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0 ? $"{snapshot.FilesDone} archivo(s)" : snapshot.LastFile);
-            Speed = Throughput.Format(snapshot.RecentBytesPerSecond);
+            Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0 ? $"{snapshot.FilesDone}/{snapshot.FilesTotal} archivo(s)" : snapshot.LastFile);
+            Speed = snapshot.Phase == DestinationPhase.Verifying
+                ? "—"
+                : Throughput.Format(snapshot.RecentBytesPerSecond);
         }
 
         private void Set<T>(ref T field, T value, [CallerMemberName] string? property = null)
