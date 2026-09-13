@@ -82,6 +82,7 @@ public static class DiagnosticsReport
         sb.AppendLine("StorageTopology:");
         foreach (var device in topology.Destinations)
         {
+            var profile = StorageIoProfile.For(device);
             sb.Append("- ").Append(device.DestinationRoot)
                 .Append(" | disk=").Append(device.PhysicalDeviceNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | partition=").Append(device.PartitionNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
@@ -91,6 +92,9 @@ public static class DiagnosticsReport
                 .Append(" | driveType=").Append(device.DriveType)
                 .Append(" | network=").Append(device.IsNetwork)
                 .Append(" | preallocation=").Append(device.SupportsPreallocation)
+                .Append(" | profile=").Append(profile.Kind)
+                .Append(" | recommendedQD=").Append(profile.RecommendedQueueDepth.ToString(CultureInfo.InvariantCulture))
+                .Append(" | directIoCandidate=").Append(profile.AllowDirectIo)
                 .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | removable=").Append(device.Removable?.ToString() ?? "unknown")
