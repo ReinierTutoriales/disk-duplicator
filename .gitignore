@@ -8,5 +8,6 @@ AppPackages/
 *.appxbundle
 *.cer
 TestResults/
+/publish/
 /publish-fast/
-/RepartoCopier-fastpath-win-x64.zip
+/RepartoCopier-*.zip
