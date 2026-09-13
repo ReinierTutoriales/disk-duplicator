@@ -105,6 +105,33 @@ public sealed class ProgressTelemetryTests
         Assert.IsTrue(schedulers[0].PeakOutstandingIo >= 1);
     }
 
+    [TestMethod]
+    public async Task DiagnosticsSnapshotIncludesProductionPipelineGovernor()
+    {
+        using var temp = new TempScope("pipeline-governor-telemetry");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
+        var sourceFile = Path.Combine(source, "payload.bin");
+        await using (var stream = new FileStream(sourceFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            stream.SetLength(20L * 1024 * 1024);
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
+
+        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var final = job.Snapshot().Single();
+        Assert.AreEqual(DestinationPhase.Done, final.Phase, final.Error);
+
+        var governor = job.DiagnosticsSnapshot().PipelineGovernor;
+        Assert.IsNotNull(governor);
+        Assert.IsTrue(governor.SourceReadTime > TimeSpan.Zero);
+        Assert.IsTrue(governor.CurrentPrefetchLimit >= 1);
+        Assert.IsTrue(governor.CurrentPrefetchLimit <= 4);
+        Assert.IsTrue(governor.MinimumObservedPrefetchLimit <= governor.CurrentPrefetchLimit);
+        Assert.IsTrue(governor.MaximumObservedPrefetchLimit >= governor.CurrentPrefetchLimit);
+        Assert.AreEqual(0, governor.InFlight);
+    }
+
     private sealed class TempScope : IDisposable
     {
         public TempScope(string name)
