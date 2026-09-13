@@ -1,0 +1,32 @@
+name: Clean transient fast-path outputs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cleanup-fastpath-artifacts.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Remove transient build outputs and self
+        shell: bash
+        run: |
+          git rm -r --ignore-unmatch publish-fast
+          git rm -f --ignore-unmatch RepartoCopier-fastpath-win-x64.zip
+          if ! grep -qxF '/publish-fast/' .gitignore; then echo '/publish-fast/' >> .gitignore; fi
+          if ! grep -qxF '/RepartoCopier-fastpath-win-x64.zip' .gitignore; then echo '/RepartoCopier-fastpath-win-x64.zip' >> .gitignore; fi
+          git rm .github/workflows/cleanup-fastpath-artifacts.yml
+          git config user.name "ReinierTutoriales"
+          git config user.email "86568548+ReinierTutoriales@users.noreply.github.com"
+          git add .gitignore
+          git commit -m "chore: remove transient fast-path build outputs"
+          git push origin HEAD:main
