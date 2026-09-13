@@ -6,7 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.Storage.Streams;
 
@@ -17,17 +16,13 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<DestinationRow> _destinations = [];
     private readonly ObservableCollection<ProgressRow> _progressRows = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
-    private readonly Button _copyDiagnosticsButton = new() { Content = "Copiar diagnóstico", IsEnabled = false };
     private CopyJob? _job;
-    private string? _lastDiagnosticsReport;
 
     public MainWindow()
     {
         InitializeComponent();
         DestinationList.ItemsSource = _destinations;
         ProgressList.ItemsSource = _progressRows;
-        _copyDiagnosticsButton.Click += CopyDiagnostics_Click;
-        CommandPanel.Children.Add(_copyDiagnosticsButton);
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.Resize(new SizeInt32(920, 600));
@@ -76,8 +71,8 @@ public sealed partial class MainWindow : Window
         {
             var picker = new FileOpenPicker(AppWindow.Id)
             {
-                Title = "Selecciona el archivo de origen",
-                CommitButtonText = "Usar archivo",
+                Title = "Selecciona el archivo que quieres copiar",
+                CommitButtonText = "Seleccionar",
             };
             var result = await picker.PickSingleFileAsync();
             if (result is not null)
@@ -95,8 +90,8 @@ public sealed partial class MainWindow : Window
         {
             var picker = new FolderPicker(AppWindow.Id)
             {
-                Title = "Selecciona la carpeta de origen",
-                CommitButtonText = "Usar carpeta",
+                Title = "Selecciona la carpeta que quieres copiar",
+                CommitButtonText = "Seleccionar",
             };
             var result = await picker.PickSingleFolderAsync();
             if (result is not null)
@@ -114,7 +109,7 @@ public sealed partial class MainWindow : Window
         {
             var picker = new FolderPicker(AppWindow.Id)
             {
-                Title = "Selecciona uno o más destinos",
+                Title = "Selecciona dónde quieres guardar la copia",
                 CommitButtonText = "Agregar",
             };
             var results = await picker.PickMultipleFoldersAsync();
@@ -157,8 +152,6 @@ public sealed partial class MainWindow : Window
         try
         {
             ErrorBar.IsOpen = false;
-            _lastDiagnosticsReport = null;
-            _copyDiagnosticsButton.IsEnabled = false;
             var plan = CopyPlan.Create(
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path),
@@ -174,14 +167,14 @@ public sealed partial class MainWindow : Window
             PauseButton.IsEnabled = false;
             CancelButton.IsEnabled = false;
             PauseButton.Content = "Pausar";
-            StatusText.Text = "Analizando origen y destinos…";
+            StatusText.Text = "Preparando la copia…";
 
             _job = await CopyEngine.StartAsync(plan, options);
             PauseButton.IsEnabled = true;
             CancelButton.IsEnabled = true;
             StatusText.Text = plan.SkipSame
-                ? "Comparando archivos existentes con BLAKE3…"
-                : "Iniciando copia FAN-OUT…";
+                ? "Comprobando archivos existentes…"
+                : "Iniciando copia…";
             _progressRows.Clear();
             foreach (var snapshot in _job.Snapshot())
                 _progressRows.Add(new ProgressRow(snapshot));
@@ -214,16 +207,7 @@ public sealed partial class MainWindow : Window
         _job.RequestCancel();
         CancelButton.IsEnabled = false;
         PauseButton.IsEnabled = false;
-        StatusText.Text = "Cancelando de forma segura…";
-    }
-
-    private void CopyDiagnostics_Click(object sender, RoutedEventArgs e)
-    {
-        if (string.IsNullOrWhiteSpace(_lastDiagnosticsReport)) return;
-        var package = new DataPackage();
-        package.SetText(_lastDiagnosticsReport);
-        Clipboard.SetContent(package);
-        StatusText.Text = "Diagnóstico copiado al portapapeles";
+        StatusText.Text = "Cancelando…";
     }
 
     private async Task ObserveJobCompletionAsync(CopyJob observed)
@@ -246,17 +230,12 @@ public sealed partial class MainWindow : Window
                 RefreshProgress();
                 _progressTimer.Stop();
                 var snapshots = observed.Snapshot();
-                _lastDiagnosticsReport = DiagnosticsReport.Format(
-                    SourcePathBox.Text,
-                    snapshots,
-                    observed.DiagnosticsSnapshot());
-                _copyDiagnosticsButton.IsEnabled = true;
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 StatusText.Text = cancelled
                     ? "Copia cancelada"
                     : failed > 0
-                        ? $"Finalizado con {failed} destino(s) fallido(s)"
+                        ? "La copia terminó con algunos errores"
                         : "Copia completada";
                 await observed.DisposeAsync();
                 _job = null;
@@ -282,9 +261,9 @@ public sealed partial class MainWindow : Window
 
         OverallSpeedText.Text = Throughput.Format(snapshots.Sum(item => item.RecentBytesPerSecond));
         if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Verifying))
-            StatusText.Text = "Verificando físicamente los destinos…";
+            StatusText.Text = "Comprobando la copia…";
         else if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
-            StatusText.Text = "Copiando en FAN-OUT…";
+            StatusText.Text = "Copiando…";
     }
 
     private void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -310,7 +289,7 @@ public sealed partial class MainWindow : Window
     {
         ErrorBar.Message = message;
         ErrorBar.IsOpen = true;
-        StatusText.Text = "Error";
+        StatusText.Text = "Ocurrió un error";
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
@@ -349,11 +328,11 @@ public sealed partial class MainWindow : Window
             {
                 DestinationPhase.Idle => "Preparando",
                 DestinationPhase.Copying => "Copiando",
-                DestinationPhase.Verifying => "Verificando",
+                DestinationPhase.Verifying => "Comprobando",
                 DestinationPhase.Done => "Completado",
                 DestinationPhase.Failed => "Error",
                 DestinationPhase.Cancelled => "Cancelado",
-                _ => snapshot.Phase.ToString(),
+                _ => "Procesando",
             };
             Percent = snapshot.Total == 0 ? 100 : Math.Clamp(snapshot.Written * 100.0 / snapshot.Total, 0, 100);
             Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0
