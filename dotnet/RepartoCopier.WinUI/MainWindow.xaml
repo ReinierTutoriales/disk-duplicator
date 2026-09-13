@@ -15,7 +15,7 @@
                         <Setter Target="SourceActions.Orientation" Value="Vertical" />
                         <Setter Target="CommandPanel.Orientation" Value="Vertical" />
                         <Setter Target="CommandPanel.HorizontalAlignment" Value="Stretch" />
-                        <Setter Target="DestinationList.MaxHeight" Value="210" />
+                        <Setter Target="DestinationList.MaxHeight" Value="108" />
                     </VisualState.Setters>
                 </VisualState>
                 <VisualState x:Name="Wide">
@@ -26,154 +26,319 @@
                         <Setter Target="SourceActions.Orientation" Value="Horizontal" />
                         <Setter Target="CommandPanel.Orientation" Value="Horizontal" />
                         <Setter Target="CommandPanel.HorizontalAlignment" Value="Right" />
-                        <Setter Target="DestinationList.MaxHeight" Value="280" />
+                        <Setter Target="DestinationList.MaxHeight" Value="128" />
                     </VisualState.Setters>
                 </VisualState>
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="48" />
+            <RowDefinition Height="52" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="38" />
         </Grid.RowDefinitions>
 
         <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="16,0,12,0" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <StackPanel VerticalAlignment="Center">
-                <TextBlock Text="RepartoCopier" FontSize="18" FontWeight="SemiBold" />
-                <TextBlock Text="FAN-OUT nativo para Windows" Opacity="0.65" FontSize="11" />
+
+            <Image x:Name="LogoImage"
+                   Width="32"
+                   Height="32"
+                   Stretch="Uniform"
+                   VerticalAlignment="Center" />
+
+            <StackPanel Grid.Column="1"
+                        Margin="10,0,0,0"
+                        VerticalAlignment="Center"
+                        Spacing="0">
+                <TextBlock Text="RepartoCopier" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="FAN-OUT nativo para Windows" Opacity="0.62" FontSize="10.5" />
             </StackPanel>
-            <ComboBox x:Name="ThemeSelector" Grid.Column="2" Width="116" VerticalAlignment="Center" SelectionChanged="ThemeSelector_SelectionChanged">
+
+            <ComboBox x:Name="ThemeSelector"
+                      Grid.Column="3"
+                      Width="112"
+                      Height="32"
+                      VerticalAlignment="Center"
+                      SelectionChanged="ThemeSelector_SelectionChanged">
                 <ComboBoxItem Content="Sistema" Tag="Default" IsSelected="True" />
                 <ComboBoxItem Content="Claro" Tag="Light" />
                 <ComboBoxItem Content="Oscuro" Tag="Dark" />
             </ComboBox>
         </Grid>
 
-        <ScrollViewer Grid.Row="1" HorizontalScrollMode="Disabled" VerticalScrollBarVisibility="Auto">
-            <StackPanel Padding="20,12,20,20" Spacing="12" MaxWidth="1180" HorizontalAlignment="Stretch">
-                <InfoBar x:Name="ErrorBar" IsOpen="False" Severity="Error" IsClosable="True" />
+        <Grid Grid.Row="1"
+              Margin="16,12,16,12"
+              MaxWidth="1080"
+              HorizontalAlignment="Center"
+              RowSpacing="10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
 
-                <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                    <StackPanel Spacing="10">
-                        <TextBlock Text="Origen" FontSize="16" FontWeight="SemiBold" />
-                        <TextBlock Text="Selecciona un archivo o una carpeta completa. La carpeta raíz se conserva en cada destino." Opacity="0.72" TextWrapping="Wrap" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox x:Name="SourcePathBox" PlaceholderText="Archivo o carpeta de origen" IsReadOnly="True" />
-                            <StackPanel x:Name="SourceActions" Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="8,0,0,0">
-                                <Button Content="Archivo" MinWidth="92" Click="PickSourceFile_Click" />
-                                <Button Content="Carpeta" MinWidth="92" Click="PickSourceFolder_Click" />
-                            </StackPanel>
-                        </Grid>
+            <InfoBar x:Name="ErrorBar"
+                     Grid.Row="0"
+                     Margin="0,0,0,10"
+                     IsOpen="False"
+                     Severity="Error"
+                     IsClosable="True" />
+
+            <Border Grid.Row="0"
+                    Padding="12"
+                    CornerRadius="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Origen" FontSize="14" FontWeight="SemiBold" />
+                            <TextBlock Text="La carpeta raíz se conserva en cada destino."
+                                       Opacity="0.62"
+                                       FontSize="11" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="SourcePathBox"
+                                 Height="34"
+                                 PlaceholderText="Archivo o carpeta de origen"
+                                 IsReadOnly="True" />
+                        <StackPanel x:Name="SourceActions"
+                                    Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    Spacing="6"
+                                    Margin="8,0,0,0">
+                            <Button Content="Archivo" Height="34" MinWidth="84" Click="PickSourceFile_Click" />
+                            <Button Content="Carpeta" Height="34" MinWidth="84" Click="PickSourceFolder_Click" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="1"
+                    Padding="12"
+                    CornerRadius="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="Destinos" FontSize="14" FontWeight="SemiBold" />
+                            <TextBlock x:Name="DestinationCountText" Text="0 destinos" Opacity="0.62" FontSize="11" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                            <Button Content="Agregar" Height="32" Click="AddDestinations_Click" />
+                            <Button Content="Limpiar" Height="32" Click="ClearDestinations_Click" />
+                        </StackPanel>
+                    </Grid>
+
+                    <ListView x:Name="DestinationList"
+                              Grid.Row="1"
+                              SelectionMode="None"
+                              MaxHeight="128"
+                              Padding="0"
+                              IsTabStop="False">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0,1" />
+                                <Setter Property="MinHeight" Value="32" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid MinHeight="32" Padding="8,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding Path}"
+                                               FontSize="12"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center" />
+                                    <Button Grid.Column="1"
+                                            Width="30"
+                                            Height="28"
+                                            Padding="0"
+                                            Tag="{Binding Path}"
+                                            Click="RemoveDestination_Click"
+                                            ToolTipService.ToolTip="Quitar destino">
+                                        <FontIcon Glyph="&#xE711;" FontSize="11" />
+                                    </Button>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="2"
+                    Padding="12,10"
+                    CornerRadius="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                        <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" IsChecked="False" />
+                        <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
                     </StackPanel>
-                </Border>
+                    <StackPanel x:Name="CommandPanel"
+                                Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="6"
+                                HorizontalAlignment="Right">
+                        <Button x:Name="StartButton"
+                                Content="Iniciar copia"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Height="34"
+                                MinWidth="116"
+                                Click="Start_Click" />
+                        <Button x:Name="PauseButton"
+                                Content="Pausar"
+                                Height="34"
+                                MinWidth="82"
+                                IsEnabled="False"
+                                Click="Pause_Click" />
+                        <Button x:Name="CancelButton"
+                                Content="Cancelar"
+                                Height="34"
+                                MinWidth="82"
+                                IsEnabled="False"
+                                Click="Cancel_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
 
-                <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                    <StackPanel Spacing="10">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Text="Destinos" FontSize="16" FontWeight="SemiBold" />
-                                <TextBlock x:Name="DestinationCountText" Text="0 destinos" Opacity="0.68" />
-                            </StackPanel>
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                <Button Content="Agregar" Click="AddDestinations_Click" />
-                                <Button Content="Limpiar" Click="ClearDestinations_Click" />
-                            </StackPanel>
-                        </Grid>
-                        <ListView x:Name="DestinationList" SelectionMode="None" MaxHeight="280">
-                            <ListView.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Padding="4,6">
+            <Grid Grid.Row="3" RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="Progreso por destino" FontSize="14" FontWeight="SemiBold" />
+                <ListView x:Name="ProgressList"
+                          Grid.Row="1"
+                          SelectionMode="None"
+                          Padding="0"
+                          IsTabStop="False">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="0" />
+                            <Setter Property="Margin" Value="0,0,0,6" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="10"
+                                    CornerRadius="8"
+                                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1">
+                                <Grid RowSpacing="5">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                                        <Button Grid.Column="1" Content="Quitar" Tag="{Binding Path}" Click="RemoveDestination_Click" />
+                                        <TextBlock Text="{Binding Label}"
+                                                   FontSize="12"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding PhaseText}"
+                                                   FontSize="11"
+                                                   Opacity="0.70"
+                                                   Margin="10,0,0,0" />
                                     </Grid>
-                                </DataTemplate>
-                            </ListView.ItemTemplate>
-                        </ListView>
-                    </StackPanel>
-                </Border>
-
-                <Border Padding="16" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                    <Grid RowSpacing="12">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <StackPanel Orientation="Horizontal" Spacing="18">
-                            <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" IsChecked="False" />
-                            <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
-                        </StackPanel>
-                        <StackPanel x:Name="CommandPanel" Grid.Row="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                            <Button x:Name="StartButton" Content="Iniciar copia" Style="{StaticResource AccentButtonStyle}" MinWidth="124" Click="Start_Click" />
-                            <Button x:Name="PauseButton" Content="Pausar" MinWidth="96" IsEnabled="False" Click="Pause_Click" />
-                            <Button x:Name="CancelButton" Content="Cancelar" MinWidth="96" IsEnabled="False" Click="Cancel_Click" />
-                        </StackPanel>
-                    </Grid>
-                </Border>
-
-                <StackPanel Spacing="8">
-                    <TextBlock Text="Progreso por destino" FontSize="16" FontWeight="SemiBold" />
-                    <ListView x:Name="ProgressList" SelectionMode="None">
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Border Margin="0,0,0,8" Padding="14" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                    <Grid RowSpacing="8">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                        </Grid.RowDefinitions>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Label}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Grid.Column="1" Text="{Binding PhaseText}" Opacity="0.75" Margin="12,0,0,0" />
-                                        </Grid>
-                                        <ProgressBar Grid.Row="1" Minimum="0" Maximum="100" Value="{Binding Percent}" />
-                                        <Grid Grid.Row="2">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Text="{Binding Detail}" Opacity="0.70" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Speed}" FontWeight="SemiBold" Margin="12,0,0,0" />
-                                        </Grid>
+                                    <ProgressBar Grid.Row="1"
+                                                 Height="3"
+                                                 Minimum="0"
+                                                 Maximum="100"
+                                                 Value="{Binding Percent}" />
+                                    <Grid Grid.Row="2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Detail}"
+                                                   FontSize="11"
+                                                   Opacity="0.66"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Speed}"
+                                                   FontSize="11"
+                                                   FontWeight="SemiBold"
+                                                   Margin="10,0,0,0" />
                                     </Grid>
-                                </Border>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                </StackPanel>
-            </StackPanel>
-        </ScrollViewer>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Grid>
 
-        <Border Grid.Row="2" Padding="16,10" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+        <Border Grid.Row="2"
+                Padding="16,0"
+                BorderThickness="0,1,0,0"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock x:Name="StatusText" Text="Listo" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                <TextBlock x:Name="OverallSpeedText" Grid.Column="1" Margin="12,0,0,0" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock x:Name="StatusText"
+                           Text="Listo"
+                           FontSize="11"
+                           TextTrimming="CharacterEllipsis"
+                           VerticalAlignment="Center" />
+                <TextBlock x:Name="OverallSpeedText"
+                           Grid.Column="1"
+                           Margin="12,0,0,0"
+                           FontSize="11"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center" />
             </Grid>
         </Border>
     </Grid>
