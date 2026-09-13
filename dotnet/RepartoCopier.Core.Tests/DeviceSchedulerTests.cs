@@ -18,6 +18,7 @@ public sealed class DeviceSchedulerTests
         Assert.HasCount(1, map.Schedulers);
         Assert.AreSame(map.For(first), map.For(second));
         Assert.AreEqual(2, map.For(first).MaxOutstandingIo);
+        Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(first).IdentityConfidence);
     }
 
     [TestMethod]
@@ -31,6 +32,30 @@ public sealed class DeviceSchedulerTests
 
         Assert.HasCount(2, map.Schedulers);
         Assert.AreNotSame(map.For(first), map.For(second));
+    }
+
+    [TestMethod]
+    public void UnknownPhysicalDiskPropagatesPartialIdentityConfidence()
+    {
+        var destination = new StorageDeviceInfo(
+            @"E:\copy",
+            @"E:\",
+            null,
+            null,
+            "Unknown",
+            StorageMediaKind.Unknown,
+            null,
+            null,
+            null,
+            false,
+            "probe failed");
+
+        using var map = DeviceSchedulerMap.Create(null, [destination]);
+
+        var scheduler = map.For(destination);
+        Assert.AreEqual(DeviceIdentityConfidence.Partial, scheduler.IdentityConfidence);
+        Assert.AreEqual(DeviceIdentityConfidence.Partial, scheduler.Snapshot().IdentityConfidence);
+        Assert.AreEqual(1, scheduler.MaxOutstandingIo);
     }
 
     [TestMethod]
