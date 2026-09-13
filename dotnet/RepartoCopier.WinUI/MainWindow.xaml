@@ -45,12 +45,13 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <Image x:Name="LogoImage" Width="54" Height="54" Stretch="Uniform"
-                   HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Image.Source>
-                    <SvgImageSource UriSource="ms-appx:///Assets/AppLogo.svg" />
-                </Image.Source>
-            </Image>
+            <Image x:Name="LogoImage"
+                   Width="54"
+                   Height="54"
+                   Source="ms-appx:///Assets/AppLogo.png"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center" />
 
             <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center" Spacing="2">
                 <TextBlock Text="RepartoCopier" FontSize="21" FontWeight="SemiBold" />
