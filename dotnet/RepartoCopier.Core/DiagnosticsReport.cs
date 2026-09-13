@@ -10,7 +10,7 @@ public static class DiagnosticsReport
         IReadOnlyList<DestinationSnapshot> destinations,
         CopyDiagnosticsSnapshot metrics)
     {
-        var sb = new StringBuilder(3072);
+        var sb = new StringBuilder(2048);
         sb.AppendLine("RepartoCopier diagnostics");
         sb.Append("Source: ").AppendLine(source);
         sb.Append("Destinations: ").AppendLine(destinations.Count.ToString(CultureInfo.InvariantCulture));
@@ -41,6 +41,8 @@ public static class DiagnosticsReport
         AppendDuration(sb, "ControlBacklogWait", metrics.ControlBacklogWaitTime);
         AppendRate(sb, "Write", metrics.WrittenBytes, metrics.WriteTime, metrics.WriteBytesPerSecond);
         AppendScalarRate(sb, "FanoutLogicalWriteWallClockRate", metrics.FanoutLogicalWriteWallClockBytesPerSecond);
+        AppendScalarRate(sb, "SustainedWrite5sRate", metrics.SustainedWrite5sBytesPerSecond);
+        AppendScalarRate(sb, "SustainedWrite10sRate", metrics.SustainedWrite10sBytesPerSecond);
         sb.Append("WriteOperations: ").AppendLine(metrics.WriteOperations.ToString(CultureInfo.InvariantCulture));
         sb.Append("DurableFlushes: ").AppendLine(metrics.DurableFlushes.ToString(CultureInfo.InvariantCulture));
         AppendDuration(sb, "DurableFlush", metrics.DurableFlushTime);
@@ -54,6 +56,24 @@ public static class DiagnosticsReport
         sb.Append("PeakControlBacklogMessages: ").AppendLine(metrics.PeakControlBacklogMessages.ToString(CultureInfo.InvariantCulture));
         sb.Append("PeakBufferedBytes: ").AppendLine(metrics.PeakBufferedBytes.ToString(CultureInfo.InvariantCulture));
         sb.Append("MaximumObservedBufferTargetBytes: ").AppendLine(metrics.MaximumObservedBufferTargetBytes.ToString(CultureInfo.InvariantCulture));
+
+        if (metrics.DeviceSchedulers.Count > 0)
+        {
+            sb.AppendLine("DeviceSchedulers:");
+            foreach (var device in metrics.DeviceSchedulers)
+            {
+                sb.Append("- ").Append(device.DeviceId)
+                    .Append(" | qd=").Append(device.OutstandingIo.ToString(CultureInfo.InvariantCulture))
+                    .Append('/').Append(device.MaxOutstandingIo.ToString(CultureInfo.InvariantCulture))
+                    .Append(" | peakQD=").Append(device.PeakOutstandingIo.ToString(CultureInfo.InvariantCulture))
+                    .Append(" | queuedBytes=").Append(device.QueuedBytes.ToString(CultureInfo.InvariantCulture))
+                    .Append(" | peakQueuedBytes=").Append(device.PeakQueuedBytes.ToString(CultureInfo.InvariantCulture))
+                    .Append(" | backlogTargetBytes=").Append(device.BacklogTargetBytes.ToString(CultureInfo.InvariantCulture))
+                    .Append(" | backlogPressure=").Append(device.BacklogPressure.ToString("0.###", CultureInfo.InvariantCulture))
+                    .AppendLine();
+            }
+        }
+
         AppendDuration(sb, "CopyPhase", metrics.CopyPhaseElapsed);
         AppendDuration(sb, "VerifyPhase", metrics.VerifyPhaseElapsed);
         AppendDuration(sb, "Elapsed", metrics.Elapsed);
@@ -84,29 +104,23 @@ public static class DiagnosticsReport
         {
             var profile = StorageIoProfile.For(device);
             sb.Append("- ").Append(device.DestinationRoot)
-                .Append(" | deviceId=").Append(device.PhysicalDeviceId)
                 .Append(" | disk=").Append(device.PhysicalDeviceNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | partition=").Append(device.PartitionNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | deviceId=").Append(device.PhysicalDeviceId)
                 .Append(" | bus=").Append(device.BusType)
                 .Append(" | media=").Append(device.MediaKind)
-                .Append(" | trim=").Append(device.TrimEnabled?.ToString() ?? "unknown")
                 .Append(" | filesystem=").Append(device.FileSystem)
                 .Append(" | driveType=").Append(device.DriveType)
                 .Append(" | network=").Append(device.IsNetwork)
+                .Append(" | trim=").Append(device.TrimEnabled?.ToString() ?? "unknown")
                 .Append(" | preallocation=").Append(device.SupportsPreallocation)
                 .Append(" | profile=").Append(profile.Kind)
                 .Append(" | recommendedQD=").Append(profile.RecommendedQueueDepth.ToString(CultureInfo.InvariantCulture))
-                .Append(" | maxQD=").Append(profile.MaximumQueueDepth.ToString(CultureInfo.InvariantCulture))
-                .Append(" | blockBytes=").Append(profile.RecommendedBlockSizeBytes.ToString(CultureInfo.InvariantCulture))
-                .Append(" | deviceBacklogTarget=").Append(profile.DeviceBacklogTargetBytes.ToString(CultureInfo.InvariantCulture))
                 .Append(" | directIoCandidate=").Append(profile.AllowDirectIo)
                 .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | sectorAlignmentOffset=").Append(device.SectorAlignmentOffsetBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | maxComponentLength=").Append(device.MaximumComponentLength?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | volumeFlags=").Append(device.VolumeFlags?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | freeBytes=").Append(device.AvailableFreeSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | totalBytes=").Append(device.TotalSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | alignmentOffset=").Append(device.SectorAlignmentOffsetBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | freeSpace=").Append(device.FreeSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | removable=").Append(device.Removable?.ToString() ?? "unknown")
                 .Append(" | sharedPhysicalDevice=").Append(device.SharesPhysicalDevice)
                 .AppendLine();
