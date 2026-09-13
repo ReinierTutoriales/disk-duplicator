@@ -3,10 +3,12 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
+using Windows.Storage.Streams;
 
 namespace RepartoCopier.WinUI;
 
@@ -28,11 +30,35 @@ public sealed partial class MainWindow : Window
         CommandPanel.Children.Add(_copyDiagnosticsButton);
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(960, 620));
+        AppWindow.Resize(new SizeInt32(920, 600));
 
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
+        _ = LoadBrandLogoAsync();
         TryLoadLaunchSource();
+    }
+
+    private async Task LoadBrandLogoAsync()
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(BrandAssets.LogoPngBase64);
+            using var stream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                writer.DetachStream();
+            }
+            stream.Seek(0);
+            var bitmap = new BitmapImage();
+            await bitmap.SetSourceAsync(stream);
+            LogoImage.Source = bitmap;
+        }
+        catch
+        {
+            // Branding must never prevent the copier from starting.
+        }
     }
 
     private void TryLoadLaunchSource()
