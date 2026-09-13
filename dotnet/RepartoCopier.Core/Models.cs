@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace RepartoCopier.Core;
 
 public enum DestinationPhase
@@ -20,36 +22,54 @@ public sealed record DestinationSnapshot(
     ulong Written,
     ulong Total,
     ulong FilesDone,
+    ulong FilesTotal,
     ulong FilesSkipped,
     ulong FilesErrored,
+    ulong VerifiedBytes,
+    ulong VerifyBytesTotal,
+    ulong VerifyFilesDone,
+    ulong VerifyFilesTotal,
     double BytesPerSecond,
     double RecentBytesPerSecond,
     DestinationPhase Phase,
     string? Error,
     string LastFile,
     int QueueDepth,
-    ulong Retries);
+    ulong Retries)
+{
+    public double CopyFraction =>
+        Total == 0 ? 1.0 : Math.Clamp((double)Written / Total, 0.0, 1.0);
+
+    public double VerifyFraction =>
+        VerifyBytesTotal == 0 ? 1.0 : Math.Clamp((double)VerifiedBytes / VerifyBytesTotal, 0.0, 1.0);
+}
 
 internal sealed class DestinationProgress
 {
     private readonly object _gate = new();
-    private DateTime _lastTick = DateTime.UtcNow;
-    private ulong _lastWritten;
+    private long _writeSampleTick = Stopwatch.GetTimestamp();
+    private long _writeLastEventTick = Stopwatch.GetTimestamp();
+    private ulong _writeSampleBytes;
+    private double _writeEwma;
+    private ulong _verifiedBytes;
+    private ulong _verifyBytesTotal;
+    private ulong _verifyFilesDone;
+    private ulong _verifyFilesTotal;
 
-    public DestinationProgress(string label, ulong total)
+    public DestinationProgress(string label, ulong total, ulong filesTotal)
     {
         Label = label;
         Total = total;
+        FilesTotal = filesTotal;
     }
 
     public string Label { get; }
     public ulong Total { get; }
     public ulong Written { get; private set; }
     public ulong FilesDone { get; private set; }
+    public ulong FilesTotal { get; }
     public ulong FilesSkipped { get; private set; }
     public ulong FilesErrored { get; private set; }
-    public double BytesPerSecond { get; private set; }
-    public double RecentBytesPerSecond { get; private set; }
     public DestinationPhase Phase { get; private set; } = DestinationPhase.Idle;
     public string? Error { get; private set; }
     public string LastFile { get; private set; } = string.Empty;
@@ -82,20 +102,18 @@ internal sealed class DestinationProgress
 
     public void AddWritten(int bytes)
     {
+        if (bytes <= 0) return;
         lock (_gate)
         {
             Written += (ulong)bytes;
-            UpdateSpeedLocked();
+            RecordWriteSampleLocked((ulong)bytes, Stopwatch.GetTimestamp());
         }
     }
 
     public void RollbackWritten(ulong bytes)
     {
         lock (_gate)
-        {
             Written = Written >= bytes ? Written - bytes : 0;
-            UpdateSpeedLocked();
-        }
     }
 
     public void MarkDone()
@@ -110,7 +128,6 @@ internal sealed class DestinationProgress
             FilesSkipped++;
             FilesDone++;
             Written += bytes;
-            UpdateSpeedLocked();
         }
     }
 
@@ -123,19 +140,51 @@ internal sealed class DestinationProgress
         }
     }
 
-    public DestinationSnapshot Snapshot()
+    public void SetVerifyWork(ulong bytes, ulong files)
     {
         lock (_gate)
         {
+            _verifiedBytes = 0;
+            _verifyBytesTotal = bytes;
+            _verifyFilesDone = 0;
+            _verifyFilesTotal = files;
+        }
+    }
+
+    public void AddVerified(int bytes)
+    {
+        if (bytes <= 0) return;
+        lock (_gate)
+            _verifiedBytes = Math.Min(_verifyBytesTotal, checked(_verifiedBytes + (ulong)bytes));
+    }
+
+    public void MarkVerifyFileDone()
+    {
+        lock (_gate)
+            _verifyFilesDone = Math.Min(_verifyFilesTotal, _verifyFilesDone + 1);
+    }
+
+    public DestinationSnapshot Snapshot() => Snapshot(Stopwatch.GetTimestamp());
+
+    internal DestinationSnapshot Snapshot(long nowTick)
+    {
+        lock (_gate)
+        {
+            var displayedBps = DisplayedWriteBpsLocked(nowTick);
             return new DestinationSnapshot(
                 Label,
                 Written,
                 Total,
                 FilesDone,
+                FilesTotal,
                 FilesSkipped,
                 FilesErrored,
-                BytesPerSecond,
-                RecentBytesPerSecond,
+                _verifiedBytes,
+                _verifyBytesTotal,
+                _verifyFilesDone,
+                _verifyFilesTotal,
+                displayedBps,
+                displayedBps,
                 Phase,
                 Error,
                 LastFile,
@@ -144,20 +193,32 @@ internal sealed class DestinationProgress
         }
     }
 
-    private void UpdateSpeedLocked()
+    private void RecordWriteSampleLocked(ulong bytes, long nowTick)
     {
-        var now = DateTime.UtcNow;
-        var elapsed = (now - _lastTick).TotalSeconds;
-        if (elapsed <= 0.05) return;
-        var delta = Written >= _lastWritten ? Written - _lastWritten : 0;
-        var instantaneous = delta / elapsed;
+        _writeLastEventTick = nowTick;
+        _writeSampleBytes = checked(_writeSampleBytes + bytes);
+        var elapsed = Stopwatch.GetElapsedTime(_writeSampleTick, nowTick).TotalSeconds;
+        if (elapsed <= 0.05)
+            return;
+
+        var instantaneous = _writeSampleBytes / elapsed;
         var alpha = 1.0 - Math.Exp(-elapsed / 2.0);
-        RecentBytesPerSecond = RecentBytesPerSecond == 0
+        _writeEwma = _writeEwma == 0
             ? instantaneous
-            : RecentBytesPerSecond + alpha * (instantaneous - RecentBytesPerSecond);
-        BytesPerSecond = RecentBytesPerSecond;
-        _lastWritten = Written;
-        _lastTick = now;
+            : _writeEwma + alpha * (instantaneous - _writeEwma);
+        _writeSampleBytes = 0;
+        _writeSampleTick = nowTick;
+    }
+
+    private double DisplayedWriteBpsLocked(long nowTick)
+    {
+        if (Phase is not DestinationPhase.Copying || _writeEwma <= 0)
+            return 0;
+
+        var idleSeconds = Stopwatch.GetElapsedTime(_writeLastEventTick, nowTick).TotalSeconds;
+        if (idleSeconds <= 0.5)
+            return _writeEwma;
+        return _writeEwma * Math.Exp(-(idleSeconds - 0.5) / 2.0);
     }
 }
 
