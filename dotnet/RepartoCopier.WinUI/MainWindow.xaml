@@ -57,7 +57,7 @@
                         VerticalAlignment="Center"
                         Spacing="0">
                 <TextBlock Text="RepartoCopier" FontSize="16" FontWeight="SemiBold" />
-                <TextBlock Text="FAN-OUT nativo para Windows" Opacity="0.62" FontSize="10.5" />
+                <TextBlock Text="Copias rápidas y seguras" Opacity="0.62" FontSize="10.5" />
             </StackPanel>
 
             <ComboBox x:Name="ThemeSelector"
@@ -108,8 +108,8 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Spacing="2">
-                            <TextBlock Text="Origen" FontSize="14" FontWeight="SemiBold" />
-                            <TextBlock Text="La carpeta raíz se conserva en cada destino."
+                            <TextBlock Text="Qué quieres copiar" FontSize="14" FontWeight="SemiBold" />
+                            <TextBlock Text="Selecciona un archivo o una carpeta."
                                        Opacity="0.62"
                                        FontSize="11" />
                         </StackPanel>
@@ -121,7 +121,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBox x:Name="SourcePathBox"
                                  Height="34"
-                                 PlaceholderText="Archivo o carpeta de origen"
+                                 PlaceholderText="Archivo o carpeta"
                                  IsReadOnly="True" />
                         <StackPanel x:Name="SourceActions"
                                     Grid.Column="1"
@@ -152,7 +152,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Spacing="1">
-                            <TextBlock Text="Destinos" FontSize="14" FontWeight="SemiBold" />
+                            <TextBlock Text="Dónde copiar" FontSize="14" FontWeight="SemiBold" />
                             <TextBlock x:Name="DestinationCountText" Text="0 destinos" Opacity="0.62" FontSize="11" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
@@ -214,8 +214,8 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
-                        <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" IsChecked="False" />
-                        <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
+                        <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos sin cambios" IsChecked="False" />
+                        <CheckBox x:Name="KeepGoingCheck" Content="Continuar si ocurre un error" />
                     </StackPanel>
                     <StackPanel x:Name="CommandPanel"
                                 Grid.Column="1"
@@ -249,7 +249,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
-                <TextBlock Text="Progreso por destino" FontSize="14" FontWeight="SemiBold" />
+                <TextBlock Text="Progreso" FontSize="14" FontWeight="SemiBold" />
                 <ListView x:Name="ProgressList"
                           Grid.Row="1"
                           SelectionMode="None"
@@ -329,7 +329,7 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="StatusText"
-                           Text="Listo"
+                           Text="Listo para copiar"
                            FontSize="11"
                            TextTrimming="CharacterEllipsis"
                            VerticalAlignment="Center" />
