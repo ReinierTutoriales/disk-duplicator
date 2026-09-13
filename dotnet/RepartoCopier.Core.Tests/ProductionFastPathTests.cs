@@ -45,6 +45,30 @@ public sealed class ProductionFastPathTests
     }
 
     [TestMethod]
+    public async Task LargeSharedBlocksAreWrittenWithOneIoOperationPerDestinationBlock()
+    {
+        using var temp = new TempDirectory();
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[20 * 1024 * 1024 + 733];
+        new Random(20260913).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), payload);
+
+        var destinations = Enumerable.Range(0, 2)
+            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-write-{index}")).FullName)
+            .ToArray();
+        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
+
+        Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
+        var metrics = job.DiagnosticsSnapshot();
+        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two
+        // destinations the optimized writer must issue exactly four WriteAsync calls.
+        Assert.AreEqual(4L, metrics.WriteOperations);
+    }
+
+    [TestMethod]
     public async Task ExplicitDiagnosticVerificationRemainsAvailable()
     {
         using var temp = new TempDirectory();

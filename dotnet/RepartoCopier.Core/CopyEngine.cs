@@ -95,14 +95,13 @@ public static class CopyEngine
     private const int SourcePrefetchPhysicalCapacity = 4;
     private const int SourceHashPipelineCapacity = 2;
     private const int SourcePrefetchThreshold = 16 * 1024 * 1024;
-    private const int WriteChunkSize = 4 * 1024 * 1024;
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
     private const int PreallocationThreshold = 4 * 1024 * 1024;
     // Files at or below one writer chunk use Windows write-through instead of
     // paying for a separate FlushFileBuffers call after the write.
-    private const int WriteThroughFileThreshold = WriteChunkSize;
+    private const int WriteThroughFileThreshold = 4 * 1024 * 1024;
     private const long MinimumBufferBudget = 256L * 1024 * 1024;
     private const long InitialBufferBudget = 512L * 1024 * 1024;
     private const long MaximumBufferBudget = 4L * 1024 * 1024 * 1024;
@@ -980,14 +979,14 @@ public static class CopyEngine
             try
             {
                 current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
-                var remaining = data;
-                while (!remaining.IsEmpty)
-                {
-                    var length = Math.Min(WriteChunkSize, remaining.Length);
-                    await current.Stream.WriteAsync(remaining[..length], job.Token).ConfigureAwait(false);
-                    remaining = remaining[length..];
-                    worker.NoteProgress();
-                }
+                // SharedBlock is already sized for the sequential I/O pipeline. Send the
+                // whole block to FileStream in one asynchronous operation instead of
+                // fragmenting a 16 MiB block into four separately awaited 4 MiB writes.
+                // This reduces syscalls/IOCP completions and managed async overhead while
+                // preserving the existing retry boundary at current.Copied.
+                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordWriteOperation();
+                worker.NoteProgress();
                 return;
             }
             catch (OperationCanceledException) { throw; }
