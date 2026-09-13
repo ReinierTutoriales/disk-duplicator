@@ -961,7 +961,7 @@ public static class CopyEngine
             FileMode.CreateNew,
             offset: 0,
             writeThrough,
-            entry.Size >= PreallocationThreshold ? entry.Size : 0);
+            StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold));
         return new CurrentFile(entry, destination, part, transient.BackupPath, stream, writeThrough);
     }
 
