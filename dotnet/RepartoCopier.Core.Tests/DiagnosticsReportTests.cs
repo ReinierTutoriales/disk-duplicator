@@ -34,11 +34,13 @@ public sealed class DiagnosticsReportTests
         var report = DiagnosticsReport.Format("E:\\W10UI", destinations, metrics);
 
         StringAssert.Contains(report, "SourceReadRate: 1000000 B/s");
+        StringAssert.Contains(report, "SourceReadWallClockRate: 333333.333 B/s");
         StringAssert.Contains(report, "BufferWait: 10 ms");
         StringAssert.Contains(report, "FanoutWait: 20 ms");
         StringAssert.Contains(report, "QueueWait: 30 ms");
         StringAssert.Contains(report, "ControlBacklogWait: 40 ms");
         StringAssert.Contains(report, "WriteRate: 2000000 B/s");
+        StringAssert.Contains(report, "FanoutLogicalWriteWallClockRate: 1333333.333 B/s");
         StringAssert.Contains(report, "WriteOperations: 2");
         StringAssert.Contains(report, "DurableFlush: 50 ms");
         StringAssert.Contains(report, "VerifyReadRate: 4000000 B/s");
