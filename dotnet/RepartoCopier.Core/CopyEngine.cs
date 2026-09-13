@@ -772,6 +772,12 @@ public static class CopyEngine
         if (recipients.Count == 0)
             return;
 
+        if (countsData && message is DataMessage dataMessage)
+        {
+            await DeliverDataAsync(recipients, dataMessage, job).ConfigureAwait(false);
+            return;
+        }
+
         var index = 0;
         try
         {
@@ -792,14 +798,96 @@ public static class CopyEngine
         }
     }
 
+    private static async Task DeliverDataAsync(
+        IReadOnlyList<DestinationWorker> recipients,
+        DataMessage message,
+        CopyJob job)
+    {
+        List<DestinationWorker> deferred = [];
+        var index = 0;
+        try
+        {
+            // First pass never waits. Uncongested physical devices receive their
+            // SharedBlock immediately; saturated devices are deferred until every
+            // fast branch has been fed.
+            for (; index < recipients.Count; index++)
+            {
+                var worker = recipients[index];
+                if (!worker.IsActive)
+                {
+                    message.Block.Release();
+                    continue;
+                }
+
+                if (worker.DeviceScheduler.TryReserveBacklog(message.Block.Length))
+                {
+                    await DeliverOneAsync(
+                        worker,
+                        message,
+                        countsData: true,
+                        job,
+                        backlogReserved: true).ConfigureAwait(false);
+                    continue;
+                }
+
+                deferred.Add(worker);
+            }
+        }
+        catch
+        {
+            // The current immediate delivery owns/releases its own reference on
+            // failure. Deferred recipients and recipients not visited yet do not.
+            foreach (var _ in deferred)
+                message.Block.Release();
+            for (var remaining = index + 1; remaining < recipients.Count; remaining++)
+                message.Block.Release();
+            throw;
+        }
+
+        for (var deferredIndex = 0; deferredIndex < deferred.Count; deferredIndex++)
+        {
+            var worker = deferred[deferredIndex];
+            var reserved = false;
+            try
+            {
+                var waitStarted = Stopwatch.GetTimestamp();
+                await worker.DeviceScheduler
+                    .ReserveBacklogAsync(message.Block.Length, job.Token)
+                    .ConfigureAwait(false);
+                reserved = true;
+                job.Telemetry.RecordQueueWait(Stopwatch.GetElapsedTime(waitStarted));
+
+                await DeliverOneAsync(
+                    worker,
+                    message,
+                    countsData: true,
+                    job,
+                    backlogReserved: true).ConfigureAwait(false);
+            }
+            catch
+            {
+                // If backlog reservation itself failed, this recipient's SharedBlock
+                // reference never transferred to DeliverOneAsync and remains ours.
+                if (!reserved)
+                    message.Block.Release();
+                for (var remaining = deferredIndex + 1; remaining < deferred.Count; remaining++)
+                    message.Block.Release();
+                throw;
+            }
+        }
+    }
+
     private static async ValueTask DeliverOneAsync(
         DestinationWorker worker,
         FanoutMessage message,
         bool countsData,
-        CopyJob job)
+        CopyJob job,
+        bool backlogReserved = false)
     {
         if (!worker.IsActive)
         {
+            if (backlogReserved && message is DataMessage inactiveData)
+                worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
             ReleaseIfData(message);
             return;
         }
@@ -824,6 +912,8 @@ public static class CopyEngine
             {
                 worker.ControlBudget.Release();
                 controlOwned = false;
+                if (backlogReserved && message is DataMessage inactiveData)
+                    worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
                 ReleaseIfData(message);
                 return;
             }
@@ -844,6 +934,8 @@ public static class CopyEngine
             queueOwned = false;
             worker.ControlBudget.Release();
             controlOwned = false;
+            if (backlogReserved && message is DataMessage rejectedData)
+                worker.DeviceScheduler.ReleaseBacklog(rejectedData.Block.Length);
             ReleaseIfData(message);
             if (worker.IsActive)
                 worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
@@ -852,6 +944,8 @@ public static class CopyEngine
         {
             if (queueOwned) worker.DecrementQueueDepth();
             if (controlOwned) worker.ControlBudget.Release();
+            if (backlogReserved && message is DataMessage cancelledData)
+                worker.DeviceScheduler.ReleaseBacklog(cancelledData.Block.Length);
             ReleaseIfData(message);
             throw;
         }
@@ -859,6 +953,8 @@ public static class CopyEngine
         {
             if (queueOwned) worker.DecrementQueueDepth();
             if (controlOwned) worker.ControlBudget.Release();
+            if (backlogReserved && message is DataMessage failedData)
+                worker.DeviceScheduler.ReleaseBacklog(failedData.Block.Length);
             ReleaseIfData(message);
             throw;
         }
@@ -881,6 +977,8 @@ public static class CopyEngine
                 worker.DecrementQueueDepth();
                 worker.ControlBudget.Release();
                 var data = message as DataMessage;
+                if (data is not null)
+                    worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
                 try
                 {
                     if (!worker.IsActive)
@@ -1352,6 +1450,8 @@ public static class CopyEngine
         {
             worker.DecrementQueueDepth();
             worker.ControlBudget.Release();
+            if (message is DataMessage data)
+                worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
             ReleaseIfData(message);
         }
     }
