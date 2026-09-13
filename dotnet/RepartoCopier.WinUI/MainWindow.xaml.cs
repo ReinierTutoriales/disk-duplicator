@@ -31,11 +31,8 @@ public sealed partial class MainWindow : Window
         ProgressList.ItemsSource = _progressRows;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(1080, 700));
+        AppWindow.Resize(new SizeInt32(1180, 760));
 
-        // Keep our menu completely outside the Windows caption-button hit-test area.
-        // This intentionally mirrors the visual spacing from the approved mockup.
-        AppMenuButton.Margin = new Thickness(0, 0, 140, 0);
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
 
