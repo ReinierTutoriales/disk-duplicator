@@ -76,6 +76,35 @@ public sealed class ProgressTelemetryTests
         Assert.AreEqual(0L, job.DiagnosticsSnapshot().VerifyReadBytes);
     }
 
+    [TestMethod]
+    public async Task DiagnosticsSnapshotIncludesProductionDeviceScheduler()
+    {
+        using var temp = new TempScope("device-scheduler-telemetry");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), new byte[2 * 1024 * 1024]);
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
+
+        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var final = job.Snapshot().Single();
+        Assert.AreEqual(DestinationPhase.Done, final.Phase, final.Error);
+
+        var effectiveRoot = Path.Combine(destinationBase, "Source");
+        var expectedDeviceId = StorageTopology
+            .InspectDestinations([effectiveRoot])
+            .Destinations
+            .Single()
+            .PhysicalDeviceId;
+
+        var schedulers = job.DiagnosticsSnapshot().DeviceSchedulers;
+        Assert.AreEqual(1, schedulers.Count);
+        Assert.AreEqual(expectedDeviceId, schedulers[0].DeviceId);
+        Assert.IsTrue(schedulers[0].MaxOutstandingIo >= 1);
+        Assert.IsTrue(schedulers[0].PeakOutstandingIo >= 1);
+    }
+
     private sealed class TempScope : IDisposable
     {
         public TempScope(string name)
