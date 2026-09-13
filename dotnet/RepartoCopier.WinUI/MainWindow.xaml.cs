@@ -479,7 +479,7 @@ public sealed partial class MainWindow : Window
                     Width = 64,
                     Height = 64,
                     Stretch = Stretch.Uniform,
-                    Source = new SvgImageSource { UriSource = new Uri("ms-appx:///Assets/AppLogo.svg") },
+                    Source = new BitmapImage(new Uri("ms-appx:///Assets/AppLogo.png")),
                 },
             };
             header.Children.Add(logoTile);
