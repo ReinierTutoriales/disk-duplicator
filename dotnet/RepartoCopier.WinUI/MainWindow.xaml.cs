@@ -1,8 +1,10 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
@@ -17,6 +19,7 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<ProgressRow> _progressRows = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
     private CopyJob? _job;
+    private DateTimeOffset? _copyStartedAt;
 
     public MainWindow()
     {
@@ -25,7 +28,8 @@ public sealed partial class MainWindow : Window
         ProgressList.ItemsSource = _progressRows;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(920, 600));
+        AppWindow.Resize(new SizeInt32(980, 640));
+        try { SystemBackdrop = new MicaBackdrop(); } catch { }
 
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
@@ -50,68 +54,43 @@ public sealed partial class MainWindow : Window
             await bitmap.SetSourceAsync(stream);
             LogoImage.Source = bitmap;
         }
-        catch
-        {
-            // Branding must never prevent the copier from starting.
-        }
+        catch { }
     }
 
     private void TryLoadLaunchSource()
     {
         var args = Environment.GetCommandLineArgs();
-        if (args.Length == 2 && !args[1].StartsWith("-", StringComparison.Ordinal))
-            SourcePathBox.Text = args[1];
-        else if (args.Length == 3 && string.Equals(args[1], "--source", StringComparison.Ordinal))
-            SourcePathBox.Text = args[2];
+        if (args.Length == 2 && !args[1].StartsWith("-", StringComparison.Ordinal)) SourcePathBox.Text = args[1];
+        else if (args.Length == 3 && string.Equals(args[1], "--source", StringComparison.Ordinal)) SourcePathBox.Text = args[2];
     }
 
     private async void PickSourceFile_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            var picker = new FileOpenPicker(AppWindow.Id)
-            {
-                Title = "Selecciona el archivo que quieres copiar",
-                CommitButtonText = "Seleccionar",
-            };
+            var picker = new FileOpenPicker(AppWindow.Id) { Title = "Selecciona el archivo que quieres copiar", CommitButtonText = "Seleccionar" };
             var result = await picker.PickSingleFileAsync();
-            if (result is not null)
-                SourcePathBox.Text = result.Path;
+            if (result is not null) SourcePathBox.Text = result.Path;
         }
-        catch (Exception ex)
-        {
-            ShowError(ex.Message);
-        }
+        catch (Exception ex) { ShowError(ex.Message); }
     }
 
     private async void PickSourceFolder_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            var picker = new FolderPicker(AppWindow.Id)
-            {
-                Title = "Selecciona la carpeta que quieres copiar",
-                CommitButtonText = "Seleccionar",
-            };
+            var picker = new FolderPicker(AppWindow.Id) { Title = "Selecciona la carpeta que quieres copiar", CommitButtonText = "Seleccionar" };
             var result = await picker.PickSingleFolderAsync();
-            if (result is not null)
-                SourcePathBox.Text = result.Path;
+            if (result is not null) SourcePathBox.Text = result.Path;
         }
-        catch (Exception ex)
-        {
-            ShowError(ex.Message);
-        }
+        catch (Exception ex) { ShowError(ex.Message); }
     }
 
     private async void AddDestinations_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            var picker = new FolderPicker(AppWindow.Id)
-            {
-                Title = "Selecciona dónde quieres guardar la copia",
-                CommitButtonText = "Agregar",
-            };
+            var picker = new FolderPicker(AppWindow.Id) { Title = "Selecciona dónde quieres guardar la copia", CommitButtonText = "Agregar" };
             var results = await picker.PickMultipleFoldersAsync();
             var paths = results.Select(result => result.Path).ToArray();
             var existing = _destinations.Select(item => item.Path).ToList();
@@ -119,17 +98,13 @@ public sealed partial class MainWindow : Window
             if (added > 0)
             {
                 _destinations.Clear();
-                foreach (var path in existing)
-                    _destinations.Add(new DestinationRow(path));
+                foreach (var path in existing) _destinations.Add(new DestinationRow(path));
             }
             DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             if (paths.Length > added && existing.Count >= CopyPlan.MaxDestinations)
                 StatusText.Text = $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos.";
         }
-        catch (Exception ex)
-        {
-            ShowError(ex.Message);
-        }
+        catch (Exception ex) { ShowError(ex.Message); }
     }
 
     private void RemoveDestination_Click(object sender, RoutedEventArgs e)
@@ -152,42 +127,34 @@ public sealed partial class MainWindow : Window
         try
         {
             ErrorBar.IsOpen = false;
-            var plan = CopyPlan.Create(
-                SourcePathBox.Text,
-                _destinations.Select(item => item.Path),
-                SkipSameCheck.IsChecked == true,
-                KeepGoingCheck.IsChecked == true);
-            var options = new CopyOptions(
-                Verify: false,
-                SkipSame: plan.SkipSame,
-                KeepGoing: plan.KeepGoing);
+            var plan = CopyPlan.Create(SourcePathBox.Text, _destinations.Select(item => item.Path), SkipSameCheck.IsChecked == true, KeepGoingCheck.IsChecked == true);
+            var options = new CopyOptions(Verify: false, SkipSame: plan.SkipSame, KeepGoing: plan.KeepGoing);
 
             SetEditingEnabled(false);
             StartButton.IsEnabled = false;
-            PauseButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
-            PauseButton.Content = "Pausar";
             StatusText.Text = "Preparando la copia…";
+            ShowRunningView();
+            CurrentFileText.Text = Path.GetFileName(Path.TrimEndingDirectorySeparator(SourcePathBox.Text));
+            CurrentPathText.Text = SourcePathBox.Text;
+            _copyStartedAt = DateTimeOffset.Now;
 
             _job = await CopyEngine.StartAsync(plan, options);
             PauseButton.IsEnabled = true;
             CancelButton.IsEnabled = true;
-            StatusText.Text = plan.SkipSame
-                ? "Comprobando archivos existentes…"
-                : "Iniciando copia…";
+            StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
             _progressRows.Clear();
-            foreach (var snapshot in _job.Snapshot())
-                _progressRows.Add(new ProgressRow(snapshot));
+            foreach (var snapshot in _job.Snapshot()) _progressRows.Add(new ProgressRow(snapshot));
+            RunningDestinationTitle.Text = $"Destinos ({_progressRows.Count})";
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
         }
         catch (Exception ex)
         {
             _job = null;
+            _copyStartedAt = null;
+            ShowPreparationView();
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
-            PauseButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
             ShowError(ex.Message);
         }
     }
@@ -197,7 +164,9 @@ public sealed partial class MainWindow : Window
         if (_job is null) return;
         var paused = !_job.IsPaused;
         _job.SetPaused(paused);
-        PauseButton.Content = paused ? "Continuar" : "Pausar";
+        PauseButtonText.Text = paused ? "Continuar" : "Pausar";
+        PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
+        OperationTitleText.Text = paused ? "Pausado" : "Copiando...";
         StatusText.Text = paused ? "Pausado" : "Copiando…";
     }
 
@@ -212,39 +181,28 @@ public sealed partial class MainWindow : Window
 
     private async Task ObserveJobCompletionAsync(CopyJob observed)
     {
-        try
-        {
-            await observed.Completion;
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            ShowError(ex.Message);
-        }
+        try { await observed.Completion; }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { ShowError(ex.Message); }
         finally
         {
-            if (ReferenceEquals(_job, observed))
-            {
-                RefreshProgress();
-                _progressTimer.Stop();
-                var snapshots = observed.Snapshot();
-                var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
-                var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
-                StatusText.Text = cancelled
-                    ? "Copia cancelada"
-                    : failed > 0
-                        ? "La copia terminó con algunos errores"
-                        : "Copia completada";
-                await observed.DisposeAsync();
-                _job = null;
-                SetEditingEnabled(true);
-                StartButton.IsEnabled = true;
-                PauseButton.IsEnabled = false;
-                CancelButton.IsEnabled = false;
-                PauseButton.Content = "Pausar";
-            }
+            if (!ReferenceEquals(_job, observed)) return;
+            RefreshProgress();
+            _progressTimer.Stop();
+            var snapshots = observed.Snapshot();
+            var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+            var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+            OperationTitleText.Text = cancelled ? "Cancelado" : failed > 0 ? "Completado con errores" : "Completado";
+            StatusText.Text = cancelled ? "Copia cancelada" : failed > 0 ? "La copia terminó con algunos errores" : "Copia completada";
+            PauseButton.IsEnabled = false;
+            CancelButton.IsEnabled = false;
+            await observed.DisposeAsync();
+            _job = null;
+            SetEditingEnabled(true);
+            StartButton.IsEnabled = true;
+
+            if (!cancelled && failed == 0 && ShutdownCheck.IsChecked == true)
+                await OfferShutdownAsync();
         }
     }
 
@@ -254,27 +212,129 @@ public sealed partial class MainWindow : Window
     {
         if (_job is null) return;
         var snapshots = _job.Snapshot();
-        while (_progressRows.Count < snapshots.Count)
-            _progressRows.Add(new ProgressRow(snapshots[_progressRows.Count]));
-        for (var index = 0; index < snapshots.Count; index++)
-            _progressRows[index].Update(snapshots[index]);
+        while (_progressRows.Count < snapshots.Count) _progressRows.Add(new ProgressRow(snapshots[_progressRows.Count]));
+        for (var index = 0; index < snapshots.Count; index++) _progressRows[index].Update(snapshots[index]);
 
-        OverallSpeedText.Text = Throughput.Format(snapshots.Sum(item => item.RecentBytesPerSecond));
-        if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Verifying))
-            StatusText.Text = "Comprobando la copia…";
-        else if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
-            StatusText.Text = "Copiando…";
+        var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Total);
+        var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Written);
+        var speed = snapshots.Sum(item => item.RecentBytesPerSecond);
+        var percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
+        OverallProgressBar.Value = percent;
+        OverallPercentText.Text = $"{percent:0}%";
+        OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
+        SpeedMetricText.Text = Throughput.Format(speed);
+        FilesMetricText.Text = $"{snapshots.Sum(item => item.FilesDone)}";
+
+        var remaining = total > written ? total - written : 0;
+        RemainingMetricText.Text = speed > 1 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed)) : "--:--:--";
+        if (_copyStartedAt is not null) ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
+
+        var current = snapshots.Select(item => item.LastFile).FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
+        if (!string.IsNullOrWhiteSpace(current)) CurrentFileText.Text = Path.GetFileName(current);
+
+        if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
+        {
+            OperationTitleText.Text = "Copiando...";
+            StatusText.Text = $"Copiando a {snapshots.Length} destino{(snapshots.Length == 1 ? string.Empty : "s")}…";
+        }
     }
 
-    private void ThemeSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void LoadProfile_Click(object sender, RoutedEventArgs e)
     {
-        if (Root is null || ThemeSelector.SelectedItem is not ComboBoxItem item) return;
-        Root.RequestedTheme = item.Tag?.ToString() switch
+        if (_job is not null) return;
+        try
         {
-            "Light" => ElementTheme.Light,
-            "Dark" => ElementTheme.Dark,
-            _ => ElementTheme.Default,
+            var picker = new FileOpenPicker(AppWindow.Id)
+            {
+                Title = "Cargar copia",
+                CommitButtonText = "Cargar",
+                FileTypeChoices = { { "Configuración de RepartoCopier", new List<string> { ".rcopy" } } },
+            };
+            var result = await picker.PickSingleFileAsync();
+            if (result is null) return;
+            var profile = CopyProfileSerializer.Deserialize(await File.ReadAllTextAsync(result.Path));
+            SourcePathBox.Text = profile.Source;
+            _destinations.Clear();
+            foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
+            DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
+            SkipSameCheck.IsChecked = profile.SkipExisting;
+            KeepGoingCheck.IsChecked = profile.ContinueOnError;
+            ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
+            StatusText.Text = "Configuración cargada";
+        }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private async void SaveProfile_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var profile = new CopyProfile(CopyProfile.CurrentVersion, SourcePathBox.Text, _destinations.Select(item => item.Path).ToArray(), SkipSameCheck.IsChecked == true, KeepGoingCheck.IsChecked == true, ShutdownCheck.IsChecked == true);
+            var picker = new FileSavePicker(AppWindow.Id)
+            {
+                Title = "Guardar copia",
+                CommitButtonText = "Guardar",
+                SuggestedFileName = "Mi copia",
+                DefaultFileExtension = ".rcopy",
+                FileTypeChoices = { { "Configuración de RepartoCopier", new List<string> { ".rcopy" } } },
+            };
+            var result = await picker.PickSaveFileAsync();
+            if (result is null) return;
+            await File.WriteAllTextAsync(result.Path, CopyProfileSerializer.Serialize(profile));
+            StatusText.Text = "Configuración guardada";
+        }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private async void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var themeBox = new ComboBox { Header = "Tema", Width = 260 };
+        themeBox.Items.Add(new ComboBoxItem { Content = "Sistema", Tag = "Default" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "Claro", Tag = "Light" });
+        themeBox.Items.Add(new ComboBoxItem { Content = "Oscuro", Tag = "Dark" });
+        themeBox.SelectedIndex = Root.RequestedTheme switch { ElementTheme.Light => 1, ElementTheme.Dark => 2, _ => 0 };
+        var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Ajustes", PrimaryButtonText = "Aplicar", CloseButtonText = "Cerrar", Content = themeBox };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary && themeBox.SelectedItem is ComboBoxItem item)
+            Root.RequestedTheme = item.Tag?.ToString() switch { "Light" => ElementTheme.Light, "Dark" => ElementTheme.Dark, _ => ElementTheme.Default };
+    }
+
+    private async void About_Click(object sender, RoutedEventArgs e)
+    {
+        var panel = new StackPanel { Spacing = 6 };
+        panel.Children.Add(new TextBlock { Text = "RepartoCopier", FontSize = 20, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        panel.Children.Add(new TextBlock { Text = "Versión 2.0.0" });
+        panel.Children.Add(new TextBlock { Text = "Copias rápidas y seguras para Windows.", Opacity = 0.7 });
+        await new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Acerca de", CloseButtonText = "Cerrar", Content = panel }.ShowAsync();
+    }
+
+    private void Exit_Click(object sender, RoutedEventArgs e) => Close();
+
+    private async Task OfferShutdownAsync()
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Copia completada",
+            Content = "El equipo se apagará en 60 segundos. Puedes cancelar el apagado desde Windows con shutdown /a.",
+            PrimaryButtonText = "Apagar",
+            CloseButtonText = "No apagar",
         };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+            Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
+    }
+
+    private void ShowRunningView()
+    {
+        PreparationPanel.Visibility = Visibility.Collapsed;
+        RunningPanel.Visibility = Visibility.Visible;
+        AppMenuButton.IsEnabled = true;
+    }
+
+    private void ShowPreparationView()
+    {
+        RunningPanel.Visibility = Visibility.Collapsed;
+        PreparationPanel.Visibility = Visibility.Visible;
+        ElapsedText.Text = string.Empty;
     }
 
     private void SetEditingEnabled(bool enabled)
@@ -298,8 +358,18 @@ public sealed partial class MainWindow : Window
         _job?.RequestCancel();
     }
 
-    private static string FormatDestinationCount(int count) =>
-        count == 1 ? "1 destino" : $"{count} destinos";
+    private static string FormatDestinationCount(int count) => count == 1 ? "1 destino" : $"{count} destinos";
+
+    private static string FormatDuration(TimeSpan value) => $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+
+    private static string FormatBytes(ulong bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var value = (double)bytes;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return $"{value:0.##} {units[unit]}";
+    }
 
     public sealed record DestinationRow(string Path);
 
@@ -309,16 +379,16 @@ public sealed partial class MainWindow : Window
         private string _phaseText = string.Empty;
         private string _detail = string.Empty;
         private string _speed = string.Empty;
+        private string _percentText = string.Empty;
         private double _percent;
 
         public ProgressRow(DestinationSnapshot snapshot) => Update(snapshot);
-
         public string Label { get => _label; private set => Set(ref _label, value); }
         public string PhaseText { get => _phaseText; private set => Set(ref _phaseText, value); }
         public string Detail { get => _detail; private set => Set(ref _detail, value); }
         public string Speed { get => _speed; private set => Set(ref _speed, value); }
+        public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
         public double Percent { get => _percent; private set => Set(ref _percent, value); }
-
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public void Update(DestinationSnapshot snapshot)
@@ -335,9 +405,8 @@ public sealed partial class MainWindow : Window
                 _ => "Procesando",
             };
             Percent = snapshot.Total == 0 ? 100 : Math.Clamp(snapshot.Written * 100.0 / snapshot.Total, 0, 100);
-            Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0
-                ? $"{snapshot.FilesDone} archivo(s)"
-                : snapshot.LastFile);
+            PercentText = $"{Percent:0}%";
+            Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0 ? $"{snapshot.FilesDone} archivo(s)" : snapshot.LastFile);
             Speed = Throughput.Format(snapshot.RecentBytesPerSecond);
         }
 
