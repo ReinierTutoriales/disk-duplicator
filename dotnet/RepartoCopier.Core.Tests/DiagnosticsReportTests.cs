@@ -21,7 +21,7 @@ public sealed class DiagnosticsReportTests
             1_000_000, TimeSpan.FromMilliseconds(250),
             TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(20),
             TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(40),
-            4_000_000, TimeSpan.FromSeconds(2),
+            4_000_000, 2, TimeSpan.FromSeconds(2),
             2, TimeSpan.FromMilliseconds(50),
             3, TimeSpan.FromMilliseconds(60),
             4, TimeSpan.FromMilliseconds(70),
@@ -39,6 +39,7 @@ public sealed class DiagnosticsReportTests
         StringAssert.Contains(report, "QueueWait: 30 ms");
         StringAssert.Contains(report, "ControlBacklogWait: 40 ms");
         StringAssert.Contains(report, "WriteRate: 2000000 B/s");
+        StringAssert.Contains(report, "WriteOperations: 2");
         StringAssert.Contains(report, "DurableFlush: 50 ms");
         StringAssert.Contains(report, "VerifyReadRate: 4000000 B/s");
         StringAssert.Contains(report, "VerifyHashRate: 8000000 B/s");

@@ -37,6 +37,7 @@ public static class DiagnosticsReport
         AppendDuration(sb, "QueueWait", metrics.QueueWaitTime);
         AppendDuration(sb, "ControlBacklogWait", metrics.ControlBacklogWaitTime);
         AppendRate(sb, "Write", metrics.WrittenBytes, metrics.WriteTime, metrics.WriteBytesPerSecond);
+        sb.Append("WriteOperations: ").AppendLine(metrics.WriteOperations.ToString(CultureInfo.InvariantCulture));
         sb.Append("DurableFlushes: ").AppendLine(metrics.DurableFlushes.ToString(CultureInfo.InvariantCulture));
         AppendDuration(sb, "DurableFlush", metrics.DurableFlushTime);
         sb.Append("Commits: ").AppendLine(metrics.Commits.ToString(CultureInfo.InvariantCulture));
