@@ -21,6 +21,19 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public void DifferentPhysicalDisksRemainIndependent()
+    {
+        var source = Device(@"C:\source", 1, "NVMe", StorageMediaKind.SolidState, trim: true);
+        var first = Device(@"E:\copy", 4, "SATA", StorageMediaKind.SolidState, trim: true);
+        var second = Device(@"F:\copy", 7, "SATA", StorageMediaKind.SolidState, trim: true);
+
+        using var map = DeviceSchedulerMap.Create(source, [first, second]);
+
+        Assert.HasCount(2, map.Schedulers);
+        Assert.AreNotSame(map.For(first), map.For(second));
+    }
+
+    [TestMethod]
     public void SourceAndDestinationOnSameDiskForceQueueDepthOne()
     {
         var source = Device(@"C:\source", 4, "NVMe", StorageMediaKind.SolidState, trim: true);
