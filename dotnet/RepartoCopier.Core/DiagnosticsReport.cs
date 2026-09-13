@@ -34,11 +34,13 @@ public static class DiagnosticsReport
         sb.AppendLine();
         AppendRate(sb, "SourceRead", metrics.SourceReadBytes, metrics.SourceReadTime, metrics.SourceReadBytesPerSecond);
         AppendRate(sb, "SourceHash", metrics.SourceHashBytes, metrics.SourceHashTime, metrics.SourceHashBytesPerSecond);
+        AppendScalarRate(sb, "SourceReadWallClockRate", metrics.SourceReadWallClockBytesPerSecond);
         AppendDuration(sb, "BufferWait", metrics.BufferWaitTime);
         AppendDuration(sb, "FanoutWait", metrics.FanoutWaitTime);
         AppendDuration(sb, "QueueWait", metrics.QueueWaitTime);
         AppendDuration(sb, "ControlBacklogWait", metrics.ControlBacklogWaitTime);
         AppendRate(sb, "Write", metrics.WrittenBytes, metrics.WriteTime, metrics.WriteBytesPerSecond);
+        AppendScalarRate(sb, "FanoutLogicalWriteWallClockRate", metrics.FanoutLogicalWriteWallClockBytesPerSecond);
         sb.Append("WriteOperations: ").AppendLine(metrics.WriteOperations.ToString(CultureInfo.InvariantCulture));
         sb.Append("DurableFlushes: ").AppendLine(metrics.DurableFlushes.ToString(CultureInfo.InvariantCulture));
         AppendDuration(sb, "DurableFlush", metrics.DurableFlushTime);
@@ -107,10 +109,13 @@ public static class DiagnosticsReport
     {
         sb.Append(name).Append("Bytes: ").AppendLine(bytes.ToString(CultureInfo.InvariantCulture));
         AppendDuration(sb, name + "Time", elapsed);
-        sb.Append(name).Append("Rate: ")
+        AppendScalarRate(sb, name + "Rate", bytesPerSecond);
+    }
+
+    private static void AppendScalarRate(StringBuilder sb, string name, double bytesPerSecond) =>
+        sb.Append(name).Append(": ")
             .Append(bytesPerSecond.ToString("0.###", CultureInfo.InvariantCulture))
             .AppendLine(" B/s");
-    }
 
     private static void AppendDuration(StringBuilder sb, string name, TimeSpan value) =>
         sb.Append(name).Append(": ")
