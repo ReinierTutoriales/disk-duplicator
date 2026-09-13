@@ -48,3 +48,14 @@ jobs:
             $forbidden | ForEach-Object { Write-Error "Legacy source remains: $_" }
             throw 'Repository must remain C#/.NET-only.'
           }
+
+      - name: Publish portable self-contained build
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+
+      - name: Upload downloadable test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: RepartoCopier-main-win-x64
+          path: artifact
+          if-no-files-found: error
+          retention-days: 14
