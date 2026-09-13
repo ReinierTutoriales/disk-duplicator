@@ -1,0 +1,34 @@
+name: Apply Fluent 2027 polish retry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/polish-ui-apply2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Apply the reviewed UI patch
+        shell: bash
+        run: |
+          awk '/^          python - <<'"'"'PY'"'"'$/{flag=1;next} /^          PY$/{flag=0} flag{sub(/^          /,""); print}' .github/workflows/polish-ui-2027.yml > /tmp/polish.py
+          python /tmp/polish.py
+          git checkout -- .github/workflows/windows-dotnet.yml
+
+      - name: Commit UI only
+        shell: bash
+        run: |
+          git config user.name "ReinierTutoriales"
+          git config user.email "86568548+ReinierTutoriales@users.noreply.github.com"
+          git add dotnet/RepartoCopier.WinUI/MainWindow.xaml dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs
+          git commit -m "ui: polish Fluent 2027 layout toward approved mockup"
+          git push origin main
