@@ -186,23 +186,25 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { ShowError(ex.Message); }
         finally
         {
-            if (!ReferenceEquals(_job, observed)) return;
-            RefreshProgress();
-            _progressTimer.Stop();
-            var snapshots = observed.Snapshot();
-            var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
-            var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
-            OperationTitleText.Text = cancelled ? "Cancelado" : failed > 0 ? "Completado con errores" : "Completado";
-            StatusText.Text = cancelled ? "Copia cancelada" : failed > 0 ? "La copia terminó con algunos errores" : "Copia completada";
-            PauseButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
-            await observed.DisposeAsync();
-            _job = null;
-            SetEditingEnabled(true);
-            StartButton.IsEnabled = true;
+            if (ReferenceEquals(_job, observed))
+            {
+                RefreshProgress();
+                _progressTimer.Stop();
+                var snapshots = observed.Snapshot();
+                var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+                var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+                OperationTitleText.Text = cancelled ? "Cancelado" : failed > 0 ? "Completado con errores" : "Completado";
+                StatusText.Text = cancelled ? "Copia cancelada" : failed > 0 ? "La copia terminó con algunos errores" : "Copia completada";
+                PauseButton.IsEnabled = false;
+                CancelButton.IsEnabled = false;
+                await observed.DisposeAsync();
+                _job = null;
+                SetEditingEnabled(true);
+                StartButton.IsEnabled = true;
 
-            if (!cancelled && failed == 0 && ShutdownCheck.IsChecked == true)
-                await OfferShutdownAsync();
+                if (!cancelled && failed == 0 && ShutdownCheck.IsChecked == true)
+                    await OfferShutdownAsync();
+            }
         }
     }
 
@@ -217,13 +219,14 @@ public sealed partial class MainWindow : Window
 
         var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Total);
         var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.Written);
-        var speed = snapshots.Sum(item => item.RecentBytesPerSecond);
+        var speed = snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
         var percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
         OverallProgressBar.Value = percent;
         OverallPercentText.Text = $"{percent:0}%";
         OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
         SpeedMetricText.Text = Throughput.Format(speed);
-        FilesMetricText.Text = $"{snapshots.Sum(item => item.FilesDone)}";
+        var filesDone = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesDone);
+        FilesMetricText.Text = $"{filesDone}";
 
         var remaining = total > written ? total - written : 0;
         RemainingMetricText.Text = speed > 1 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed)) : "--:--:--";
@@ -235,7 +238,7 @@ public sealed partial class MainWindow : Window
         if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
         {
             OperationTitleText.Text = "Copiando...";
-            StatusText.Text = $"Copiando a {snapshots.Length} destino{(snapshots.Length == 1 ? string.Empty : "s")}…";
+            StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
         }
     }
 
