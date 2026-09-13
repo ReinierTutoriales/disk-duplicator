@@ -39,6 +39,10 @@ public sealed class ExplicitOffsetWriterTests
                     first.LongLength,
                     CancellationToken.None);
 
+                // RandomAccess writes must not advance FileStream.Position. This is
+                // the exact condition that made a later cursor-based tail unsafe.
+                Assert.AreEqual(0L, stream.Position);
+
                 // This simulates the final QD1 fallback after an earlier QD2 block.
                 // FileStream.Position is intentionally untouched; correctness must
                 // come exclusively from the explicit offset.
@@ -47,6 +51,7 @@ public sealed class ExplicitOffsetWriterTests
                     tail,
                     first.LongLength + second.LongLength,
                     CancellationToken.None);
+                Assert.AreEqual(0L, stream.Position);
                 stream.Flush(flushToDisk: true);
             }
 
