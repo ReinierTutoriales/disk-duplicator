@@ -120,7 +120,7 @@ public static class DiagnosticsReport
                 .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | alignmentOffset=").Append(device.SectorAlignmentOffsetBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
-                .Append(" | freeSpace=").Append(device.FreeSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | freeSpace=").Append(device.AvailableFreeSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | removable=").Append(device.Removable?.ToString() ?? "unknown")
                 .Append(" | sharedPhysicalDevice=").Append(device.SharesPhysicalDevice)
                 .AppendLine();
