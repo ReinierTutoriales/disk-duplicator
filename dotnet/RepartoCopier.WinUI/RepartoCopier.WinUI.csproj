@@ -29,4 +29,11 @@
   <ItemGroup>
     <ProjectReference Include="..\RepartoCopier.Core\RepartoCopier.Core.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\AppLogo.svg">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
 </Project>
