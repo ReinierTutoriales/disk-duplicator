@@ -37,7 +37,6 @@
             <RowDefinition Height="42" />
         </Grid.RowDefinitions>
 
-        <!-- Fluent custom title bar -->
         <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="30,0,156,0" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
@@ -47,7 +46,11 @@
             </Grid.ColumnDefinitions>
 
             <Image x:Name="LogoImage" Width="54" Height="54" Stretch="Uniform"
-                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                   HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Image.Source>
+                    <SvgImageSource UriSource="ms-appx:///Assets/AppLogo.svg" />
+                </Image.Source>
+            </Image>
 
             <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center" Spacing="2">
                 <TextBlock Text="RepartoCopier" FontSize="21" FontWeight="SemiBold" />
@@ -80,7 +83,7 @@
                                 <Button Style="{StaticResource MenuButtonStyle}" Click="Settings_Click">
                                     <StackPanel Orientation="Horizontal" Spacing="12"><FontIcon Glyph="&#xE713;" FontSize="18"/><TextBlock Text="Ajustes" FontSize="14"/></StackPanel>
                                 </Button>
-                                <Button Style="{StaticResource MenuButtonStyle}" Click="About_Click">
+                                <Button x:Name="AboutMenuButton" Style="{StaticResource MenuButtonStyle}" Click="About_Click">
                                     <StackPanel Orientation="Horizontal" Spacing="12"><FontIcon Glyph="&#xE946;" FontSize="18"/><TextBlock Text="Acerca de" FontSize="14"/></StackPanel>
                                 </Button>
                                 <Rectangle Height="1" Margin="8,5" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
@@ -103,8 +106,7 @@
                      IsClosable="True"
                      Canvas.ZIndex="10" />
 
-            <!-- Setup view -->
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="16" MaxWidth="820" HorizontalAlignment="Center">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="16" MaxWidth="900" HorizontalAlignment="Center">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -210,8 +212,9 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel Orientation="Horizontal" Spacing="20" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
                         <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" />
+                        <CheckBox x:Name="VerifyCheck" Content="Verificar integridad" IsChecked="True" ToolTipService.ToolTip="Comprueba con BLAKE3 los archivos copiados al finalizar" />
                         <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
                     </StackPanel>
                     <Button x:Name="StartButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Height="44" MinWidth="152" CornerRadius="8" Click="Start_Click">
@@ -223,7 +226,6 @@
                 </Grid>
             </Grid>
 
-            <!-- Active / completed copy view -->
             <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="14">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -269,7 +271,7 @@
                             <Grid Grid.Column="4" Margin="18,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <FontIcon Glyph="&#xE8A5;" FontSize="22" Opacity="0.76" Margin="0,0,10,0" VerticalAlignment="Center"/>
-                                <StackPanel Grid.Column="1" Spacing="2" MinWidth="86"><TextBlock Text="Archivos" Opacity="0.60" FontSize="11"/><TextBlock x:Name="FilesMetricText" Text="0" FontSize="20" FontWeight="SemiBold"/></StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="2" MinWidth="86"><TextBlock Text="Archivos" Opacity="0.60" FontSize="11"/><TextBlock x:Name="FilesMetricText" Text="0/0" FontSize="20" FontWeight="SemiBold"/></StackPanel>
                             </Grid>
                         </Grid>
                     </Grid>
@@ -328,7 +330,7 @@
                                         <TextBlock Grid.Column="3" Text="{Binding PercentText}" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right" />
                                         <TextBlock Grid.Column="4" Text="{Binding Speed}" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right" />
                                         <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding StatusGlyph}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding StatusGlyph}" FontSize="11" Foreground="{Binding StatusBrush}" VerticalAlignment="Center" />
                                             <TextBlock Text="{Binding PhaseText}" FontSize="12" VerticalAlignment="Center" />
                                         </StackPanel>
                                         <Button Grid.Column="6" Width="34" Height="34" Padding="0" CornerRadius="7" ToolTipService.ToolTip="Detalles" IsHitTestVisible="False"><FontIcon Glyph="&#xE712;" FontSize="16"/></Button>
