@@ -263,6 +263,7 @@ public static class CopyEngine
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
         var pipeline = new PipelineGovernor();
+        job.Telemetry.AttachPipelineGovernor(pipeline.Snapshot);
         var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -982,10 +983,7 @@ public static class CopyEngine
                             {
                                 if (!current.Failed)
                                 {
-                                    var started = Stopwatch.GetTimestamp();
                                     await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
-                                    var elapsed = Stopwatch.GetElapsedTime(started);
-                                    job.Telemetry.RecordWrite(chunkData.Block.Length, elapsed);
                                     current.Copied += chunkData.Block.Length;
                                     worker.Progress.AddWritten(chunkData.Block.Length);
                                 }
@@ -1079,6 +1077,7 @@ public static class CopyEngine
                     worker.DeviceScheduler.MaxOutstandingIo,
                     current.Entry.Size,
                     data.Length);
+                var started = Stopwatch.GetTimestamp();
 
                 if (queueDepth >= 2)
                 {
@@ -1094,6 +1093,7 @@ public static class CopyEngine
                         job.Token).ConfigureAwait(false);
                     job.Telemetry.RecordWriteOperation();
                 }
+                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
                 worker.NoteProgress();
                 return;
             }
@@ -1625,16 +1625,46 @@ public static class CopyEngine
         private readonly object _gate = new();
         private readonly Queue<PrefetchWaiter> _slotWaiters = new();
         private int _prefetchLimit = InitialPrefetch;
+        private int _minimumObservedPrefetchLimit = InitialPrefetch;
+        private int _maximumObservedPrefetchLimit = InitialPrefetch;
         private int _inFlight;
         private int _samples;
+        private int _decisionCount;
+        private int _upshifts;
+        private int _downshifts;
+        private string _lastDecision = "initial";
         private double _consumerWaitMs;
         private double _deliveryWaitMs;
         private double _budgetWaitMs;
         private double _readMs;
+        private double _totalConsumerWaitMs;
+        private double _totalDeliveryWaitMs;
+        private double _totalBudgetWaitMs;
+        private double _totalReadMs;
 
         internal int InFlight
         {
             get { lock (_gate) return _inFlight; }
+        }
+
+        internal PipelineGovernorSnapshot Snapshot()
+        {
+            lock (_gate)
+            {
+                return new PipelineGovernorSnapshot(
+                    _prefetchLimit,
+                    _minimumObservedPrefetchLimit,
+                    _maximumObservedPrefetchLimit,
+                    _inFlight,
+                    _decisionCount,
+                    _upshifts,
+                    _downshifts,
+                    _lastDecision,
+                    TimeSpan.FromMilliseconds(_totalConsumerWaitMs),
+                    TimeSpan.FromMilliseconds(_totalDeliveryWaitMs),
+                    TimeSpan.FromMilliseconds(_totalBudgetWaitMs),
+                    TimeSpan.FromMilliseconds(_totalReadMs));
+            }
         }
 
         public ValueTask AcquirePrefetchSlotAsync(CancellationToken token)
@@ -1703,10 +1733,22 @@ public static class CopyEngine
             {
                 switch (kind)
                 {
-                    case SampleKind.Consumer: _consumerWaitMs += milliseconds; break;
-                    case SampleKind.Delivery: _deliveryWaitMs += milliseconds; break;
-                    case SampleKind.Budget: _budgetWaitMs += milliseconds; break;
-                    case SampleKind.Read: _readMs += milliseconds; break;
+                    case SampleKind.Consumer:
+                        _consumerWaitMs += milliseconds;
+                        _totalConsumerWaitMs += milliseconds;
+                        break;
+                    case SampleKind.Delivery:
+                        _deliveryWaitMs += milliseconds;
+                        _totalDeliveryWaitMs += milliseconds;
+                        break;
+                    case SampleKind.Budget:
+                        _budgetWaitMs += milliseconds;
+                        _totalBudgetWaitMs += milliseconds;
+                        break;
+                    case SampleKind.Read:
+                        _readMs += milliseconds;
+                        _totalReadMs += milliseconds;
+                        break;
                 }
                 if (kind == SampleKind.Consumer)
                     _samples++;
@@ -1722,11 +1764,28 @@ public static class CopyEngine
             var starvation = _consumerWaitMs;
             var pressure = _deliveryWaitMs + _budgetWaitMs;
             var sourceCost = _readMs;
+            var previous = _prefetchLimit;
+            var decision = "hold:balanced";
 
             if (pressure > starvation * 1.5 && pressure > sourceCost)
+            {
                 _prefetchLimit = Math.Max(MinPrefetch, _prefetchLimit - 1);
+                decision = _prefetchLimit < previous ? "decrease:pressure" : "hold:min";
+            }
             else if (starvation > pressure * 1.5 && starvation > sourceCost * 0.25)
+            {
                 _prefetchLimit = Math.Min(MaxPrefetch, _prefetchLimit + 1);
+                decision = _prefetchLimit > previous ? "increase:starvation" : "hold:max";
+            }
+
+            _decisionCount++;
+            if (_prefetchLimit > previous)
+                _upshifts++;
+            else if (_prefetchLimit < previous)
+                _downshifts++;
+            _minimumObservedPrefetchLimit = Math.Min(_minimumObservedPrefetchLimit, _prefetchLimit);
+            _maximumObservedPrefetchLimit = Math.Max(_maximumObservedPrefetchLimit, _prefetchLimit);
+            _lastDecision = decision;
 
             _samples = 0;
             _consumerWaitMs = 0;
