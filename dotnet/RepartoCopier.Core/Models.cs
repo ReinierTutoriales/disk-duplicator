@@ -11,7 +11,7 @@ public enum DestinationPhase
 }
 
 public sealed record CopyOptions(
-    bool Verify = true,
+    bool Verify = false,
     bool SkipSame = true,
     bool KeepGoing = false);
 
