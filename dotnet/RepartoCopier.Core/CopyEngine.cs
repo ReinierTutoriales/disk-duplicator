@@ -122,7 +122,7 @@ public static class CopyEngine
 
         var prepared = Preflight(plan);
         var progress = prepared.DestinationRoots
-            .Select(root => new DestinationProgress(root, prepared.TotalBytes))
+            .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
             .ToArray();
         var job = new CopyJob(progress);
         job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
@@ -142,7 +142,7 @@ public static class CopyEngine
         var prepared = await Task.Run(() => Preflight(plan), cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         var progress = prepared.DestinationRoots
-            .Select(root => new DestinationProgress(root, prepared.TotalBytes))
+            .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
             .ToArray();
         var job = new CopyJob(progress);
         job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
@@ -718,9 +718,9 @@ public static class CopyEngine
                     totalRead += read;
                     var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
                     rented = null;
-                    budgetOwned = false; // ownership transferred to SourceReadBlock
+                    budgetOwned = false;
                     await output.WriteAsync(block, token).ConfigureAwait(false);
-                    slotOwned = false; // released by the downstream sourceQueue consumer
+                    slotOwned = false;
                 }
                 catch
                 {
@@ -786,9 +786,6 @@ public static class CopyEngine
         }
         catch
         {
-            // DeliverOneAsync owns and releases the current recipient's data reference
-            // when it throws. References for recipients not visited yet still belong to
-            // this dispatcher and must be released explicitly.
             if (message is DataMessage data)
             {
                 for (var remaining = index + 1; remaining < recipients.Count; remaining++)
@@ -807,9 +804,6 @@ public static class CopyEngine
         var index = 0;
         try
         {
-            // First pass never waits. Uncongested physical devices receive their
-            // SharedBlock immediately; saturated devices are deferred until every
-            // fast branch has been fed.
             for (; index < recipients.Count; index++)
             {
                 var worker = recipients[index];
@@ -835,8 +829,6 @@ public static class CopyEngine
         }
         catch
         {
-            // The current immediate delivery owns/releases its own reference on
-            // failure. Deferred recipients and recipients not visited yet do not.
             foreach (var _ in deferred)
                 message.Block.Release();
             for (var remaining = index + 1; remaining < recipients.Count; remaining++)
@@ -866,8 +858,6 @@ public static class CopyEngine
             }
             catch
             {
-                // If backlog reservation itself failed, this recipient's SharedBlock
-                // reference never transferred to DeliverOneAsync and remains ours.
                 if (!reserved)
                     message.Block.Release();
                 for (var remaining = deferredIndex + 1; remaining < deferred.Count; remaining++)
@@ -906,8 +896,6 @@ public static class CopyEngine
             job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
             controlOwned = true;
 
-            // Fail() can race the initial IsActive read while we wait for a global
-            // control slot. Do not enqueue into a worker that died in that window.
             if (!worker.IsActive)
             {
                 worker.ControlBudget.Release();
@@ -921,11 +909,9 @@ public static class CopyEngine
             worker.IncrementQueueDepth();
             queueOwned = true;
 
-            // Unbounded channels have no per-worker capacity gate. false therefore
-            // means the writer side was completed between IsActive and TryWrite.
             if (worker.Channel.Writer.TryWrite(message))
             {
-                controlOwned = false; // ownership transfers to the queued message
+                controlOwned = false;
                 queueOwned = false;
                 return;
             }
@@ -972,8 +958,6 @@ public static class CopyEngine
             worker.Progress.SetPhase(DestinationPhase.Copying);
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
-                // QueueDepth and the global control budget represent messages waiting
-                // in channels only. Once dequeued, release both before doing physical I/O.
                 worker.DecrementQueueDepth();
                 worker.ControlBudget.Release();
                 var data = message as DataMessage;
@@ -1016,8 +1000,6 @@ public static class CopyEngine
                             }
                             break;
                         case DataMessage:
-                            // A data message without an active file is discarded safely;
-                            // the SharedBlock reference is released by the iteration finally.
                             break;
                         case EndMessage end when current is not null:
                             FinishFile(worker, current, end.Hash, options, recovery, job);
@@ -1028,8 +1010,6 @@ public static class CopyEngine
                 }
                 finally
                 {
-                    // The dequeued data reference belongs to this iteration regardless
-                    // of failure, cancellation, pause cancellation, or orphaned state.
                     data?.Block.Release();
                 }
             }
@@ -1159,9 +1139,6 @@ public static class CopyEngine
             return;
         }
 
-        // QD2 is enabled only for one destination owning this physical scheduler.
-        // Shared physical disks and source/destination-on-same-disk profiles remain QD1,
-        // so acquiring both slots here cannot deadlock against a sibling destination.
         using var firstLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
         using var secondLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
 
@@ -1206,13 +1183,10 @@ public static class CopyEngine
         {
             if (!current.WriteThrough)
             {
-                // Large files use cached sequential writes and one explicit durable flush.
                 var flushStarted = Stopwatch.GetTimestamp();
                 current.Stream.Flush(flushToDisk: true);
                 job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
             }
-            // For small files FileOptions.WriteThrough already forces each write through
-            // the Windows cache to the device, avoiding a second FlushFileBuffers round-trip.
             current.Stream.Dispose();
             current.Stream = null;
         }
@@ -1251,13 +1225,24 @@ public static class CopyEngine
             .ToArray();
         var tasks = activeSlots.Select(async slot =>
         {
+            var verifyEntries = copy.Files
+                .Where(entry => expectedHashes.ContainsKey(PathKey(entry.RelativePath)))
+                .ToArray();
+            var verifyBytes = verifyEntries.Aggregate<FileEntry, ulong>(
+                0,
+                (sum, entry) => checked(sum + (ulong)entry.Size));
+            progress[slot].SetVerifyWork(verifyBytes, (ulong)verifyEntries.Length);
+            if (verifyEntries.Length == 0)
+                return;
+
             progress[slot].SetPhase(DestinationPhase.Verifying);
-            foreach (var entry in copy.Files)
+            foreach (var entry in verifyEntries)
             {
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
                     continue;
+                progress[slot].SetLastFile(entry.RelativePath);
                 var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
                 if (!File.Exists(destination))
                 {
@@ -1271,12 +1256,19 @@ public static class CopyEngine
                     workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
                     break;
                 }
-                var actual = await HashFileAsync(destination, job.Token, resources, job.Telemetry, verification: true).ConfigureAwait(false);
+                var actual = await HashFileAsync(
+                    destination,
+                    job.Token,
+                    resources,
+                    job.Telemetry,
+                    verification: true,
+                    verificationProgress: progress[slot]).ConfigureAwait(false);
                 if (!actual.AsSpan().SequenceEqual(expected))
                 {
                     workers[slot].Fail($"BLAKE3 no coincide: {destination}");
                     break;
                 }
+                progress[slot].MarkVerifyFileDone();
             }
         }).ToArray();
         await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -1336,7 +1328,8 @@ public static class CopyEngine
         CancellationToken token,
         ResourceGovernor? resources = null,
         CopyTelemetry? telemetry = null,
-        bool verification = false)
+        bool verification = false,
+        DestinationProgress? verificationProgress = null)
     {
         using var hasher = Hasher.New();
         var buffer = ArrayPool<byte>.Shared.Rent(4 * 1024 * 1024);
@@ -1358,6 +1351,8 @@ public static class CopyEngine
                 if (verification)
                     telemetry?.RecordVerifyRead(read, readElapsed);
                 if (read == 0) break;
+                if (verification)
+                    verificationProgress?.AddVerified(read);
                 if (resources is null)
                 {
                     var hashStarted = Stopwatch.GetTimestamp();
@@ -2218,4 +2213,3 @@ public static class CopyEngine
         public bool Failed { get; set; }
     }
 }
-
