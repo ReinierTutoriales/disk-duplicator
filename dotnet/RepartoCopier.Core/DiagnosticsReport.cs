@@ -10,7 +10,7 @@ public static class DiagnosticsReport
         IReadOnlyList<DestinationSnapshot> destinations,
         CopyDiagnosticsSnapshot metrics)
     {
-        var sb = new StringBuilder(2048);
+        var sb = new StringBuilder(3072);
         sb.AppendLine("RepartoCopier diagnostics");
         sb.Append("Source: ").AppendLine(source);
         sb.Append("Destinations: ").AppendLine(destinations.Count.ToString(CultureInfo.InvariantCulture));
@@ -84,19 +84,29 @@ public static class DiagnosticsReport
         {
             var profile = StorageIoProfile.For(device);
             sb.Append("- ").Append(device.DestinationRoot)
+                .Append(" | deviceId=").Append(device.PhysicalDeviceId)
                 .Append(" | disk=").Append(device.PhysicalDeviceNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | partition=").Append(device.PartitionNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | bus=").Append(device.BusType)
                 .Append(" | media=").Append(device.MediaKind)
+                .Append(" | trim=").Append(device.TrimEnabled?.ToString() ?? "unknown")
                 .Append(" | filesystem=").Append(device.FileSystem)
                 .Append(" | driveType=").Append(device.DriveType)
                 .Append(" | network=").Append(device.IsNetwork)
                 .Append(" | preallocation=").Append(device.SupportsPreallocation)
                 .Append(" | profile=").Append(profile.Kind)
                 .Append(" | recommendedQD=").Append(profile.RecommendedQueueDepth.ToString(CultureInfo.InvariantCulture))
+                .Append(" | maxQD=").Append(profile.MaximumQueueDepth.ToString(CultureInfo.InvariantCulture))
+                .Append(" | blockBytes=").Append(profile.RecommendedBlockSizeBytes.ToString(CultureInfo.InvariantCulture))
+                .Append(" | deviceBacklogTarget=").Append(profile.DeviceBacklogTargetBytes.ToString(CultureInfo.InvariantCulture))
                 .Append(" | directIoCandidate=").Append(profile.AllowDirectIo)
                 .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | sectorAlignmentOffset=").Append(device.SectorAlignmentOffsetBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | maxComponentLength=").Append(device.MaximumComponentLength?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | volumeFlags=").Append(device.VolumeFlags?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | freeBytes=").Append(device.AvailableFreeSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | totalBytes=").Append(device.TotalSpaceBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | removable=").Append(device.Removable?.ToString() ?? "unknown")
                 .Append(" | sharedPhysicalDevice=").Append(device.SharesPhysicalDevice)
                 .AppendLine();
