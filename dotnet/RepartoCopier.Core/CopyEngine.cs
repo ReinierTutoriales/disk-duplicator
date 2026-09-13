@@ -148,6 +148,7 @@ public static class CopyEngine
         job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
         return job;
     }
+
     private static PreparedCopy Preflight(CopyPlan plan)
     {
         var requestedSource = Path.GetFullPath(plan.Source);
@@ -264,6 +265,7 @@ public static class CopyEngine
         var pipeline = new PipelineGovernor();
         var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
+        job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         try
         {
             var skipMasks = options.SkipSame
