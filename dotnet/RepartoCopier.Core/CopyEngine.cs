@@ -1105,7 +1105,11 @@ public static class CopyEngine
                 else
                 {
                     using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-                    await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                    await ExplicitOffsetWriter.WriteOneAsync(
+                        current.Stream.SafeFileHandle,
+                        data,
+                        current.Copied,
+                        job.Token).ConfigureAwait(false);
                     job.Telemetry.RecordWriteOperation();
                 }
                 worker.NoteProgress();
@@ -1146,7 +1150,11 @@ public static class CopyEngine
             secondLength < StorageWritePolicy.MinimumParallelSliceBytes)
         {
             using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-            await stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+            await ExplicitOffsetWriter.WriteOneAsync(
+                stream.SafeFileHandle,
+                data,
+                current.Copied,
+                job.Token).ConfigureAwait(false);
             job.Telemetry.RecordWriteOperation();
             return;
         }
@@ -1161,18 +1169,13 @@ public static class CopyEngine
         var secondOffset = checked(firstOffset + firstLength);
         var handle = stream.SafeFileHandle;
 
-        var firstWrite = RandomAccess.WriteAsync(
+        await ExplicitOffsetWriter.WriteTwoAsync(
             handle,
             data[..firstLength],
             firstOffset,
-            job.Token);
-        var secondWrite = RandomAccess.WriteAsync(
-            handle,
             data.Slice(firstLength, secondLength),
             secondOffset,
-            job.Token);
-
-        await Task.WhenAll(firstWrite.AsTask(), secondWrite.AsTask()).ConfigureAwait(false);
+            job.Token).ConfigureAwait(false);
         job.Telemetry.RecordWriteOperation();
         job.Telemetry.RecordWriteOperation();
     }
