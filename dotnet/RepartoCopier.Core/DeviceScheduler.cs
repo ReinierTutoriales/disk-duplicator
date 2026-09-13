@@ -1,5 +1,19 @@
 namespace RepartoCopier.Core;
 
+public sealed record DeviceIoSnapshot(
+    string DeviceId,
+    int MaxOutstandingIo,
+    int OutstandingIo,
+    int PeakOutstandingIo,
+    long BacklogTargetBytes,
+    long QueuedBytes,
+    long PeakQueuedBytes)
+{
+    public double BacklogPressure => BacklogTargetBytes <= 0
+        ? 0
+        : Math.Max(0, (double)QueuedBytes / BacklogTargetBytes);
+}
+
 /// <summary>
 /// Coordinates physical-I/O pressure for destinations that resolve to the same
 /// device. It deliberately does not synchronize file completion between workers.
@@ -33,6 +47,15 @@ internal sealed class DeviceScheduler : IDisposable
     public long QueuedBytes => Interlocked.Read(ref _queuedBytes);
     public long PeakQueuedBytes => Interlocked.Read(ref _peakQueuedBytes);
 
+    public DeviceIoSnapshot Snapshot() => new(
+        DeviceId,
+        MaxOutstandingIo,
+        OutstandingIo,
+        PeakOutstandingIo,
+        BacklogTargetBytes,
+        QueuedBytes,
+        PeakQueuedBytes);
+
     public async ValueTask<IoLease> AcquireIoAsync(CancellationToken token)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -49,9 +72,8 @@ internal sealed class DeviceScheduler : IDisposable
     }
 
     /// <summary>
-    /// Observes bytes queued for this physical device. This is telemetry-only in
-    /// the first scheduler stage; a later backlog budget can enforce the target
-    /// without changing FAN-OUT file ordering.
+    /// Observes bytes queued for this physical device. Enforcement is deliberately
+    /// separate so telemetry can be validated before a soft backlog gate is enabled.
     /// </summary>
     public void NoteQueuedBytes(int bytes)
     {
@@ -136,6 +158,12 @@ internal sealed class DeviceSchedulerMap : IDisposable
         _schedulers = schedulers;
 
     public IReadOnlyCollection<DeviceScheduler> Schedulers => _schedulers.Values;
+
+    public IReadOnlyList<DeviceIoSnapshot> Snapshot() =>
+        _schedulers.Values
+            .Select(item => item.Snapshot())
+            .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     public DeviceScheduler For(StorageDeviceInfo device) =>
         _schedulers.TryGetValue(device.PhysicalDeviceId, out var scheduler)
