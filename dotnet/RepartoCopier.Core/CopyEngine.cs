@@ -977,6 +977,7 @@ public static class CopyEngine
                     {
                         case BeginMessage begin:
                             current = BeginFile(worker, begin.Entry);
+                            job.Telemetry.RecordFilePolicy(current.WriteThrough);
                             break;
                         case DataMessage chunkData when current is not null:
                             try
@@ -1093,7 +1094,7 @@ public static class CopyEngine
                         job.Token).ConfigureAwait(false);
                     job.Telemetry.RecordWriteOperation();
                 }
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started), current.WriteThrough);
                 worker.NoteProgress();
                 return;
             }
@@ -1200,7 +1201,7 @@ public static class CopyEngine
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         var commitStarted = Stopwatch.GetTimestamp();
         CommitPart(current.PartPath, current.DestinationPath, current.BackupPath);
-        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
+        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted), current.WriteThrough);
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         var recoveryStarted = Stopwatch.GetTimestamp();
         recovery.Append(
@@ -1210,7 +1211,7 @@ public static class CopyEngine
                 current.Entry.Size,
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
-        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
+        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted), current.WriteThrough);
         worker.Progress.MarkDone();
     }
 
