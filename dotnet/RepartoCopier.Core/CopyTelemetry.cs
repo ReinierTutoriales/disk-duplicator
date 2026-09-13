@@ -39,6 +39,14 @@ public sealed record CopyDiagnosticsSnapshot(
     public double VerifyReadBytesPerSecond => Rate(VerifyReadBytes, VerifyReadTime);
     public double VerifyHashBytesPerSecond => Rate(VerifyHashBytes, VerifyHashTime);
 
+    // Operation-time rates above answer how fast the individual I/O calls completed.
+    // These wall-clock rates answer a different, critical question: how much useful
+    // work the entire FAN-OUT pipeline completed per real second. WrittenBytes is
+    // intentionally aggregate across destinations because one source byte can be
+    // replicated to N independent destinations.
+    public double SourceReadWallClockBytesPerSecond => Rate(SourceReadBytes, CopyPhaseElapsed);
+    public double FanoutLogicalWriteWallClockBytesPerSecond => Rate(WrittenBytes, CopyPhaseElapsed);
+
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
 }
