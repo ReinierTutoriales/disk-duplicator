@@ -1,0 +1,182 @@
+name: Apply device scheduler integration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-device-scheduler-integration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Integrate physical device scheduler and remove one-shot workflow
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $text = [System.IO.File]::ReadAllText($path)
+
+          $old = @'
+        var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
+            source,
+            effectiveDestinations);
+
+        var sourceRoot = sourceIsDirectory
+'@
+          $new = @'
+        var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
+            source,
+            effectiveDestinations);
+
+        var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
+        var destinationDevices = destinationTopology.Destinations.ToArray();
+        if (destinationDevices.Length != destinationRoots.Length)
+            throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
+        var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
+
+        var sourceRoot = sourceIsDirectory
+'@
+          if (-not $text.Contains($old)) { throw 'Preflight topology insertion point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+            totalBytes,
+            preverifiedSkips,
+            sourceIsDirectory ? scan : null);
+'@
+          $new = @'
+            totalBytes,
+            preverifiedSkips,
+            sourceIsDirectory ? scan : null,
+            sourceDevice,
+            destinationDevices);
+'@
+          if (-not $text.Contains($old)) { throw 'PreparedCopy constructor call not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+        var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
+        try
+'@
+          $new = @'
+        var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
+        using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
+        try
+'@
+          if (-not $text.Contains($old)) { throw 'DeviceSchedulerMap insertion point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+            workers = copy.DestinationRoots
+                .Select((root, index) => new DestinationWorker(root, index, progress[index], controlBudget))
+                .ToArray();
+'@
+          $new = @'
+            workers = copy.DestinationRoots
+                .Select((root, index) => new DestinationWorker(
+                    root,
+                    index,
+                    progress[index],
+                    controlBudget,
+                    copy.DestinationDevices[index],
+                    deviceSchedulers.For(copy.DestinationDevices[index])))
+                .ToArray();
+'@
+          if (-not $text.Contains($old)) { throw 'DestinationWorker construction point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordWriteOperation();
+'@
+          $new = @'
+                using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
+                await current.Stream.WriteAsync(data, job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordWriteOperation();
+'@
+          if (-not $text.Contains($old)) { throw 'Write scheduler integration point not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+    private sealed record PreparedCopy(
+        string SourceRoot,
+        string[] DestinationRoots,
+        IReadOnlyList<FileEntry> Files,
+        IReadOnlyList<string> Directories,
+        ulong TotalBytes,
+        bool[][] PreverifiedSkips,
+        SourceTreeScan? SourceScan);
+'@
+          $new = @'
+    private sealed record PreparedCopy(
+        string SourceRoot,
+        string[] DestinationRoots,
+        IReadOnlyList<FileEntry> Files,
+        IReadOnlyList<string> Directories,
+        ulong TotalBytes,
+        bool[][] PreverifiedSkips,
+        SourceTreeScan? SourceScan,
+        StorageDeviceInfo SourceDevice,
+        StorageDeviceInfo[] DestinationDevices);
+'@
+          if (-not $text.Contains($old)) { throw 'PreparedCopy record not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+        public DestinationWorker(
+            string root,
+            int slot,
+            DestinationProgress progress,
+            GlobalControlBacklogBudget controlBudget)
+        {
+            Root = root;
+            Slot = slot;
+            Progress = progress;
+            ControlBudget = controlBudget;
+'@
+          $new = @'
+        public DestinationWorker(
+            string root,
+            int slot,
+            DestinationProgress progress,
+            GlobalControlBacklogBudget controlBudget,
+            StorageDeviceInfo device,
+            DeviceScheduler deviceScheduler)
+        {
+            Root = root;
+            Slot = slot;
+            Progress = progress;
+            ControlBudget = controlBudget;
+            Device = device;
+            DeviceScheduler = deviceScheduler;
+'@
+          if (-not $text.Contains($old)) { throw 'DestinationWorker constructor not found.' }
+          $text = $text.Replace($old, $new)
+
+          $old = @'
+        public DestinationProgress Progress { get; }
+        public GlobalControlBacklogBudget ControlBudget { get; }
+        public Channel<FanoutMessage> Channel { get; }
+'@
+          $new = @'
+        public DestinationProgress Progress { get; }
+        public GlobalControlBacklogBudget ControlBudget { get; }
+        public StorageDeviceInfo Device { get; }
+        public DeviceScheduler DeviceScheduler { get; }
+        public Channel<FanoutMessage> Channel { get; }
+'@
+          if (-not $text.Contains($old)) { throw 'DestinationWorker properties not found.' }
+          $text = $text.Replace($old, $new)
+
+          [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          Remove-Item '.github/workflows/apply-device-scheduler-integration.yml'
+          git config user.name 'ReinierTutoriales'
+          git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
+          git add $path '.github/workflows/apply-device-scheduler-integration.yml'
+          git commit -m 'feat: coordinate writes by physical storage device'
+          git push origin HEAD:main
