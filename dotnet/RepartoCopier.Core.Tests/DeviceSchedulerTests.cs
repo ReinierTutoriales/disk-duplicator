@@ -61,6 +61,39 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public async Task BacklogReservationWaitsUntilPhysicalQueueDrains()
+    {
+        const int block = 8 * 1024 * 1024;
+        using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, block);
+
+        Assert.IsTrue(scheduler.TryReserveBacklog(block));
+        Assert.IsFalse(scheduler.TryReserveBacklog(block));
+
+        var waiting = scheduler.ReserveBacklogAsync(block, CancellationToken.None).AsTask();
+        Assert.IsFalse(waiting.IsCompleted);
+        Assert.AreEqual(block, scheduler.QueuedBytes);
+
+        scheduler.ReleaseBacklog(block);
+        await waiting;
+
+        Assert.AreEqual(block, scheduler.QueuedBytes);
+        Assert.AreEqual(block, scheduler.PeakQueuedBytes);
+        scheduler.ReleaseBacklog(block);
+        Assert.AreEqual(0, scheduler.QueuedBytes);
+    }
+
+    [TestMethod]
+    public void EmptyQueueAllowsOneBlockLargerThanConservativeTarget()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk8", 1, 4L * 1024 * 1024);
+
+        Assert.IsTrue(scheduler.TryReserveBacklog(16 * 1024 * 1024));
+        Assert.IsFalse(scheduler.TryReserveBacklog(1));
+        scheduler.ReleaseBacklog(16 * 1024 * 1024);
+        Assert.AreEqual(0, scheduler.QueuedBytes);
+    }
+
+    [TestMethod]
     public void QueueTelemetryTracksPeakWithoutEnforcingYet()
     {
         using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, 16L * 1024 * 1024);
