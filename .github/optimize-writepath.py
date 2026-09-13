@@ -3,7 +3,9 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 engine_path = root / 'dotnet/RepartoCopier.Core/CopyEngine.cs'
 telemetry_path = root / 'dotnet/RepartoCopier.Core/CopyTelemetry.cs'
+report_path = root / 'dotnet/RepartoCopier.Core/DiagnosticsReport.cs'
 test_path = root / 'dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs'
+report_test_path = root / 'dotnet/RepartoCopier.Core.Tests/DiagnosticsReportTests.cs'
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -57,6 +59,15 @@ telemetry = replace_once(
 )
 telemetry_path.write_text(telemetry, encoding='utf-8')
 
+report = report_path.read_text(encoding='utf-8')
+report = replace_once(
+    report,
+    '        AppendRate(sb, "Write", metrics.WrittenBytes, metrics.WriteTime, metrics.WriteBytesPerSecond);\n',
+    '        AppendRate(sb, "Write", metrics.WrittenBytes, metrics.WriteTime, metrics.WriteBytesPerSecond);\n        sb.Append("WriteOperations: ").AppendLine(metrics.WriteOperations.ToString(CultureInfo.InvariantCulture));\n',
+    'diagnostics write operations',
+)
+report_path.write_text(report, encoding='utf-8')
+
 tests = test_path.read_text(encoding='utf-8')
 marker = '''    [TestMethod]\n    public async Task ExplicitDiagnosticVerificationRemainsAvailable()\n'''
 new_test = '''    [TestMethod]\n    public async Task LargeSharedBlocksAreWrittenWithOneIoOperationPerDestinationBlock()\n    {\n        using var temp = new TempDirectory();\n        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;\n        var payload = new byte[20 * 1024 * 1024 + 733];\n        new Random(20260913).NextBytes(payload);\n        await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), payload);\n\n        var destinations = Enumerable.Range(0, 2)\n            .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-write-{index}")).FullName)\n            .ToArray();\n        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);\n\n        await using var job = CopyEngine.Start(plan);\n        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));\n\n        Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));\n        var metrics = job.DiagnosticsSnapshot();\n        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two\n        // destinations the optimized writer must issue exactly four WriteAsync calls.\n        Assert.AreEqual(4L, metrics.WriteOperations);\n    }\n\n'''
@@ -64,3 +75,18 @@ if marker not in tests:
     raise SystemExit('test insertion marker not found')
 tests = tests.replace(marker, new_test + marker, 1)
 test_path.write_text(tests, encoding='utf-8')
+
+report_tests = report_test_path.read_text(encoding='utf-8')
+report_tests = replace_once(
+    report_tests,
+    '            4_000_000, TimeSpan.FromSeconds(2),\n',
+    '            4_000_000, 2, TimeSpan.FromSeconds(2),\n',
+    'diagnostics snapshot constructor',
+)
+report_tests = replace_once(
+    report_tests,
+    '        StringAssert.Contains(report, "WriteRate: 2000000 B/s");\n',
+    '        StringAssert.Contains(report, "WriteRate: 2000000 B/s");\n        StringAssert.Contains(report, "WriteOperations: 2");\n',
+    'diagnostics report assertion',
+)
+report_test_path.write_text(report_tests, encoding='utf-8')
