@@ -86,6 +86,35 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public async Task IoPairAcquisitionSerializesCompetingQd2Callers()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
+        using var firstPair = await scheduler.AcquireIoPairAsync(CancellationToken.None);
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+
+        var secondTask = scheduler.AcquireIoPairAsync(CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        Assert.IsFalse(secondTask.IsCompleted);
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+
+        firstPair.Dispose();
+        using var secondPair = await secondTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+        Assert.AreEqual(2, scheduler.PeakOutstandingIo);
+    }
+
+    [TestMethod]
+    public async Task IoPairRequiresAtLeastTwoPhysicalSlots()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk11", 1, 32L * 1024 * 1024);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () =>
+        {
+            using var _ = await scheduler.AcquireIoPairAsync(CancellationToken.None);
+        });
+    }
+
+    [TestMethod]
     public async Task BacklogReservationWaitsUntilPhysicalQueueDrains()
     {
         const int block = 8 * 1024 * 1024;
