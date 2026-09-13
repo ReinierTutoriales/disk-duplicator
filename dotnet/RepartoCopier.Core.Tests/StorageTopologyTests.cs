@@ -1,11 +1,13 @@
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RepartoCopier.Core;
 
 namespace RepartoCopier.Core.Tests;
 
+[TestClass]
 public sealed class StorageTopologyTests
 {
-    [Fact]
-    public void BuildSnapshot_marks_destinations_that_share_a_physical_disk()
+    [TestMethod]
+    public void BuildSnapshotMarksDestinationsThatShareAPhysicalDisk()
     {
         var devices = new[]
         {
@@ -16,16 +18,16 @@ public sealed class StorageTopologyTests
 
         var snapshot = StorageTopology.BuildSnapshot(devices);
 
-        Assert.Single(snapshot.SharedPhysicalDevices);
-        Assert.Equal((uint)4, snapshot.SharedPhysicalDevices[0].PhysicalDeviceNumber);
-        Assert.Equal(2, snapshot.SharedPhysicalDevices[0].DestinationRoots.Count);
-        Assert.True(snapshot.Destinations[0].SharesPhysicalDevice);
-        Assert.True(snapshot.Destinations[1].SharesPhysicalDevice);
-        Assert.False(snapshot.Destinations[2].SharesPhysicalDevice);
+        Assert.HasCount(1, snapshot.SharedPhysicalDevices);
+        Assert.AreEqual((uint)4, snapshot.SharedPhysicalDevices[0].PhysicalDeviceNumber);
+        Assert.HasCount(2, snapshot.SharedPhysicalDevices[0].DestinationRoots);
+        Assert.IsTrue(snapshot.Destinations[0].SharesPhysicalDevice);
+        Assert.IsTrue(snapshot.Destinations[1].SharesPhysicalDevice);
+        Assert.IsFalse(snapshot.Destinations[2].SharesPhysicalDevice);
     }
 
-    [Fact]
-    public void BuildSnapshot_does_not_group_unknown_devices()
+    [TestMethod]
+    public void BuildSnapshotDoesNotGroupUnknownDevices()
     {
         var devices = new[]
         {
@@ -35,21 +37,22 @@ public sealed class StorageTopologyTests
 
         var snapshot = StorageTopology.BuildSnapshot(devices);
 
-        Assert.Empty(snapshot.SharedPhysicalDevices);
-        Assert.All(snapshot.Destinations, item => Assert.False(item.SharesPhysicalDevice));
+        Assert.IsEmpty(snapshot.SharedPhysicalDevices);
+        Assert.IsTrue(snapshot.Destinations.All(item => !item.SharesPhysicalDevice));
     }
 
-    [Fact]
-    public void InspectDestinations_returns_one_entry_per_destination()
+    [TestMethod]
+    public void InspectDestinationsReturnsOneEntryPerDestination()
     {
         var root = Path.GetPathRoot(Path.GetTempPath());
-        Assert.False(string.IsNullOrWhiteSpace(root));
+        Assert.IsFalse(string.IsNullOrWhiteSpace(root));
 
         var snapshot = StorageTopology.InspectDestinations(new[] { root! });
 
-        var device = Assert.Single(snapshot.Destinations);
-        Assert.Equal(Path.GetFullPath(root!), device.DestinationRoot);
-        Assert.False(string.IsNullOrWhiteSpace(device.VolumeRoot));
+        Assert.HasCount(1, snapshot.Destinations);
+        var device = snapshot.Destinations[0];
+        Assert.AreEqual(Path.GetFullPath(root!), device.DestinationRoot);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(device.VolumeRoot));
     }
 
     private static StorageDeviceInfo Device(string root, uint disk, uint partition) =>
