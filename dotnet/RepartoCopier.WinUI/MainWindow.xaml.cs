@@ -139,7 +139,7 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
-                Verify: true,
+                Verify: false,
                 SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
@@ -231,7 +231,7 @@ public sealed partial class MainWindow : Window
                     ? "Copia cancelada"
                     : failed > 0
                         ? $"Finalizado con {failed} destino(s) fallido(s)"
-                        : "Copia completada y verificada";
+                        : "Copia completada";
                 await observed.DisposeAsync();
                 _job = null;
                 SetEditingEnabled(true);

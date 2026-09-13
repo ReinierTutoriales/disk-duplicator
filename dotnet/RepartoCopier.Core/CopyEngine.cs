@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
 using System.Runtime.InteropServices;
@@ -94,6 +93,7 @@ public static class CopyEngine
 {
     private const int BlockSize = 16 * 1024 * 1024;
     private const int SourcePrefetchPhysicalCapacity = 4;
+    private const int SourceHashPipelineCapacity = 2;
     private const int SourcePrefetchThreshold = 16 * 1024 * 1024;
     private const int WriteChunkSize = 4 * 1024 * 1024;
     private const int SmallBufferSize = 64 * 1024;
@@ -117,7 +117,7 @@ public static class CopyEngine
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
         options ??= new CopyOptions(
-            Verify: true,
+            Verify: false,
             SkipSame: plan.SkipSame,
             KeepGoing: plan.KeepGoing);
 
@@ -136,7 +136,7 @@ public static class CopyEngine
         CancellationToken cancellationToken = default)
     {
         options ??= new CopyOptions(
-            Verify: true,
+            Verify: false,
             SkipSame: plan.SkipSame,
             KeepGoing: plan.KeepGoing);
 
@@ -251,7 +251,7 @@ public static class CopyEngine
         CopyJob job)
     {
         var token = job.Token;
-        var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
+        var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
         var pipeline = new PipelineGovernor();
@@ -273,7 +273,7 @@ public static class CopyEngine
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
             var writerTasks = workers
-                .Select(worker => WriterLoopAsync(worker, options, job, expectedHashes))
+                .Select(worker => WriterLoopAsync(worker, options, job))
                 .ToArray();
 
             Exception? producerError = null;
@@ -354,7 +354,7 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         bool[][] skipMasks,
-        ConcurrentDictionary<string, byte[]> expectedHashes,
+        Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
         PipelineGovernor pipeline)
     {
@@ -394,7 +394,8 @@ public static class CopyEngine
                 if (expectedHashes.TryGetValue(key, out var preflightHash) && !hash.AsSpan().SequenceEqual(preflightHash))
                     throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
                 expectedHashes[key] = hash;
-                await DeliverAsync(active.Where(worker => worker.IsActive).ToArray(), new EndMessage(hash), countsData: false, job).ConfigureAwait(false);
+                active.RemoveAll(worker => !worker.IsActive);
+                await DeliverAsync(active, new EndMessage(hash), countsData: false, job).ConfigureAwait(false);
             }
 
             if (copy.SourceScan is not null)
@@ -403,7 +404,7 @@ public static class CopyEngine
         finally
         {
             // SharedBlock instances can outlive the producer while destination writers
-            // drain their bounded channels. Disposing the semaphore here races with the
+            // drain their channels. Disposing the semaphore here races with the
             // final SharedBlock.Release() calls and can abort otherwise valid copies.
             // The semaphore is intentionally left for GC once the last shared block and
             // this producer scope release their references.
@@ -460,17 +461,17 @@ public static class CopyEngine
             var hashStarted = Stopwatch.GetTimestamp();
             hasher.UpdateWithJoin(rented.AsSpan(0, read));
             job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
-            var recipients = active.Where(worker => worker.IsActive).ToArray();
-            if (recipients.Length == 0)
+            active.RemoveAll(worker => !worker.IsActive);
+            if (active.Count == 0)
             {
                 ArrayPool<byte>.Shared.Return(rented);
                 bufferBudget.Release(readBufferSize);
                 return null;
             }
 
-            var block = new SharedBlock(rented, read, readBufferSize, recipients.Length, bufferBudget);
+            var block = new SharedBlock(rented, read, readBufferSize, active.Count, bufferBudget);
             var deliveryStarted = Stopwatch.GetTimestamp();
-            await DeliverAsync(recipients, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
+            await DeliverAsync(active, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
             var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
             pipeline.RecordDeliveryWait(deliveryElapsed);
             job.Telemetry.RecordFanoutWait(deliveryElapsed);
@@ -519,8 +520,8 @@ public static class CopyEngine
                 if (!sourceQueue.Reader.TryRead(out var sourceBlock))
                     continue;
                 pipeline.ReleasePrefetchSlot();
-                var recipients = active.Where(worker => worker.IsActive).ToArray();
-                if (recipients.Length == 0)
+                active.RemoveAll(worker => !worker.IsActive);
+                if (active.Count == 0)
                 {
                     sourceBlock.Release();
                     stoppedEarly = true;
@@ -528,9 +529,9 @@ public static class CopyEngine
                     break;
                 }
 
-                var shared = sourceBlock.TransferToShared(recipients.Length);
+                var shared = sourceBlock.TransferToShared(active.Count);
                 var deliveryStarted = Stopwatch.GetTimestamp();
-                await DeliverAsync(recipients, new DataMessage(shared), countsData: true, job).ConfigureAwait(false);
+                await DeliverAsync(active, new DataMessage(shared), countsData: true, job).ConfigureAwait(false);
                 var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
                 pipeline.RecordDeliveryWait(deliveryElapsed);
                 job.Telemetry.RecordFanoutWait(deliveryElapsed);
@@ -587,65 +588,35 @@ public static class CopyEngine
         CancellationToken token)
     {
         Exception? completionError = null;
+        using var stageCancel = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var hashQueue = Channel.CreateBounded<SourceReadBlock>(new BoundedChannelOptions(SourceHashPipelineCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+        var readTask = ReadSourceAheadAsync(
+            entry,
+            readBufferSize,
+            hashQueue.Writer,
+            bufferBudget,
+            job,
+            pipeline,
+            stageCancel.Token);
+
         try
         {
             using var hasher = Hasher.New();
-            await using var source = OpenSourceStream(entry.SourcePath);
-            long totalRead = 0;
-
-            while (true)
+            long totalHashed = 0;
+            await foreach (var block in hashQueue.Reader.ReadAllAsync(stageCancel.Token).ConfigureAwait(false))
             {
-                token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
-                await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
-                var budgetStarted = Stopwatch.GetTimestamp();
-                try
-                {
-                    await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
-                    var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
-                    pipeline.RecordBudgetWait(budgetElapsed);
-                    job.Telemetry.RecordBufferWait(budgetElapsed);
-                    job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
-                }
-                catch
-                {
-                    pipeline.ReleasePrefetchSlot();
-                    throw;
-                }
-                var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
-                int read;
-                try
-                {
-                    var readStarted = Stopwatch.GetTimestamp();
-                    read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    pipeline.RecordSourceRead(readElapsed);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
-                }
-                catch
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                    bufferBudget.Release(readBufferSize);
-                    pipeline.ReleasePrefetchSlot();
-                    throw;
-                }
-
-                if (read == 0)
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                    bufferBudget.Release(readBufferSize);
-                    pipeline.ReleasePrefetchSlot();
-                    break;
-                }
-
-                totalRead += read;
+                totalHashed += block.Length;
                 var hashStarted = Stopwatch.GetTimestamp();
-                hasher.UpdateWithJoin(rented.AsSpan(0, read));
-                job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
-                var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
+                hasher.UpdateWithJoin(block.Memory.Span);
+                job.Telemetry.RecordSourceHash(block.Length, Stopwatch.GetElapsedTime(hashStarted));
                 try
                 {
-                    await output.WriteAsync(block, token).ConfigureAwait(false);
+                    await output.WriteAsync(block, stageCancel.Token).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -655,8 +626,100 @@ public static class CopyEngine
                 }
             }
 
+            var totalRead = await readTask.ConfigureAwait(false);
+            if (totalHashed != totalRead)
+                throw new IOException($"La tubería de origen perdió datos en {entry.RelativePath}: leídos {totalRead}, procesados {totalHashed}.");
             ValidateCompletedSourceRead(entry, totalRead);
             return new SourceReadResult(totalRead, hasher.Finalize().AsSpan().ToArray());
+        }
+        catch (Exception ex)
+        {
+            completionError = ex;
+            stageCancel.Cancel();
+            try { await readTask.ConfigureAwait(false); }
+            catch { }
+            while (hashQueue.Reader.TryRead(out var leftover))
+            {
+                leftover.Release();
+                pipeline.ReleasePrefetchSlot();
+            }
+            throw;
+        }
+        finally
+        {
+            output.TryComplete(completionError);
+        }
+    }
+
+    private static async Task<long> ReadSourceAheadAsync(
+        FileEntry entry,
+        int readBufferSize,
+        ChannelWriter<SourceReadBlock> output,
+        AdaptiveByteBudget bufferBudget,
+        CopyJob job,
+        PipelineGovernor pipeline,
+        CancellationToken token)
+    {
+        Exception? completionError = null;
+        try
+        {
+            await using var source = OpenSourceStream(entry.SourcePath);
+            long totalRead = 0;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
+                await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
+                var slotOwned = true;
+                var budgetOwned = false;
+                byte[]? rented = null;
+                try
+                {
+                    var budgetStarted = Stopwatch.GetTimestamp();
+                    await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
+                    budgetOwned = true;
+                    var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
+                    pipeline.RecordBudgetWait(budgetElapsed);
+                    job.Telemetry.RecordBufferWait(budgetElapsed);
+                    job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
+
+                    rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
+                    var readStarted = Stopwatch.GetTimestamp();
+                    var read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
+                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
+                    pipeline.RecordSourceRead(readElapsed);
+                    job.Telemetry.RecordSourceRead(read, readElapsed);
+
+                    if (read == 0)
+                    {
+                        ArrayPool<byte>.Shared.Return(rented);
+                        rented = null;
+                        bufferBudget.Release(readBufferSize);
+                        budgetOwned = false;
+                        pipeline.ReleasePrefetchSlot();
+                        slotOwned = false;
+                        break;
+                    }
+
+                    totalRead += read;
+                    var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
+                    rented = null;
+                    budgetOwned = false; // ownership transferred to SourceReadBlock
+                    await output.WriteAsync(block, token).ConfigureAwait(false);
+                    slotOwned = false; // released by the downstream sourceQueue consumer
+                }
+                catch
+                {
+                    if (rented is not null)
+                        ArrayPool<byte>.Shared.Return(rented);
+                    if (budgetOwned)
+                        bufferBudget.Release(readBufferSize);
+                    if (slotOwned)
+                        pipeline.ReleasePrefetchSlot();
+                    throw;
+                }
+            }
+            return totalRead;
         }
         catch (Exception ex)
         {
@@ -790,8 +853,7 @@ public static class CopyEngine
     private static async Task WriterLoopAsync(
         DestinationWorker worker,
         CopyOptions options,
-        CopyJob job,
-        ConcurrentDictionary<string, byte[]> expectedHashes)
+        CopyJob job)
     {
         CurrentFile? current = null;
         using var recovery = new RecoveryCheckpointWriter(worker.Root);
@@ -847,8 +909,6 @@ public static class CopyEngine
                             break;
                         case EndMessage end when current is not null:
                             FinishFile(worker, current, end.Hash, options, recovery, job);
-                            if (!current.Failed)
-                                expectedHashes[PathKey(current.Entry.RelativePath)] = end.Hash;
                             current = null;
                             break;
                     }
@@ -1013,7 +1073,7 @@ public static class CopyEngine
         PreparedCopy copy,
         DestinationWorker[] workers,
         DestinationProgress[] progress,
-        ConcurrentDictionary<string, byte[]> expectedHashes,
+        IReadOnlyDictionary<string, byte[]> expectedHashes,
         CopyJob job,
         ResourceGovernor resources)
     {
@@ -1325,6 +1385,7 @@ public static class CopyEngine
         }
 
         public int Length { get; }
+        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SourceReadBlock))).AsMemory(0, Length);
 
         public SharedBlock TransferToShared(int references)
         {
