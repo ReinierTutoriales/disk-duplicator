@@ -29,6 +29,8 @@ public static class DiagnosticsReport
                 .AppendLine();
         }
 
+        AppendStorageTopology(sb, destinations);
+
         sb.AppendLine();
         AppendRate(sb, "SourceRead", metrics.SourceReadBytes, metrics.SourceReadTime, metrics.SourceReadBytesPerSecond);
         AppendRate(sb, "SourceHash", metrics.SourceHashBytes, metrics.SourceHashTime, metrics.SourceHashBytesPerSecond);
@@ -55,6 +57,50 @@ public static class DiagnosticsReport
         AppendDuration(sb, "Elapsed", metrics.Elapsed);
 
         return sb.ToString();
+    }
+
+    private static void AppendStorageTopology(StringBuilder sb, IReadOnlyList<DestinationSnapshot> destinations)
+    {
+        if (destinations.Count == 0)
+            return;
+
+        StorageTopologySnapshot topology;
+        try
+        {
+            topology = StorageTopology.InspectDestinations(destinations.Select(item => item.Label));
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine();
+            sb.Append("StorageTopology: unavailable | ").AppendLine(ex.Message);
+            return;
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("StorageTopology:");
+        foreach (var device in topology.Destinations)
+        {
+            sb.Append("- ").Append(device.DestinationRoot)
+                .Append(" | disk=").Append(device.PhysicalDeviceNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | partition=").Append(device.PartitionNumber?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | bus=").Append(device.BusType)
+                .Append(" | media=").Append(device.MediaKind)
+                .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
+                .Append(" | removable=").Append(device.Removable?.ToString() ?? "unknown")
+                .Append(" | sharedPhysicalDevice=").Append(device.SharesPhysicalDevice)
+                .AppendLine();
+            if (!string.IsNullOrWhiteSpace(device.ProbeError))
+                sb.Append("  probe-note: ").AppendLine(device.ProbeError);
+        }
+
+        foreach (var group in topology.SharedPhysicalDevices)
+        {
+            sb.Append("SharedPhysicalDisk ")
+                .Append(group.PhysicalDeviceNumber.ToString(CultureInfo.InvariantCulture))
+                .Append(": ")
+                .AppendLine(string.Join(" | ", group.DestinationRoots));
+        }
     }
 
     private static void AppendRate(StringBuilder sb, string name, long bytes, TimeSpan elapsed, double bytesPerSecond)
