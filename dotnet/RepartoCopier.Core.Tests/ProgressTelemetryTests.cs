@@ -132,6 +132,44 @@ public sealed class ProgressTelemetryTests
         Assert.AreEqual(0, governor.InFlight);
     }
 
+    [TestMethod]
+    public async Task DiagnosticsSnapshotSegmentsWriteThroughAndBufferedPolicies()
+    {
+        const long smallSize = 1024 * 1024;
+        const long largeSize = 5L * 1024 * 1024;
+        using var temp = new TempScope("write-policy-telemetry");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
+        await using (var small = new FileStream(Path.Combine(source, "small.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            small.SetLength(smallSize);
+        await using (var large = new FileStream(Path.Combine(source, "large.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            large.SetLength(largeSize);
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
+
+        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(plan);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var final = job.Snapshot().Single();
+        Assert.AreEqual(DestinationPhase.Done, final.Phase, final.Error);
+
+        var diagnostics = job.DiagnosticsSnapshot();
+        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.Files);
+        Assert.AreEqual(smallSize, diagnostics.WriteThroughPolicy.WrittenBytes);
+        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.Commits);
+        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.RecoveryEvents);
+        Assert.IsTrue(diagnostics.WriteThroughPolicy.WriteTime > TimeSpan.Zero);
+
+        Assert.AreEqual(1, diagnostics.BufferedPolicy.Files);
+        Assert.AreEqual(largeSize, diagnostics.BufferedPolicy.WrittenBytes);
+        Assert.AreEqual(1, diagnostics.BufferedPolicy.Commits);
+        Assert.AreEqual(1, diagnostics.BufferedPolicy.RecoveryEvents);
+        Assert.IsTrue(diagnostics.BufferedPolicy.WriteTime > TimeSpan.Zero);
+
+        Assert.AreEqual(smallSize + largeSize, diagnostics.WrittenBytes);
+        Assert.AreEqual(2, diagnostics.Commits);
+        Assert.AreEqual(2, diagnostics.RecoveryEvents);
+    }
+
     private sealed class TempScope : IDisposable
     {
         public TempScope(string name)
