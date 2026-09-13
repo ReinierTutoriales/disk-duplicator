@@ -7,6 +7,8 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class ProductionFastPathTests
 {
+    // Production intentionally ends after the durable copy path; full physical read-back
+    // remains an explicit diagnostic/test mode rather than mandatory user-facing work.
     [TestMethod]
     public async Task DefaultProductionCopySkipsPhysicalReadBackAndPreservesBytes()
     {
