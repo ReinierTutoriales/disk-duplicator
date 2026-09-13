@@ -21,6 +21,8 @@ public sealed record DeviceIoSnapshot(
 internal sealed class DeviceScheduler : IDisposable
 {
     private readonly SemaphoreSlim _ioSlots;
+    private readonly object _backlogGate = new();
+    private readonly Queue<BacklogWaiter> _backlogWaiters = new();
     private int _outstandingIo;
     private int _peakOutstandingIo;
     private long _queuedBytes;
@@ -72,9 +74,59 @@ internal sealed class DeviceScheduler : IDisposable
     }
 
     /// <summary>
-    /// Observes bytes queued for this physical device. Enforcement is deliberately
-    /// separate so telemetry can be validated before a soft backlog gate is enabled.
+    /// Tries to reserve physical-device backlog immediately. FAN-OUT uses this
+    /// first so uncongested devices receive the SharedBlock before the producer
+    /// waits on a slower device. One oversized block is allowed when the queue is
+    /// empty so conservative targets can never deadlock forward progress.
     /// </summary>
+    public bool TryReserveBacklog(int bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+        lock (_backlogGate)
+        {
+            ThrowIfDisposed();
+            if (_backlogWaiters.Count != 0 || !CanReserveBacklogLocked(bytes))
+                return false;
+            ReserveBacklogLocked(bytes);
+            return true;
+        }
+    }
+
+    public ValueTask ReserveBacklogAsync(int bytes, CancellationToken token)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+        lock (_backlogGate)
+        {
+            ThrowIfDisposed();
+            if (_backlogWaiters.Count == 0 && CanReserveBacklogLocked(bytes))
+            {
+                ReserveBacklogLocked(bytes);
+                return ValueTask.CompletedTask;
+            }
+
+            var waiter = new BacklogWaiter(bytes);
+            _backlogWaiters.Enqueue(waiter);
+            return new ValueTask(WaitForBacklogAsync(waiter, token));
+        }
+    }
+
+    public void ReleaseBacklog(int bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+        List<BacklogWaiter>? ready;
+        lock (_backlogGate)
+        {
+            var remaining = Interlocked.Read(ref _queuedBytes) - bytes;
+            if (remaining < 0)
+                throw new InvalidOperationException("La cola física intentó liberar más bytes de los reservados.");
+            Interlocked.Exchange(ref _queuedBytes, remaining);
+            ready = PumpBacklogWaitersLocked();
+        }
+        CompleteBacklogWaiters(ready);
+    }
+
+    // Kept for focused scheduler tests/diagnostics. Production FAN-OUT uses the
+    // reservation APIs above so the target is actually enforced.
     public void NoteQueuedBytes(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
@@ -82,15 +134,77 @@ internal sealed class DeviceScheduler : IDisposable
         UpdateMax(ref _peakQueuedBytes, queued);
     }
 
-    public void NoteDequeuedBytes(int bytes)
+    public void NoteDequeuedBytes(int bytes) => ReleaseBacklog(bytes);
+
+    private async Task WaitForBacklogAsync(BacklogWaiter waiter, CancellationToken token)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-        var remaining = Interlocked.Add(ref _queuedBytes, -bytes);
-        if (remaining < 0)
+        try
         {
-            Interlocked.Add(ref _queuedBytes, bytes);
-            throw new InvalidOperationException("La cola física intentó liberar más bytes de los registrados.");
+            await waiter.Completion.Task.WaitAsync(token).ConfigureAwait(false);
         }
+        catch
+        {
+            List<BacklogWaiter>? ready;
+            lock (_backlogGate)
+            {
+                if (waiter.Granted)
+                {
+                    waiter.Granted = false;
+                    var remaining = Interlocked.Read(ref _queuedBytes) - waiter.Bytes;
+                    if (remaining < 0)
+                        throw new InvalidOperationException("Contabilidad de backlog inválida durante cancelación.");
+                    Interlocked.Exchange(ref _queuedBytes, remaining);
+                }
+                else
+                {
+                    waiter.Cancelled = true;
+                }
+                ready = PumpBacklogWaitersLocked();
+            }
+            CompleteBacklogWaiters(ready);
+            throw;
+        }
+    }
+
+    private bool CanReserveBacklogLocked(int bytes)
+    {
+        var queued = Interlocked.Read(ref _queuedBytes);
+        return queued + bytes <= BacklogTargetBytes || queued == 0;
+    }
+
+    private void ReserveBacklogLocked(int bytes)
+    {
+        var queued = Interlocked.Add(ref _queuedBytes, bytes);
+        UpdateMax(ref _peakQueuedBytes, queued);
+    }
+
+    private List<BacklogWaiter>? PumpBacklogWaitersLocked()
+    {
+        List<BacklogWaiter>? ready = null;
+        while (_backlogWaiters.Count > 0)
+        {
+            var waiter = _backlogWaiters.Peek();
+            if (waiter.Cancelled)
+            {
+                _backlogWaiters.Dequeue();
+                continue;
+            }
+            if (!CanReserveBacklogLocked(waiter.Bytes))
+                break;
+            _backlogWaiters.Dequeue();
+            ReserveBacklogLocked(waiter.Bytes);
+            waiter.Granted = true;
+            (ready ??= []).Add(waiter);
+        }
+        return ready;
+    }
+
+    private static void CompleteBacklogWaiters(List<BacklogWaiter>? ready)
+    {
+        if (ready is null)
+            return;
+        foreach (var waiter in ready)
+            waiter.Completion.TrySetResult();
     }
 
     private void ReleaseIo()
@@ -106,11 +220,21 @@ internal sealed class DeviceScheduler : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
+        List<BacklogWaiter> pending = [];
+        lock (_backlogGate)
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            while (_backlogWaiters.Count > 0)
+                pending.Add(_backlogWaiters.Dequeue());
+        }
+        foreach (var waiter in pending)
+            waiter.Completion.TrySetException(new ObjectDisposedException(nameof(DeviceScheduler)));
         _ioSlots.Dispose();
     }
+
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
     private static void UpdateMax(ref int target, int value)
     {
@@ -134,6 +258,14 @@ internal sealed class DeviceScheduler : IDisposable
                 return;
             current = observed;
         }
+    }
+
+    private sealed class BacklogWaiter(int bytes)
+    {
+        public int Bytes { get; } = bytes;
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Cancelled { get; set; }
+        public bool Granted { get; set; }
     }
 
     internal sealed class IoLease : IDisposable
