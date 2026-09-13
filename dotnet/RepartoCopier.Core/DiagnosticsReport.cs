@@ -50,6 +50,8 @@ public static class DiagnosticsReport
         AppendDuration(sb, "Commit", metrics.CommitTime);
         sb.Append("RecoveryEvents: ").AppendLine(metrics.RecoveryEvents.ToString(CultureInfo.InvariantCulture));
         AppendDuration(sb, "Recovery", metrics.RecoveryTime);
+        AppendWritePolicy(sb, "WriteThroughPolicy", metrics.WriteThroughPolicy);
+        AppendWritePolicy(sb, "BufferedPolicy", metrics.BufferedPolicy);
         AppendRate(sb, "VerifyRead", metrics.VerifyReadBytes, metrics.VerifyReadTime, metrics.VerifyReadBytesPerSecond);
         AppendRate(sb, "VerifyHash", metrics.VerifyHashBytes, metrics.VerifyHashTime, metrics.VerifyHashBytesPerSecond);
         AppendDuration(sb, "VerifyCpuWait", metrics.VerifyCpuWaitTime);
@@ -162,6 +164,20 @@ public static class DiagnosticsReport
                 .Append(": ")
                 .AppendLine(string.Join(" | ", group.DestinationRoots));
         }
+    }
+
+    private static void AppendWritePolicy(StringBuilder sb, string name, WritePolicyDiagnosticsSnapshot policy)
+    {
+        sb.Append(name).Append(": files=")
+            .Append(policy.Files.ToString(CultureInfo.InvariantCulture))
+            .Append(" | bytes=").Append(policy.WrittenBytes.ToString(CultureInfo.InvariantCulture))
+            .Append(" | writeRate=").Append(policy.WriteBytesPerSecond.ToString("0.###", CultureInfo.InvariantCulture))
+            .Append(" B/s | writeMs=").Append(policy.WriteTime.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture))
+            .Append(" | commits=").Append(policy.Commits.ToString(CultureInfo.InvariantCulture))
+            .Append(" | commitMs=").Append(policy.CommitTime.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture))
+            .Append(" | recoveryEvents=").Append(policy.RecoveryEvents.ToString(CultureInfo.InvariantCulture))
+            .Append(" | recoveryMs=").Append(policy.RecoveryTime.TotalMilliseconds.ToString("0.###", CultureInfo.InvariantCulture))
+            .AppendLine();
     }
 
     private static void AppendRate(StringBuilder sb, string name, long bytes, TimeSpan elapsed, double bytesPerSecond)
