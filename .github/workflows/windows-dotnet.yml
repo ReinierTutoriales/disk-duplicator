@@ -54,7 +54,7 @@ jobs:
         run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
 
       - name: Upload downloadable test build
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: RepartoCopier-main-win-x64
           path: artifact
