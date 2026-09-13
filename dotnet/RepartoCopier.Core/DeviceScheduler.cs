@@ -7,7 +7,8 @@ public sealed record DeviceIoSnapshot(
     int PeakOutstandingIo,
     long BacklogTargetBytes,
     long QueuedBytes,
-    long PeakQueuedBytes)
+    long PeakQueuedBytes,
+    DeviceIdentityConfidence IdentityConfidence = DeviceIdentityConfidence.Unknown)
 {
     public double BacklogPressure => BacklogTargetBytes <= 0
         ? 0
@@ -29,7 +30,11 @@ internal sealed class DeviceScheduler : IDisposable
     private long _peakQueuedBytes;
     private bool _disposed;
 
-    internal DeviceScheduler(string deviceId, int maxOutstandingIo, long backlogTargetBytes)
+    internal DeviceScheduler(
+        string deviceId,
+        int maxOutstandingIo,
+        long backlogTargetBytes,
+        DeviceIdentityConfidence identityConfidence = DeviceIdentityConfidence.Unknown)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxOutstandingIo);
@@ -38,12 +43,14 @@ internal sealed class DeviceScheduler : IDisposable
         DeviceId = deviceId;
         MaxOutstandingIo = maxOutstandingIo;
         BacklogTargetBytes = backlogTargetBytes;
+        IdentityConfidence = identityConfidence;
         _ioSlots = new SemaphoreSlim(maxOutstandingIo, maxOutstandingIo);
     }
 
     public string DeviceId { get; }
     public int MaxOutstandingIo { get; }
     public long BacklogTargetBytes { get; }
+    public DeviceIdentityConfidence IdentityConfidence { get; }
     public int OutstandingIo => Volatile.Read(ref _outstandingIo);
     public int PeakOutstandingIo => Volatile.Read(ref _peakOutstandingIo);
     public long QueuedBytes => Interlocked.Read(ref _queuedBytes);
@@ -56,7 +63,8 @@ internal sealed class DeviceScheduler : IDisposable
         PeakOutstandingIo,
         BacklogTargetBytes,
         QueuedBytes,
-        PeakQueuedBytes);
+        PeakQueuedBytes,
+        IdentityConfidence);
 
     public async ValueTask<IoLease> AcquireIoAsync(CancellationToken token)
     {
@@ -313,14 +321,19 @@ internal sealed class DeviceSchedulerMap : IDisposable
 
         foreach (var group in groups)
         {
-            var profiles = group.Select(StorageIoProfile.For).ToArray();
+            var materializedGroup = group.ToArray();
+            var profiles = materializedGroup.Select(StorageIoProfile.For).ToArray();
             var maxOutstanding = profiles.Min(profile => profile.RecommendedQueueDepth);
             var backlogTarget = profiles.Min(profile => profile.DeviceBacklogTargetBytes);
+            var confidence = (DeviceIdentityConfidence)materializedGroup
+                .Min(item => (int)StorageDeviceIdentity.ConfidenceFor(item));
 
-            if (source is not null && SharesPhysicalDevice(source, group.First()))
+            if (source is not null && SharesPhysicalDevice(source, materializedGroup[0]))
                 maxOutstanding = 1;
 
-            schedulers.Add(group.Key, new DeviceScheduler(group.Key, maxOutstanding, backlogTarget));
+            schedulers.Add(
+                group.Key,
+                new DeviceScheduler(group.Key, maxOutstanding, backlogTarget, confidence));
         }
 
         return new DeviceSchedulerMap(schedulers);
