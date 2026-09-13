@@ -42,6 +42,58 @@ public sealed class StorageTopologyTests
     }
 
     [TestMethod]
+    public void IdentityConfidenceIsExactWhenPhysicalDiskIsKnown()
+    {
+        var device = Device(@"E:\\copy", 4, 1);
+
+        Assert.AreEqual(
+            DeviceIdentityConfidence.Exact,
+            StorageDeviceIdentity.ConfidenceFor(device));
+    }
+
+    [TestMethod]
+    public void IdentityConfidenceIsPartialWhenOnlyVolumeIdentityIsKnown()
+    {
+        var device = new StorageDeviceInfo(
+            @"E:\\copy",
+            @"E:\",
+            null,
+            null,
+            "Unknown",
+            StorageMediaKind.Unknown,
+            null,
+            null,
+            null,
+            false,
+            "probe failed");
+
+        Assert.AreEqual(
+            DeviceIdentityConfidence.Partial,
+            StorageDeviceIdentity.ConfidenceFor(device));
+    }
+
+    [TestMethod]
+    public void IdentityConfidenceIsUnknownWithoutPhysicalOrVolumeIdentity()
+    {
+        var device = new StorageDeviceInfo(
+            "relative",
+            string.Empty,
+            null,
+            null,
+            "Unknown",
+            StorageMediaKind.Unknown,
+            null,
+            null,
+            null,
+            false,
+            "unsupported");
+
+        Assert.AreEqual(
+            DeviceIdentityConfidence.Unknown,
+            StorageDeviceIdentity.ConfidenceFor(device));
+    }
+
+    [TestMethod]
     public void InspectDestinationsReturnsOneEntryPerDestination()
     {
         var root = Path.GetPathRoot(Path.GetTempPath());
