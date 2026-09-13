@@ -22,6 +22,7 @@ public sealed record DeviceIoSnapshot(
 internal sealed class DeviceScheduler : IDisposable
 {
     private readonly SemaphoreSlim _ioSlots;
+    private readonly SemaphoreSlim _pairGate = new(1, 1);
     private readonly object _backlogGate = new();
     private readonly Queue<BacklogWaiter> _backlogWaiters = new();
     private int _outstandingIo;
@@ -79,6 +80,29 @@ internal sealed class DeviceScheduler : IDisposable
         var outstanding = Interlocked.Increment(ref _outstandingIo);
         UpdateMax(ref _peakOutstandingIo, outstanding);
         return new IoLease(this);
+    }
+
+    public async ValueTask<IoPairLease> AcquireIoPairAsync(CancellationToken token)
+    {
+        if (MaxOutstandingIo < 2)
+            throw new InvalidOperationException("El scheduler no permite adquirir dos operaciones de I/O simultáneas.");
+
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _pairGate.WaitAsync(token).ConfigureAwait(false);
+        IoLease? first = null;
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            first = await AcquireIoAsync(token).ConfigureAwait(false);
+            var second = await AcquireIoAsync(token).ConfigureAwait(false);
+            return new IoPairLease(this, first, second);
+        }
+        catch
+        {
+            first?.Dispose();
+            _pairGate.Release();
+            throw;
+        }
     }
 
     /// <summary>
@@ -226,6 +250,13 @@ internal sealed class DeviceScheduler : IDisposable
         _ioSlots.Release();
     }
 
+    private void ReleasePair(IoLease first, IoLease second)
+    {
+        second.Dispose();
+        first.Dispose();
+        _pairGate.Release();
+    }
+
     public void Dispose()
     {
         List<BacklogWaiter> pending = [];
@@ -239,6 +270,7 @@ internal sealed class DeviceScheduler : IDisposable
         }
         foreach (var waiter in pending)
             waiter.Completion.TrySetException(new ObjectDisposedException(nameof(DeviceScheduler)));
+        _pairGate.Dispose();
         _ioSlots.Dispose();
     }
 
@@ -286,6 +318,32 @@ internal sealed class DeviceScheduler : IDisposable
         {
             var owner = Interlocked.Exchange(ref _owner, null);
             owner?.ReleaseIo();
+        }
+    }
+
+    internal sealed class IoPairLease : IDisposable
+    {
+        private DeviceScheduler? _owner;
+        private IoLease? _first;
+        private IoLease? _second;
+
+        internal IoPairLease(DeviceScheduler owner, IoLease first, IoLease second)
+        {
+            _owner = owner;
+            _first = first;
+            _second = second;
+        }
+
+        public void Dispose()
+        {
+            var owner = Interlocked.Exchange(ref _owner, null);
+            if (owner is null)
+                return;
+            var first = Interlocked.Exchange(ref _first, null)
+                ?? throw new InvalidOperationException("La reserva QD2 perdió su primer lease.");
+            var second = Interlocked.Exchange(ref _second, null)
+                ?? throw new InvalidOperationException("La reserva QD2 perdió su segundo lease.");
+            owner.ReleasePair(first, second);
         }
     }
 }
