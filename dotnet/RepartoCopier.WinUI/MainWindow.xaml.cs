@@ -317,7 +317,7 @@ public sealed partial class MainWindow : Window
             .ToArray();
         var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
         var filesDone = activeFileSnapshots.Length == 0
-            ? snapshots.Select(item => item.FilesDone).DefaultIfEmpty(0).Max()
+            ? snapshots.Select(item => item.FilesDone).DefaultIfEmpty(0UL).Max()
             : activeFileSnapshots.Min(item => item.FilesDone);
         FilesMetricText.Text = $"{filesDone}/{filesTotal}";
 
