@@ -2,14 +2,13 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Selects the bounded buffered-write queue depth for one destination.
-/// This is intentionally conservative: QD2 is enabled only for large local
-/// SSD/NVMe writes on an exclusive physical device scheduler. USB SSDs must
-/// first qualify for QD2 through StorageIoProfile (fixed, TRIM-capable and
-/// exact physical-device identity).
+/// QD2 is enabled only for medium/large local SSD writes on an exclusive
+/// physical-device scheduler. USB SSDs must first qualify through
+/// StorageIoProfile (fixed, TRIM-capable and exact physical-device identity).
 /// </summary>
 public static class StorageWritePolicy
 {
-    public const int ParallelFileThresholdBytes = 16 * 1024 * 1024;
+    public const int ParallelFileThresholdBytes = 8 * 1024 * 1024;
     public const int MinimumParallelSliceBytes = 1024 * 1024;
 
     public static int BufferedLargeWriteQueueDepth(
