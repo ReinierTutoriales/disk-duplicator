@@ -129,4 +129,33 @@ public sealed class UnificationContractTests
         CollectionAssert.Contains(currentProperties, "DirectRequested");
         CollectionAssert.DoesNotContain(currentProperties, "PreferDirect");
     }
+
+    [TestMethod]
+    public void PayloadMessagesStayOutsideControlBacklogBudgetArchitecture()
+    {
+        var fanout = typeof(CopyEngine).GetNestedType("FanoutMessage", BindingFlags.NonPublic);
+        var control = typeof(CopyEngine).GetNestedType("ControlMessage", BindingFlags.NonPublic);
+        var begin = typeof(CopyEngine).GetNestedType("BeginMessage", BindingFlags.NonPublic);
+        var data = typeof(CopyEngine).GetNestedType("DataMessage", BindingFlags.NonPublic);
+        var end = typeof(CopyEngine).GetNestedType("EndMessage", BindingFlags.NonPublic);
+
+        Assert.IsNotNull(fanout);
+        Assert.IsNotNull(control);
+        Assert.IsNotNull(begin);
+        Assert.IsNotNull(data);
+        Assert.IsNotNull(end);
+        Assert.AreEqual(fanout, control.BaseType);
+        Assert.AreEqual(control, begin.BaseType);
+        Assert.AreEqual(fanout, data.BaseType);
+        Assert.AreEqual(control, end.BaseType);
+
+        var deliveryMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Where(method => method.Name is "DeliverAsync" or "DeliverOneAsync")
+            .ToArray();
+        Assert.IsGreaterThan(0, deliveryMethods.Length);
+        Assert.IsFalse(deliveryMethods
+            .SelectMany(method => method.GetParameters())
+            .Any(parameter => string.Equals(parameter.Name, "countsData", StringComparison.Ordinal)));
+    }
 }
