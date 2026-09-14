@@ -7,14 +7,16 @@ namespace RepartoCopier.Core.Tests;
 public sealed class DirectIoDestinationWriterTests
 {
     [TestMethod]
-    public void ExactLocalHddAndSsdAreEligibleForLargeDirectWrites()
+    public void ExactLocalHddAndSsdAreEligibleWithoutFixedFileSizeFloor()
     {
         var hdd = Device("SATA", StorageMediaKind.Rotational);
         var ssd = Device("NVMe", StorageMediaKind.SolidState);
 
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(hdd, 64L * 1024 * 1024));
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 64L * 1024 * 1024));
-        Assert.IsFalse(DirectIoDestinationWriter.IsEligible(ssd, DirectIoDestinationWriter.MinimumFileSize - 1L));
+        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 4096));
+        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 1));
+        Assert.IsFalse(DirectIoDestinationWriter.IsEligible(ssd, 0));
     }
 
     [TestMethod]
