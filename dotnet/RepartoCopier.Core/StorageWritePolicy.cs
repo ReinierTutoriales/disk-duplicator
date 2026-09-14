@@ -42,13 +42,4 @@ public static class StorageWritePolicy
                 payloadDepth,
                 Math.Min(profile.RecommendedQueueDepth, schedulerMaxOutstandingIo)));
     }
-
-    // Temporary compatibility during the same writer migration. This member is
-    // removed once CopyEngine is switched to LargeWriteQueueDepth.
-    internal static int BufferedLargeWriteQueueDepth(
-        StorageDeviceInfo device,
-        int schedulerMaxOutstandingIo,
-        long fileSize,
-        int dataLength) =>
-        LargeWriteQueueDepth(device, schedulerMaxOutstandingIo, fileSize, dataLength);
 }
