@@ -17,7 +17,7 @@ public sealed class DeviceSchedulerTests
 
         Assert.HasCount(1, map.Schedulers);
         Assert.AreSame(map.For(first), map.For(second));
-        Assert.AreEqual(2, map.For(first).MaxOutstandingIo);
+        Assert.AreEqual(8, map.For(first).MaxOutstandingIo);
         Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(first).IdentityConfidence);
     }
 
@@ -63,81 +63,60 @@ public sealed class DeviceSchedulerTests
         using var scheduler = new DeviceScheduler("PhysicalDisk9", 1, 32L * 1024 * 1024);
         using var first = await scheduler.AcquireIoAsync(CancellationToken.None);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
         await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () =>
         {
             using var _ = await scheduler.AcquireIoAsync(cancellation.Token);
         });
+
         Assert.AreEqual(1, scheduler.OutstandingIo);
         Assert.AreEqual(1, scheduler.PeakOutstandingIo);
     }
 
     [TestMethod]
-    public async Task IoPairAcquisitionIsAtomicAndNeverHoldsOneSlotWhileWaiting()
+    public async Task IndependentIoLeasesScaleToConfiguredQueueDepth()
     {
-        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
-        using var single = await scheduler.AcquireIoAsync(CancellationToken.None);
-        Assert.AreEqual(1, scheduler.OutstandingIo);
+        using var scheduler = new DeviceScheduler("PhysicalDisk10", 4, 32L * 1024 * 1024);
+        var leases = new List<DeviceScheduler.IoLease>();
+        try
+        {
+            for (var index = 0; index < 4; index++)
+                leases.Add(await scheduler.AcquireIoAsync(CancellationToken.None));
 
-        var pairTask = scheduler.AcquireIoPairAsync(CancellationToken.None).AsTask();
-        await Task.Delay(50);
+            Assert.AreEqual(4, scheduler.OutstandingIo);
+            Assert.AreEqual(4, scheduler.PeakOutstandingIo);
 
-        Assert.IsFalse(pairTask.IsCompleted);
-        Assert.AreEqual(
-            1,
-            scheduler.OutstandingIo,
-            "Una reserva QD2 pendiente no puede apropiarse de un solo slot físico mientras espera el segundo.");
+            var fifthTask = scheduler.AcquireIoAsync(CancellationToken.None).AsTask();
+            await Task.Delay(50);
+            Assert.IsFalse(fifthTask.IsCompleted);
 
-        single.Dispose();
-        using var pair = await pairTask.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.AreEqual(2, scheduler.OutstandingIo);
-        Assert.AreEqual(2, scheduler.PeakOutstandingIo);
+            leases[0].Dispose();
+            leases.RemoveAt(0);
+            using var fifth = await fifthTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.AreEqual(4, scheduler.OutstandingIo);
+        }
+        finally
+        {
+            foreach (var lease in leases)
+                lease.Dispose();
+        }
     }
 
     [TestMethod]
-    public async Task CancelledAtomicPairNeverLeaksPhysicalIoCapacity()
+    public async Task CancelledIoWaitNeverLeaksPhysicalCapacity()
     {
-        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
-        using var single = await scheduler.AcquireIoAsync(CancellationToken.None);
+        using var scheduler = new DeviceScheduler("PhysicalDisk11", 2, 32L * 1024 * 1024);
+        using var first = await scheduler.AcquireIoAsync(CancellationToken.None);
+        using var second = await scheduler.AcquireIoAsync(CancellationToken.None);
         using var cancellation = new CancellationTokenSource();
 
-        var pairTask = scheduler.AcquireIoPairAsync(cancellation.Token).AsTask();
+        var waiting = scheduler.AcquireIoAsync(cancellation.Token).AsTask();
         await Task.Delay(50);
         cancellation.Cancel();
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await pairTask);
-        Assert.AreEqual(1, scheduler.OutstandingIo);
-
-        single.Dispose();
-        Assert.AreEqual(0, scheduler.OutstandingIo);
-
-        using var recoveredPair = await scheduler.AcquireIoPairAsync(CancellationToken.None);
-        Assert.AreEqual(2, scheduler.OutstandingIo);
-    }
-
-    [TestMethod]
-    public async Task IoPairAcquisitionSerializesCompetingQd2Callers()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
-        using var firstPair = await scheduler.AcquireIoPairAsync(CancellationToken.None);
-        Assert.AreEqual(2, scheduler.OutstandingIo);
-        var secondTask = scheduler.AcquireIoPairAsync(CancellationToken.None).AsTask();
-        await Task.Delay(50);
-        Assert.IsFalse(secondTask.IsCompleted);
-        Assert.AreEqual(2, scheduler.OutstandingIo);
-        firstPair.Dispose();
-        using var secondPair = await secondTask.WaitAsync(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await waiting);
         Assert.AreEqual(2, scheduler.OutstandingIo);
         Assert.AreEqual(2, scheduler.PeakOutstandingIo);
-    }
-
-    [TestMethod]
-    public async Task IoPairRequiresAtLeastTwoPhysicalSlots()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDisk11", 1, 32L * 1024 * 1024);
-        await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () =>
-        {
-            using var _ = await scheduler.AcquireIoPairAsync(CancellationToken.None);
-        });
     }
 
     [TestMethod]
@@ -145,15 +124,18 @@ public sealed class DeviceSchedulerTests
     {
         const int block = 8 * 1024 * 1024;
         using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, block);
+
         Assert.IsTrue(scheduler.TryReserveBacklog(block));
         Assert.IsFalse(scheduler.TryReserveBacklog(block));
         var overflow = scheduler.ReserveBacklogAsync(block, CancellationToken.None);
         Assert.IsTrue(overflow.IsCompletedSuccessfully, "Una rama sobre el soft watermark no puede bloquear el productor FAN-OUT.");
         await overflow;
+
         var snapshot = scheduler.Snapshot();
         Assert.AreEqual(2L * block, snapshot.QueuedBytes);
         Assert.AreEqual(2L * block, snapshot.PeakQueuedBytes);
         Assert.AreEqual(2.0, snapshot.BacklogPressure, 0.000001);
+
         scheduler.ReleaseBacklog(block);
         scheduler.ReleaseBacklog(block);
         Assert.AreEqual(0, scheduler.QueuedBytes);
@@ -163,6 +145,7 @@ public sealed class DeviceSchedulerTests
     public void EmptyQueueStillAdmitsOneBlockLargerThanSoftTarget()
     {
         using var scheduler = new DeviceScheduler("PhysicalDisk8", 1, 4L * 1024 * 1024);
+
         Assert.IsTrue(scheduler.TryReserveBacklog(16 * 1024 * 1024));
         Assert.IsFalse(scheduler.TryReserveBacklog(1));
         scheduler.ReleaseBacklog(16 * 1024 * 1024);
@@ -175,8 +158,10 @@ public sealed class DeviceSchedulerTests
         using var scheduler = new DeviceScheduler("PhysicalDisk12", 1, 8L * 1024 * 1024);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
+
         await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () =>
             await scheduler.ReserveBacklogAsync(8 * 1024 * 1024, cancellation.Token));
+
         Assert.AreEqual(0, scheduler.QueuedBytes);
         Assert.AreEqual(0, scheduler.PeakQueuedBytes);
     }
