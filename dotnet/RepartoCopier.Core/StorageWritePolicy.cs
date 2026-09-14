@@ -4,8 +4,8 @@ namespace RepartoCopier.Core;
 /// Selects useful destination write concurrency from the adaptive scheduler's
 /// exploration window and the current payload size. Hardware classes choose the
 /// starting depth only; they do not cap future concurrency. There is no fixed
-/// file-size threshold: the payload/alignment and adaptive physical scheduler are
-/// the practical bounds.
+/// file-size or identity-confidence threshold: local payload size and the
+/// adaptive physical scheduler are the practical bounds.
 /// </summary>
 public static class StorageWritePolicy
 {
@@ -24,8 +24,7 @@ public static class StorageWritePolicy
 
         if (dataLength < 2 * MinimumParallelSliceBytes ||
             schedulerExplorationDepth < 2 ||
-            device.IsNetwork ||
-            StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact)
+            device.IsNetwork)
         {
             return 1;
         }
