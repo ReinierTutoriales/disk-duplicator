@@ -252,6 +252,7 @@ public static class CopyEngine
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
         var bufferBudget = AdaptiveByteBudget.CreateForSystem();
+        var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         var pipeline = new PipelineGovernor(bufferBudget, BlockSize);
         job.Telemetry.AttachPipelineGovernor(pipeline.Snapshot);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
@@ -273,7 +274,8 @@ public static class CopyEngine
                     index,
                     progress[index],
                     copy.DestinationDevices[index],
-                    deviceSchedulers.For(copy.DestinationDevices[index])))
+                    deviceSchedulers.For(copy.DestinationDevices[index]),
+                    controlBudget))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -992,13 +994,35 @@ public static class CopyEngine
         if (!worker.IsActive)
             return;
 
-        worker.IncrementQueueDepth();
-        if (worker.Channel.Writer.TryWrite(message))
-            return;
+        var reservationBytes = AdaptiveControlByteBudget.EstimatedDeliveryBytes;
+        await worker.ControlBudget.AcquireAsync(reservationBytes, job.Token).ConfigureAwait(false);
+        var delivery = new ControlDelivery(message, worker.ControlBudget, reservationBytes);
+        var queueOwned = false;
+        try
+        {
+            if (!worker.IsActive)
+                return;
 
-        worker.DecrementQueueDepth();
-        if (worker.IsActive)
-            worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+            worker.IncrementQueueDepth();
+            queueOwned = true;
+            if (worker.Channel.Writer.TryWrite(delivery))
+            {
+                delivery = null;
+                queueOwned = false;
+                return;
+            }
+
+            worker.DecrementQueueDepth();
+            queueOwned = false;
+            if (worker.IsActive)
+                worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+        }
+        finally
+        {
+            if (queueOwned)
+                worker.DecrementQueueDepth();
+            delivery?.ReleaseBudget();
+        }
     }
 
     private static async Task WriterLoopAsync(
@@ -1014,7 +1038,9 @@ public static class CopyEngine
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
                 worker.DecrementQueueDepth();
-                var data = message as DataMessage;
+                var controlDelivery = message as ControlDelivery;
+                var effectiveMessage = controlDelivery?.Message ?? message;
+                var data = effectiveMessage as DataMessage;
                 if (data is not null)
                     worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
                 try
@@ -1024,7 +1050,7 @@ public static class CopyEngine
 
                     job.Token.ThrowIfCancellationRequested();
                     await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-                    switch (message)
+                    switch (effectiveMessage)
                     {
                         case BeginMessage begin:
                             current = BeginFile(worker, begin.Entry);
@@ -1069,6 +1095,7 @@ public static class CopyEngine
                 finally
                 {
                     data?.Block.Release();
+                    controlDelivery?.ReleaseBudget();
                 }
             }
         }
@@ -1531,13 +1558,21 @@ public static class CopyEngine
             worker.DecrementQueueDepth();
             if (message is DataMessage data)
                 worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
-            ReleaseIfData(message);
+            ReleaseQueuedMessage(message);
         }
     }
 
-    private static void ReleaseIfData(FanoutMessage message)
+    private static void ReleaseQueuedMessage(FanoutMessage message)
     {
-        if (message is DataMessage data) data.Block.Release();
+        switch (message)
+        {
+            case DataMessage data:
+                data.Block.Release();
+                break;
+            case ControlDelivery control:
+                control.ReleaseBudget();
+                break;
+        }
     }
 
     private static void TryDelete(string path)
@@ -1607,6 +1642,31 @@ public static class CopyEngine
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
+
+    private sealed class ControlDelivery : FanoutMessage
+    {
+        private AdaptiveControlByteBudget? _budget;
+        private readonly int _reservedBytes;
+
+        internal ControlDelivery(
+            ControlMessage message,
+            AdaptiveControlByteBudget budget,
+            int reservedBytes)
+        {
+            Message = message ?? throw new ArgumentNullException(nameof(message));
+            _budget = budget ?? throw new ArgumentNullException(nameof(budget));
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(reservedBytes);
+            _reservedBytes = reservedBytes;
+        }
+
+        internal ControlMessage Message { get; }
+
+        internal void ReleaseBudget()
+        {
+            var budget = Interlocked.Exchange(ref _budget, null);
+            budget?.Release(_reservedBytes);
+        }
+    }
 
     internal sealed class SharedBlock
     {
@@ -2253,13 +2313,15 @@ public static class CopyEngine
             int slot,
             DestinationProgress progress,
             StorageDeviceInfo device,
-            DeviceScheduler deviceScheduler)
+            DeviceScheduler deviceScheduler,
+            AdaptiveControlByteBudget controlBudget)
         {
             Root = root;
             Slot = slot;
             Progress = progress;
             Device = device;
             DeviceScheduler = deviceScheduler;
+            ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2273,6 +2335,7 @@ public static class CopyEngine
         public DestinationProgress Progress { get; }
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
+        internal AdaptiveControlByteBudget ControlBudget { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
