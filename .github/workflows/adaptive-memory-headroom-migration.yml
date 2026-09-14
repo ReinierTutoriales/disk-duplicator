@@ -1,0 +1,20 @@
+name: Adaptive memory headroom migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/adaptive-memory-headroom-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Remove fixed RAM reserve and growth step
+        shell: pwsh
+        run: ./tools/patch-adaptive-memory-headroom.ps1
