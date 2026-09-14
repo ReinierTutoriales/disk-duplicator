@@ -1299,6 +1299,7 @@ public static class CopyEngine
         DestinationProgress[] progress,
         CopyJob job)
     {
+        var readBudget = VerificationReadBudget.CreateForSystem();
         var activeSlots = Enumerable.Range(0, workers.Length)
             .Where(slot => workers[slot].IsActive)
             .ToArray();
@@ -1342,6 +1343,7 @@ public static class CopyEngine
                     copy.DestinationDevices[slot],
                     workers[slot].DeviceScheduler,
                     plan,
+                    readBudget,
                     job,
                     progress[slot]).ConfigureAwait(false);
                 if (!valid)
@@ -1352,7 +1354,14 @@ public static class CopyEngine
                 progress[slot].MarkVerifyFileDone();
             }
         }).ToArray();
-        await Task.WhenAll(tasks).ConfigureAwait(false);
+        try
+        {
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        finally
+        {
+            job.Telemetry.RecordVerificationBufferBudget(readBudget.LimitBytes, readBudget.PeakUsedBytes);
+        }
     }
 
     private static async Task<bool[][]> BuildVerifiedSkipMasksAsync(
