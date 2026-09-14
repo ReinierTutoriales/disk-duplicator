@@ -28,10 +28,9 @@ public sealed record DeviceIoSnapshot(
 /// </summary>
 internal sealed class DeviceScheduler : IDisposable
 {
-    private readonly object _ioGate = new();
-    private readonly Queue<IoWaiter> _ioWaiters = new();
+    private readonly SemaphoreSlim _ioSlots;
+    private readonly SemaphoreSlim _pairGate = new(1, 1);
     private readonly object _backlogGate = new();
-    private int _availableIo;
     private int _outstandingIo;
     private int _peakOutstandingIo;
     private long _queuedBytes;
@@ -52,7 +51,7 @@ internal sealed class DeviceScheduler : IDisposable
         MaxOutstandingIo = maxOutstandingIo;
         BacklogTargetBytes = backlogTargetBytes;
         IdentityConfidence = identityConfidence;
-        _availableIo = maxOutstandingIo;
+        _ioSlots = new SemaphoreSlim(maxOutstandingIo, maxOutstandingIo);
     }
 
     public string DeviceId { get; }
@@ -76,7 +75,16 @@ internal sealed class DeviceScheduler : IDisposable
 
     public async ValueTask<IoLease> AcquireIoAsync(CancellationToken token)
     {
-        await AcquireIoSlotsAsync(1, token).ConfigureAwait(false);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _ioSlots.WaitAsync(token).ConfigureAwait(false);
+        if (_disposed)
+        {
+            _ioSlots.Release();
+            throw new ObjectDisposedException(nameof(DeviceScheduler));
+        }
+
+        var outstanding = Interlocked.Increment(ref _outstandingIo);
+        UpdateMax(ref _peakOutstandingIo, outstanding);
         return new IoLease(this);
     }
 
@@ -85,122 +93,24 @@ internal sealed class DeviceScheduler : IDisposable
         if (MaxOutstandingIo < 2)
             throw new InvalidOperationException("El scheduler no permite adquirir dos operaciones de I/O simultáneas.");
 
-        await AcquireIoSlotsAsync(2, token).ConfigureAwait(false);
-        return new IoPairLease(this);
-    }
-
-    private ValueTask AcquireIoSlotsAsync(int slots, CancellationToken token)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(slots);
-        if (slots > MaxOutstandingIo)
-            throw new InvalidOperationException($"El scheduler no permite adquirir {slots} operaciones de I/O simultáneas.");
-        token.ThrowIfCancellationRequested();
-
-        lock (_ioGate)
-        {
-            ThrowIfDisposed();
-            if (_ioWaiters.Count == 0 && _availableIo >= slots)
-            {
-                GrantIoSlotsLocked(slots);
-                return ValueTask.CompletedTask;
-            }
-
-            var waiter = new IoWaiter(slots);
-            _ioWaiters.Enqueue(waiter);
-            return new ValueTask(WaitForIoAsync(waiter, token));
-        }
-    }
-
-    private async Task WaitForIoAsync(IoWaiter waiter, CancellationToken token)
-    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _pairGate.WaitAsync(token).ConfigureAwait(false);
+        IoLease? first = null;
         try
         {
-            await waiter.Completion.Task.WaitAsync(token).ConfigureAwait(false);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            first = await AcquireIoAsync(token).ConfigureAwait(false);
+            var second = await AcquireIoAsync(token).ConfigureAwait(false);
+            return new IoPairLease(this, first, second);
         }
         catch
         {
-            List<IoWaiter>? ready;
-            lock (_ioGate)
-            {
-                if (waiter.Granted)
-                {
-                    waiter.Granted = false;
-                    ReleaseIoSlotsLocked(waiter.Slots);
-                }
-                else
-                {
-                    waiter.Cancelled = true;
-                }
-                ready = PumpIoWaitersLocked();
-            }
-            CompleteIoWaiters(ready);
+            first?.Dispose();
+            _pairGate.Release();
             throw;
         }
     }
 
-    private void GrantIoSlotsLocked(int slots)
-    {
-        if (_availableIo < slots)
-            throw new InvalidOperationException("El scheduler intentó conceder más I/O del disponible.");
-        _availableIo -= slots;
-        _outstandingIo += slots;
-        UpdateMax(ref _peakOutstandingIo, _outstandingIo);
-    }
-
-    private void ReleaseIo(int slots)
-    {
-        List<IoWaiter>? ready;
-        lock (_ioGate)
-        {
-            ReleaseIoSlotsLocked(slots);
-            ready = PumpIoWaitersLocked();
-        }
-        CompleteIoWaiters(ready);
-    }
-
-    private void ReleaseIoSlotsLocked(int slots)
-    {
-        if (slots <= 0 || _outstandingIo < slots || _availableIo + slots > MaxOutstandingIo)
-            throw new InvalidOperationException("La contabilidad de I/O físico quedó inválida.");
-        _outstandingIo -= slots;
-        _availableIo += slots;
-    }
-
-    private List<IoWaiter>? PumpIoWaitersLocked()
-    {
-        List<IoWaiter>? ready = null;
-        while (_ioWaiters.Count > 0)
-        {
-            var waiter = _ioWaiters.Peek();
-            if (waiter.Cancelled)
-            {
-                _ioWaiters.Dequeue();
-                continue;
-            }
-            if (_availableIo < waiter.Slots)
-                break;
-
-            _ioWaiters.Dequeue();
-            GrantIoSlotsLocked(waiter.Slots);
-            waiter.Granted = true;
-            (ready ??= []).Add(waiter);
-        }
-        return ready;
-    }
-
-    private static void CompleteIoWaiters(List<IoWaiter>? ready)
-    {
-        if (ready is null)
-            return;
-        foreach (var waiter in ready)
-            waiter.Completion.TrySetResult();
-    }
-
-    /// <summary>
-    /// Reserves backlog immediately while the branch remains at or below its soft
-    /// target. FAN-OUT calls this first so branches under normal pressure are
-    /// admitted before overflowed branches.
-    /// </summary>
     public bool TryReserveBacklog(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
@@ -215,13 +125,6 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    /// <summary>
-    /// Admits a branch above its soft backlog target without waiting for that
-    /// branch to drain. This is intentional: a per-device queue watermark must
-    /// not become global FAN-OUT backpressure. AdaptiveByteBudget remains the hard
-    /// shared-payload memory ceiling and physical I/O is still bounded by
-    /// AcquireIoAsync/AcquireIoPairAsync.
-    /// </summary>
     public ValueTask ReserveBacklogAsync(int bytes, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
@@ -252,27 +155,34 @@ internal sealed class DeviceScheduler : IDisposable
         UpdateMax(ref _peakQueuedBytes, queued);
     }
 
+    private void ReleaseIo()
+    {
+        var outstanding = Interlocked.Decrement(ref _outstandingIo);
+        if (outstanding < 0)
+        {
+            Interlocked.Increment(ref _outstandingIo);
+            throw new InvalidOperationException("La contabilidad de I/O físico quedó negativa.");
+        }
+        _ioSlots.Release();
+    }
+
+    private void ReleasePair(IoLease first, IoLease second)
+    {
+        second.Dispose();
+        first.Dispose();
+        _pairGate.Release();
+    }
+
     public void Dispose()
     {
-        List<IoWaiter>? pending = null;
-        lock (_ioGate)
+        lock (_backlogGate)
         {
             if (_disposed)
                 return;
             _disposed = true;
-            while (_ioWaiters.Count > 0)
-            {
-                var waiter = _ioWaiters.Dequeue();
-                if (!waiter.Cancelled && !waiter.Granted)
-                    (pending ??= []).Add(waiter);
-            }
         }
-
-        if (pending is not null)
-        {
-            foreach (var waiter in pending)
-                waiter.Completion.TrySetException(new ObjectDisposedException(nameof(DeviceScheduler)));
-        }
+        _pairGate.Dispose();
+        _ioSlots.Dispose();
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
@@ -301,14 +211,6 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    private sealed class IoWaiter(int slots)
-    {
-        public int Slots { get; } = slots;
-        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public bool Cancelled { get; set; }
-        public bool Granted { get; set; }
-    }
-
     internal sealed class IoLease : IDisposable
     {
         private DeviceScheduler? _owner;
@@ -318,20 +220,33 @@ internal sealed class DeviceScheduler : IDisposable
         public void Dispose()
         {
             var owner = Interlocked.Exchange(ref _owner, null);
-            owner?.ReleaseIo(1);
+            owner?.ReleaseIo();
         }
     }
 
     internal sealed class IoPairLease : IDisposable
     {
         private DeviceScheduler? _owner;
+        private IoLease? _first;
+        private IoLease? _second;
 
-        internal IoPairLease(DeviceScheduler owner) => _owner = owner;
+        internal IoPairLease(DeviceScheduler owner, IoLease first, IoLease second)
+        {
+            _owner = owner;
+            _first = first;
+            _second = second;
+        }
 
         public void Dispose()
         {
             var owner = Interlocked.Exchange(ref _owner, null);
-            owner?.ReleaseIo(2);
+            if (owner is null)
+                return;
+            var first = Interlocked.Exchange(ref _first, null)
+                ?? throw new InvalidOperationException("La reserva QD2 perdió su primer lease.");
+            var second = Interlocked.Exchange(ref _second, null)
+                ?? throw new InvalidOperationException("La reserva QD2 perdió su segundo lease.");
+            owner.ReleasePair(first, second);
         }
     }
 }
