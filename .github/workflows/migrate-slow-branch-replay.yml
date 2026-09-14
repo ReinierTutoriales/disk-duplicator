@@ -29,6 +29,20 @@ jobs:
       - name: Apply slow branch replay
         shell: pwsh
         run: ./tools/patch-slow-branch-replay.ps1
+      - name: Normalize generated multiline replacements
+        shell: pwsh
+        run: |
+          $literal = [string][char]96 + 'r' + [char]96 + 'n'
+          $newline = "`r`n"
+          foreach ($path in @(
+            'dotnet/RepartoCopier.Core/CopyEngine.cs',
+            'dotnet/RepartoCopier.Core/CopyTelemetry.cs'
+          )) {
+            $content = Get-Content -LiteralPath $path -Raw
+            $content = $content.Replace($literal, $newline)
+            Set-Content -LiteralPath $path -Value $content -Encoding utf8
+          }
+          git diff --check
       - name: Core tests
         shell: pwsh
         run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
