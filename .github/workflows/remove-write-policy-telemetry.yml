@@ -1,0 +1,20 @@
+name: Remove write policy telemetry
+
+on:
+  push:
+    paths:
+      - '.github/workflows/remove-write-policy-telemetry.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Remove obsolete write-through telemetry
+        shell: pwsh
+        run: ./tools/patch-remove-write-policy-telemetry.ps1
