@@ -1,0 +1,46 @@
+name: Migrate sequential block writes
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tools/patch-sequential-block-writes.ps1'
+      - '.github/workflows/migrate-sequential-block-writes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Rebase on latest main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+      - name: Patch sequential block writes
+        shell: pwsh
+        run: ./tools/patch-sequential-block-writes.ps1
+      - name: Core tests
+        shell: pwsh
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
+      - name: WinUI release build
+        shell: pwsh
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -p:Platform=x64
+      - name: Commit production migration and cleanup
+        shell: pwsh
+        run: |
+          git rm tools/patch-sequential-block-writes.ps1 .github/workflows/migrate-sequential-block-writes.yml
+          git add dotnet
+          git status --short
+          git commit -m "perf: preserve full fanout blocks on destination writes"
+          git pull --rebase origin main
+          git push origin main
