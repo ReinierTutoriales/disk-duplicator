@@ -1,0 +1,91 @@
+name: One-time runtime unification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-unify-runtime.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  unify-test-commit:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Unify automatic verification and logo layout
+        shell: pwsh
+        run: |
+          $engine = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $text = Get-Content $engine -Raw
+          $old = 'Verify: false,'
+          $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
+          if ($count -ne 2) { throw "Expected exactly 2 default Verify:false entries, found $count" }
+          $text = $text.Replace($old, 'Verify: true,')
+          Set-Content $engine $text -NoNewline -Encoding utf8
+
+          $policy = 'dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs'
+          $text = Get-Content $policy -Raw
+          $text = $text.Replace('Targets are intentionally expressed as multiples of the 16 MiB large-file', 'Targets are intentionally expressed as multiples of the 32 MiB large-file')
+          $text = $text.Replace('64L * MiB;  // 4 x 16 MiB', '64L * MiB;  // 2 x 32 MiB')
+          $text = $text.Replace('128L * MiB;   // 8 x 16 MiB', '128L * MiB;   // 4 x 32 MiB')
+          $text = $text.Replace('256L * MiB;       // 16 x 16 MiB', '256L * MiB;       // 8 x 32 MiB')
+          $text = $text.Replace('512L * MiB;         // 32 x 16 MiB', '512L * MiB;         // 16 x 32 MiB')
+          Set-Content $policy $text -NoNewline -Encoding utf8
+
+          $xaml = 'dotnet/RepartoCopier.WinUI/MainWindow.xaml'
+          $text = Get-Content $xaml -Raw
+          $oldLogo = @'
+            <Image x:Name="LogoImage"
+                   Width="54"
+                   Height="54"
+                   Source="ms-appx:///Assets/AppLogo.png"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center" />
+'@
+          $newLogo = @'
+            <Image x:Name="LogoImage"
+                   Width="48"
+                   Height="48"
+                   Margin="3"
+                   Source="ms-appx:///Assets/AppLogo.png"
+                   Stretch="Uniform"
+                   UseLayoutRounding="True"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center" />
+'@
+          if (-not $text.Contains($oldLogo)) { throw 'LogoImage XAML block did not match the expected baseline.' }
+          $text = $text.Replace($oldLogo, $newLogo)
+          Set-Content $xaml $text -NoNewline -Encoding utf8
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Commit unified runtime state
+        shell: pwsh
+        run: |
+          git config user.name "ReinierTutoriales"
+          git config user.email "86568548+ReinierTutoriales@users.noreply.github.com"
+          git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs dotnet/RepartoCopier.WinUI/MainWindow.xaml
+          if (git diff --cached --quiet) { throw 'No product changes were produced.' }
+          git commit -m "refactor: unify automatic verification and crisp logo layout"
+          git push origin HEAD:main
