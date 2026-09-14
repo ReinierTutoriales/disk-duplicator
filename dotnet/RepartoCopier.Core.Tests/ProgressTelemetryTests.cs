@@ -101,7 +101,7 @@ public sealed class ProgressTelemetryTests
         var schedulers = job.DiagnosticsSnapshot().DeviceSchedulers;
         Assert.AreEqual(1, schedulers.Count);
         Assert.AreEqual(expectedDeviceId, schedulers[0].DeviceId);
-        Assert.IsTrue(schedulers[0].MaxOutstandingIo >= 1);
+        Assert.IsTrue(schedulers[0].CurrentQueueDepth >= 1);
         Assert.IsTrue(schedulers[0].PeakOutstandingIo >= 1);
     }
 
