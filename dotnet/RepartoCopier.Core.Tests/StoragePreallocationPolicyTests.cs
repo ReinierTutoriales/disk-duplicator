@@ -18,7 +18,7 @@ public sealed class StoragePreallocationPolicyTests
     }
 
     [TestMethod]
-    public void PolicyMatchesCurrentTemporaryVolumeAndHonorsThreshold()
+    public void PolicyMatchesCurrentTemporaryVolumeWithoutArtificialSizeThreshold()
     {
         var path = Path.Combine(Path.GetTempPath(), $"repartocopier-prealloc-{Guid.NewGuid():N}.part");
         var root = Path.GetPathRoot(path)!;
@@ -27,10 +27,13 @@ public sealed class StoragePreallocationPolicyTests
         var expectedAllowed = drive.IsReady &&
             StorageTopology.SupportsSafePreallocation(drive.DriveFormat, isNetwork);
 
-        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 1024, 4096));
+        Assert.AreEqual(
+            expectedAllowed ? 1024L : 0L,
+            StoragePreallocationPolicy.GetPreallocationSize(path, 1024));
         Assert.AreEqual(
             expectedAllowed ? 8192L : 0L,
-            StoragePreallocationPolicy.GetPreallocationSize(path, 8192, 4096));
+            StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
+        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 0));
     }
 
     [TestMethod]
