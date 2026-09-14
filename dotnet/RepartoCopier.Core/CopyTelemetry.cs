@@ -17,7 +17,6 @@ public sealed record PipelineGovernorSnapshot(
     TimeSpan BudgetWaitTime,
     TimeSpan SourceReadTime);
 
-
 public sealed record CopyDiagnosticsSnapshot(
     long SourceReadBytes,
     TimeSpan SourceReadTime,
@@ -25,7 +24,6 @@ public sealed record CopyDiagnosticsSnapshot(
     TimeSpan SourceHashTime,
     TimeSpan BufferWaitTime,
     TimeSpan FanoutWaitTime,
-    TimeSpan ControlBacklogWaitTime,
     long WrittenBytes,
     long WriteOperations,
     TimeSpan WriteTime,
@@ -39,7 +37,6 @@ public sealed record CopyDiagnosticsSnapshot(
     TimeSpan VerifyReadTime,
     long VerifyHashBytes,
     TimeSpan VerifyHashTime,
-    int PeakControlBacklogMessages,
     long PeakBufferedBytes,
     long MaximumObservedBufferTargetBytes,
     TimeSpan CopyPhaseElapsed,
@@ -67,7 +64,6 @@ public sealed record CopyDiagnosticsSnapshot(
     public long VerificationReadBudgetBytes { get; init; }
     public long PeakVerificationReadBytes { get; init; }
 
-
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
 }
@@ -85,15 +81,13 @@ internal sealed class CopyTelemetry
     private int _directDestinationFiles, _directDestinationFallbacks;
     private long _directDestinationWriteBytes, _directDestinationWriteOperations;
     private long _sourceHashBytes, _sourceHashTicks;
-    private long _bufferWaitTicks, _fanoutWaitTicks, _controlBacklogWaitTicks;
+    private long _bufferWaitTicks, _fanoutWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
     private int _flushes, _commits, _recoveryEvents;
     private long _flushTicks, _commitTicks, _recoveryTicks;
-
     private long _verifyReadBytes, _verifyReadTicks;
     private long _verifyHashBytes, _verifyHashTicks;
     private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
-    private int _peakControlBacklogMessages;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
 
@@ -119,8 +113,6 @@ internal sealed class CopyTelemetry
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
     internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
-    internal void RecordControlBacklogWait(TimeSpan elapsed) => AddTicks(ref _controlBacklogWaitTicks, elapsed);
-
 
     internal void RecordWrite(int bytes, TimeSpan elapsed)
     {
@@ -162,8 +154,6 @@ internal sealed class CopyTelemetry
     internal void RecordCopyPhase(TimeSpan elapsed) => AddTicks(ref _copyPhaseTicks, elapsed);
     internal void RecordVerifyPhase(TimeSpan elapsed) => AddTicks(ref _verifyPhaseTicks, elapsed);
 
-    internal void ObserveControlBacklog(int usedMessages) => UpdateMax(ref _peakControlBacklogMessages, usedMessages);
-
     internal void ObserveBuffer(long usedBytes, long targetBytes)
     {
         UpdateMax(ref _peakBufferedBytes, usedBytes);
@@ -193,14 +183,12 @@ internal sealed class CopyTelemetry
             Interlocked.Read(ref _sourceHashBytes), ToTimeSpan(Interlocked.Read(ref _sourceHashTicks)),
             ToTimeSpan(Interlocked.Read(ref _bufferWaitTicks)),
             ToTimeSpan(Interlocked.Read(ref _fanoutWaitTicks)),
-            ToTimeSpan(Interlocked.Read(ref _controlBacklogWaitTicks)),
             Interlocked.Read(ref _writtenBytes), Interlocked.Read(ref _writeOperations), ToTimeSpan(Interlocked.Read(ref _writeTicks)),
             Volatile.Read(ref _flushes), ToTimeSpan(Interlocked.Read(ref _flushTicks)),
             Volatile.Read(ref _commits), ToTimeSpan(Interlocked.Read(ref _commitTicks)),
             Volatile.Read(ref _recoveryEvents), ToTimeSpan(Interlocked.Read(ref _recoveryTicks)),
             Interlocked.Read(ref _verifyReadBytes), ToTimeSpan(Interlocked.Read(ref _verifyReadTicks)),
             Interlocked.Read(ref _verifyHashBytes), ToTimeSpan(Interlocked.Read(ref _verifyHashTicks)),
-            Volatile.Read(ref _peakControlBacklogMessages),
             Interlocked.Read(ref _peakBufferedBytes), Interlocked.Read(ref _maxObservedBufferTargetBytes),
             ToTimeSpan(Interlocked.Read(ref _copyPhaseTicks)),
             ToTimeSpan(Interlocked.Read(ref _verifyPhaseTicks)),
@@ -258,16 +246,6 @@ internal sealed class CopyTelemetry
     }
     private static TimeSpan ToTimeSpan(long ticks) => ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     private static void UpdateMax(ref long target, long value)
-    {
-        var current = Volatile.Read(ref target);
-        while (value > current)
-        {
-            var observed = Interlocked.CompareExchange(ref target, value, current);
-            if (observed == current) return;
-            current = observed;
-        }
-    }
-    private static void UpdateMax(ref int target, int value)
     {
         var current = Volatile.Read(ref target);
         while (value > current)
