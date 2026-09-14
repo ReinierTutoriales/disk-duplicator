@@ -3,13 +3,12 @@ namespace RepartoCopier.Core;
 /// <summary>
 /// Selects useful destination write concurrency from the adaptive scheduler's
 /// exploration window and the current payload size. Hardware classes choose the
-/// starting depth only; they do not cap future concurrency. The payload itself
-/// is the final practical bound: we never create more slices than it can contain.
+/// starting depth only; they do not cap future concurrency. There is no fixed
+/// file-size threshold: the payload/alignment and adaptive physical scheduler are
+/// the practical bounds.
 /// </summary>
 public static class StorageWritePolicy
 {
-    public const int ParallelFileThresholdBytes = 8 * 1024 * 1024;
-
     // Scheduling granularity, not a queue-depth ceiling. Direct I/O raises this
     // automatically to the device alignment when necessary.
     public const int MinimumParallelSliceBytes = 4 * 1024;
@@ -17,16 +16,13 @@ public static class StorageWritePolicy
     public static int LargeWriteQueueDepth(
         StorageDeviceInfo device,
         int schedulerExplorationDepth,
-        long fileSize,
         int dataLength)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(schedulerExplorationDepth);
-        ArgumentOutOfRangeException.ThrowIfNegative(fileSize);
         ArgumentOutOfRangeException.ThrowIfNegative(dataLength);
 
-        if (fileSize < ParallelFileThresholdBytes ||
-            dataLength < 2 * MinimumParallelSliceBytes ||
+        if (dataLength < 2 * MinimumParallelSliceBytes ||
             schedulerExplorationDepth < 2 ||
             device.IsNetwork ||
             StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact)
