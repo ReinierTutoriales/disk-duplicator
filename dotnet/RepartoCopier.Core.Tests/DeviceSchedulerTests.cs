@@ -18,6 +18,7 @@ public sealed class DeviceSchedulerTests
 
         Assert.HasCount(1, map.Schedulers);
         Assert.AreSame(scheduler, map.For(second));
+        Assert.AreEqual(DeviceIdentityConfidence.Exact, scheduler.IdentityConfidence);
         Assert.AreEqual(8, scheduler.InitialQueueDepth);
         Assert.AreEqual(8, scheduler.CurrentQueueDepth);
         Assert.AreEqual(16, scheduler.ExplorationQueueDepth);
@@ -36,6 +37,8 @@ public sealed class DeviceSchedulerTests
         Assert.HasCount(2, map.Schedulers);
         Assert.AreSame(map.For(first), map.For(second));
         Assert.AreNotSame(map.For(first), map.For(independent));
+        Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(first).IdentityConfidence);
+        Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(independent).IdentityConfidence);
         Assert.AreEqual(16, map.For(independent).InitialQueueDepth);
     }
 
