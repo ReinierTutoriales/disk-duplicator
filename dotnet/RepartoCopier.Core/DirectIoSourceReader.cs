@@ -70,10 +70,8 @@ internal static class DirectIoSourceReader
         error is DirectIoReadException direct && direct.NativeErrorCode is
             1 or   // ERROR_INVALID_FUNCTION
             5 or   // ERROR_ACCESS_DENIED
-            23 or  // ERROR_CRC
             50 or  // ERROR_NOT_SUPPORTED
-            87 or  // ERROR_INVALID_PARAMETER
-            1117;  // ERROR_IO_DEVICE
+            87;    // ERROR_INVALID_PARAMETER
 
     private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
 
