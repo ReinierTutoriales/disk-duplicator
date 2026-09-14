@@ -1130,7 +1130,7 @@ public static class CopyEngine
             {
                 var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
                     worker.Device,
-                    worker.DeviceScheduler.MaxOutstandingIo,
+                    worker.DeviceScheduler.ExplorationQueueDepth,
                     current.Entry.Size,
                     data.Length);
                 var started = Stopwatch.GetTimestamp();
