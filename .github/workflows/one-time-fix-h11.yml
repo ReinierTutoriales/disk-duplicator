@@ -23,7 +23,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Apply H-11 cleanup
+      - name: Apply corrected H-11 cleanup
         run: python tools/fix_h11.py
 
       - name: Restore core tests
