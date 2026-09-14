@@ -361,6 +361,8 @@ public sealed class CoreParityTests
         var governor = new CopyEngine.PipelineGovernor();
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
 
         using var cancel = new CancellationTokenSource();
         var blocked = governor.AcquirePrefetchSlotAsync(cancel.Token).AsTask();
@@ -376,7 +378,9 @@ public sealed class CoreParityTests
 
         governor.ReleasePrefetchSlot();
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.AreEqual(2, governor.InFlight);
+        Assert.AreEqual(4, governor.InFlight);
+        governor.ReleasePrefetchSlot();
+        governor.ReleasePrefetchSlot();
         governor.ReleasePrefetchSlot();
         governor.ReleasePrefetchSlot();
         Assert.AreEqual(0, governor.InFlight);
@@ -464,6 +468,8 @@ public sealed class CoreParityTests
         {
             await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
             await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
+            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
 
             using var cancel = new CancellationTokenSource();
             var blocked = Enumerable.Range(0, 16)
@@ -482,6 +488,8 @@ public sealed class CoreParityTests
                 }
             }
 
+            governor.ReleasePrefetchSlot();
+            governor.ReleasePrefetchSlot();
             governor.ReleasePrefetchSlot();
             governor.ReleasePrefetchSlot();
             Assert.AreEqual(0, governor.InFlight);
