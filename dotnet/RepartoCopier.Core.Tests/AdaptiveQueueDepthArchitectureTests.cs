@@ -43,4 +43,16 @@ public sealed class AdaptiveQueueDepthArchitectureTests
         Assert.AreEqual(16, sata.ExplorationQueueDepth);
         Assert.AreEqual(8, usb.ExplorationQueueDepth);
     }
+
+    [TestMethod]
+    public void DiagnosticsExposeAdaptiveDecisionAndMeasuredBestPoint()
+    {
+        using var scheduler = new DeviceScheduler("telemetry-test", 16, 512L * 1024 * 1024);
+        var snapshot = scheduler.Snapshot();
+
+        Assert.AreEqual("initial", snapshot.LastQueueDepthDecision);
+        Assert.AreEqual(0d, snapshot.BestObservedThroughputBytesPerSecond);
+        Assert.AreEqual(0d, snapshot.BestObservedAverageLatencyMilliseconds);
+        Assert.AreEqual(16, snapshot.BestObservedQueueDepth);
+    }
 }
