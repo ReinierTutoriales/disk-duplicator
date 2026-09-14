@@ -49,27 +49,23 @@ internal static class DirectIoSourceReader
         StorageDeviceInfo device,
         int transferSize,
         out OverlappedSession? session) =>
-        TryOpenOverlappedCore(path, device, transferSize, verification: false, out session);
+        TryOpenOverlappedCore(path, device, transferSize, out session);
 
     internal static bool TryOpenOverlappedForVerification(
         string path,
         StorageDeviceInfo device,
         int transferSize,
         out OverlappedSession? session) =>
-        TryOpenOverlappedCore(path, device, transferSize, verification: true, out session);
+        TryOpenOverlappedCore(path, device, transferSize, out session);
 
     private static bool TryOpenOverlappedCore(
         string path,
         StorageDeviceInfo device,
         int transferSize,
-        bool verification,
         out OverlappedSession? session)
     {
         session = null;
-        var eligible = verification
-            ? IsVerificationEligible(device, transferSize)
-            : IsEligible(device, transferSize);
-        if (!eligible)
+        if (!IsEligibleCore(device, transferSize))
             return false;
 
         var handle = NativeMethods.CreateFileW(

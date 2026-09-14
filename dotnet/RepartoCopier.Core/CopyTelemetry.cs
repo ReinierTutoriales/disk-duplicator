@@ -75,6 +75,10 @@ public sealed record CopyDiagnosticsSnapshot(
     public long DirectSourceReadBytes { get; init; }
     public long DirectSourceReadOperations { get; init; }
     public int DirectSourceFallbacks { get; init; }
+    public int DirectDestinationFiles { get; init; }
+    public long DirectDestinationWriteBytes { get; init; }
+    public long DirectDestinationWriteOperations { get; init; }
+    public int DirectDestinationFallbacks { get; init; }
 
     private static WritePolicyDiagnosticsSnapshot EmptyWritePolicy =>
         new(0, 0, TimeSpan.Zero, 0, TimeSpan.Zero, 0, TimeSpan.Zero);
@@ -93,6 +97,8 @@ internal sealed class CopyTelemetry
     private long _sourceReadBytes, _sourceReadTicks;
     private long _directSourceReadBytes, _directSourceReadOperations;
     private int _directSourceFallbacks;
+    private int _directDestinationFiles, _directDestinationFallbacks;
+    private long _directDestinationWriteBytes, _directDestinationWriteOperations;
     private long _sourceHashBytes, _sourceHashTicks;
     private long _bufferWaitTicks, _fanoutWaitTicks, _queueWaitTicks, _controlBacklogWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
@@ -123,6 +129,13 @@ internal sealed class CopyTelemetry
     internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
     internal void RecordDirectSourceRead(int bytes) { AddBytes(ref _directSourceReadBytes, bytes); Interlocked.Increment(ref _directSourceReadOperations); }
     internal void RecordDirectSourceFallback() => Interlocked.Increment(ref _directSourceFallbacks);
+    internal void RecordDirectDestinationFile() => Interlocked.Increment(ref _directDestinationFiles);
+    internal void RecordDirectDestinationWrite(int bytes, int operations)
+    {
+        AddBytes(ref _directDestinationWriteBytes, bytes);
+        if (operations > 0) Interlocked.Add(ref _directDestinationWriteOperations, operations);
+    }
+    internal void RecordDirectDestinationFallback() => Interlocked.Increment(ref _directDestinationFallbacks);
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
     internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
@@ -272,6 +285,10 @@ internal sealed class CopyTelemetry
             DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),
             DirectSourceReadOperations = Interlocked.Read(ref _directSourceReadOperations),
             DirectSourceFallbacks = Volatile.Read(ref _directSourceFallbacks),
+            DirectDestinationFiles = Volatile.Read(ref _directDestinationFiles),
+            DirectDestinationWriteBytes = Interlocked.Read(ref _directDestinationWriteBytes),
+            DirectDestinationWriteOperations = Interlocked.Read(ref _directDestinationWriteOperations),
+            DirectDestinationFallbacks = Volatile.Read(ref _directDestinationFallbacks),
         };
     }
 
