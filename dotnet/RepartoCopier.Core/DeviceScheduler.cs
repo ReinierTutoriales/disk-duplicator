@@ -14,6 +14,9 @@ public sealed record DeviceIoSnapshot(
     int BestObservedQueueDepth,
     int QueueDepthUpshifts,
     int QueueDepthDownshifts,
+    string LastQueueDepthDecision,
+    double BestObservedThroughputBytesPerSecond,
+    double BestObservedAverageLatencyMilliseconds,
     long BacklogTargetBytes,
     long QueuedBytes,
     long PeakQueuedBytes,
@@ -44,6 +47,7 @@ internal sealed class DeviceScheduler : IDisposable
     private int _bestObservedQueueDepth;
     private int _queueDepthUpshifts;
     private int _queueDepthDownshifts;
+    private string _lastQueueDepthDecision = "initial";
     private int _outstandingIo;
     private int _peakOutstandingIo;
 
@@ -106,6 +110,9 @@ internal sealed class DeviceScheduler : IDisposable
                 _bestObservedQueueDepth,
                 _queueDepthUpshifts,
                 _queueDepthDownshifts,
+                _lastQueueDepthDecision,
+                _bestThroughputBytesPerSecond,
+                double.IsFinite(_bestAverageLatencySeconds) ? _bestAverageLatencySeconds * 1000.0 : 0.0,
                 BacklogTargetBytes,
                 QueuedBytes,
                 PeakQueuedBytes,
@@ -247,7 +254,7 @@ internal sealed class DeviceScheduler : IDisposable
         if (_ioWaiters.Count > 0 || _outstandingIo >= _currentQueueDepth)
             _sampleSawDemand = true;
 
-        var decisionInterval = Math.Max(8, Math.Min(256, _currentQueueDepth * 2));
+        var decisionInterval = Math.Max(8, (int)Math.Min(256L, (long)_currentQueueDepth * 2));
         if (_sampleCompletions < decisionInterval)
             return;
 
@@ -259,12 +266,15 @@ internal sealed class DeviceScheduler : IDisposable
         ResetSampleLocked();
 
         if (!sawDemand)
+        {
+            _lastQueueDepthDecision = "hold:no-demand";
             return;
+        }
 
         if (_bestThroughputBytesPerSecond <= 0)
         {
             ObserveBestLocked(throughput, averageLatency);
-            UpshiftLocked();
+            UpshiftLocked("increase:baseline-demand");
             return;
         }
 
@@ -276,13 +286,13 @@ internal sealed class DeviceScheduler : IDisposable
             if (throughputRatio >= 1.01 || (throughputRatio >= 0.995 && latencyRatio <= 1.10))
             {
                 ObserveBestLocked(throughput, averageLatency);
-                UpshiftLocked();
+                UpshiftLocked("increase:throughput");
                 return;
             }
 
             if (throughputRatio < 0.97 || latencyRatio > 1.35)
             {
-                DownshiftToBestLocked();
+                DownshiftToBestLocked("decrease:regression");
                 return;
             }
 
@@ -290,14 +300,14 @@ internal sealed class DeviceScheduler : IDisposable
             // freezing at a conservative hardware-class number.
             ObserveBestLocked(Math.Max(throughput, _bestThroughputBytesPerSecond),
                 Math.Min(averageLatency, _bestAverageLatencySeconds));
-            UpshiftLocked();
+            UpshiftLocked("increase:competitive");
             return;
         }
 
         if (throughput >= _bestThroughputBytesPerSecond * 0.995)
             ObserveBestLocked(Math.Max(throughput, _bestThroughputBytesPerSecond),
                 Math.Min(averageLatency, _bestAverageLatencySeconds));
-        UpshiftLocked();
+        UpshiftLocked("increase:demand");
     }
 
     private void ObserveBestLocked(double throughput, double averageLatency)
@@ -307,24 +317,32 @@ internal sealed class DeviceScheduler : IDisposable
         _bestAverageLatencySeconds = averageLatency;
     }
 
-    private void UpshiftLocked()
+    private void UpshiftLocked(string reason)
     {
         var next = NextExplorationDepth(_currentQueueDepth);
         if (next <= _currentQueueDepth)
+        {
+            _lastQueueDepthDecision = "hold:integer-limit";
             return;
+        }
         _currentQueueDepth = next;
         _queueDepthUpshifts++;
+        _lastQueueDepthDecision = reason;
         if (next > _maximumObservedQueueDepth)
             _maximumObservedQueueDepth = next;
     }
 
-    private void DownshiftToBestLocked()
+    private void DownshiftToBestLocked(string reason)
     {
         var next = Math.Max(1, _bestObservedQueueDepth);
         if (next >= _currentQueueDepth)
+        {
+            _lastQueueDepthDecision = "hold:best-current";
             return;
+        }
         _currentQueueDepth = next;
         _queueDepthDownshifts++;
+        _lastQueueDepthDecision = reason;
         if (next < _minimumObservedQueueDepth)
             _minimumObservedQueueDepth = next;
     }
