@@ -46,10 +46,12 @@
             </Grid.ColumnDefinitions>
 
             <Image x:Name="LogoImage"
-                   Width="54"
-                   Height="54"
+                   Width="48"
+                   Height="48"
+                   Margin="3"
                    Source="ms-appx:///Assets/AppLogo.png"
                    Stretch="Uniform"
+                   UseLayoutRounding="True"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center" />
 

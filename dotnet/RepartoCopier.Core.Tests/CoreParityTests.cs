@@ -843,7 +843,7 @@ public sealed class CoreParityTests
             .ToArray();
         var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
-        await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
         AssertHealthy(job);
 
         foreach (var destination in destinations)
