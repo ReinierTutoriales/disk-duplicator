@@ -97,4 +97,36 @@ public sealed class UnificationContractTests
             BindingFlags.Static | BindingFlags.NonPublic);
         Assert.IsNotNull(coordinator);
     }
+
+    [TestMethod]
+    public void DirectDestinationWriterIsSingleProductionStrategyNotAnOrphanHelper()
+    {
+        var directMethods = typeof(DirectIoDestinationWriter)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(directMethods, "IsEligible");
+        CollectionAssert.Contains(directMethods, "TryOpen");
+        CollectionAssert.Contains(directMethods, "IsFallbackable");
+
+        var snapshotProperties = typeof(CopyDiagnosticsSnapshot)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationFiles));
+        CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationWriteBytes));
+        CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationWriteOperations));
+        CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationFallbacks));
+
+        var currentFile = typeof(CopyEngine)
+            .GetNestedType("CurrentFile", BindingFlags.NonPublic);
+        Assert.IsNotNull(currentFile);
+        var currentProperties = currentFile.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(currentProperties, "DirectSession");
+        CollectionAssert.Contains(currentProperties, "DirectEnabled");
+        CollectionAssert.Contains(currentProperties, "DirectRequested");
+        CollectionAssert.DoesNotContain(currentProperties, "PreferDirect");
+    }
 }
