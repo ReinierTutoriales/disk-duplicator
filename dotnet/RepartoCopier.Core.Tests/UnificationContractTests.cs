@@ -87,12 +87,7 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(engineMethods, "WriteQueueDepthTwoAsync");
 
-        var policyMethods = typeof(StorageWritePolicy)
-            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(method => method.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(policyMethods, "BufferedLargeWriteQueueDepth");
-        CollectionAssert.Contains(policyMethods, "LargeWriteQueueDepth");
+        Assert.IsNull(typeof(CopyEngine).Assembly.GetType("RepartoCopier.Core.StorageWritePolicy"));
 
         var coordinator = typeof(DestinationWriteCoordinator).GetMethod(
             "WriteAsync",
@@ -309,3 +304,4 @@ public sealed class UnificationContractTests
         Assert.IsNotNull(record);
     }
 }
+

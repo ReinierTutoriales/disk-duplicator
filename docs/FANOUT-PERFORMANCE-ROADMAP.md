@@ -20,7 +20,7 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - Lectura del origen Direct I/O overlapped cuando el volumen local tiene probe/alineación válidos; HDD no está excluido por clase de medio.
 - El payload FAN-OUT se renta alineado para que destinos Direct I/O puedan reutilizar el mismo bloque sin staging completo por rama.
 - Escritura Direct I/O con `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED` cuando es elegible; buffered permanece como fallback de compatibilidad.
-- `DestinationWriteCoordinator` divide cada payload en operaciones de offset explícito y cada sub-I/O adquiere un lease del `DeviceScheduler` físico.
+- `DestinationWriteCoordinator` emite cada payload FAN-OUT lógico como una sola escritura de offset explícito; la concurrencia física ocurre entre bloques independientes y ramas de destino, no fragmentando un bloque secuencial para fabricar QD.
 - **Multi-block in-flight por destino**: el writer ya no espera a completar un `DataMessage` antes de programar el siguiente. Cada bloque reserva un offset monotónico (`ScheduledBytes`) y se mantiene como tarea pendiente independiente.
 - `EndMessage` es barrera de archivo: no se hace flush/finalización/commit hasta drenar todas las escrituras pendientes.
 - `Copied` representa únicamente bytes realmente completados y solo avanza mediante `RecordCompletedWrite`; `FinishFile` exige simultáneamente `ScheduledBytes == Entry.Size` y `Copied == Entry.Size`.
@@ -59,13 +59,14 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - **Multi-block in-flight integrado**: eliminada la ruta secuencial `WriteWithRetryAsync`; los bloques se programan por offset explícito, el commit espera al drenaje total y el fallback Direct se resuelve solo después de drenar I/O pendiente.
 - CRC32 IEEE interno de verificación sustituido por CRC32C/Castagnoli coherente en hardware y software, con vector estándar y contrato hardware/software.
 - Descriptor `PendingRead` de verificación convertido a valor readonly para eliminar la asignación de heap por entrada pendiente.
+- StorageWritePolicy y sus tests eliminados tras quedar huérfanos con la migración full-block; el QD productivo queda gobernado únicamente por DeviceScheduler + FanoutPerformancePolicy.
 - Infraestructura temporal de migraciones eliminada de `main`; solo queda el workflow permanente `windows-dotnet.yml`.
 
 ## Prioridad actual
 
-### P1 — ramp-up de QD más rápido y basado en evidencia
+### VALIDACIÓN FÍSICA — ramp-up de QD
 
-`DeviceScheduler.RecordCompletionLocked` todavía espera una cantidad de completions dependiente del QD antes de reevaluar. No existe hard max, pero una copia corta puede terminar antes de explorar suficiente profundidad. Auditar tiempo-hasta-QD-óptimo y sustituir cualquier lentitud innecesaria por exploración basada en demanda, throughput, latencia y tiempo observado; no por otro número fijo arbitrario.
+`DeviceScheduler.RecordCompletionLocked` ya reevalúa usando una onda de concurrencia realmente observada (`_samplePeakObservedConcurrency`) y demanda efectiva, sin un piso fijo arbitrario de completions. El siguiente paso no es volver a cambiar la política por intuición: medir tiempo-hasta-QD-útil en hardware físico y modificarla solo si el benchmark demuestra una exploración insuficiente.
 
 ### P1 — slow-branch decoupling
 
@@ -75,9 +76,6 @@ Una rama permanentemente más lenta conserva referencias a `SharedBlock` durante
 
 `BlockSize` continúa fijo en 32 MiB y `ReadBufferSizeFor` usa bandas 64 KiB / 1 MiB / 4 MiB / 32 MiB. Son heurísticas pendientes de demostrar. La siguiente evolución debe explorar tamaño de bloque/ventana según throughput, latencia, QD, número de destinos y presión de memoria. No sustituir 32 MiB por otro número fijo.
 
-### P1 — eliminar QD1 incondicional de network
-
-`StorageWritePolicy` todavía fuerza network a QD1. Direct I/O remoto puede seguir deshabilitado por compatibilidad, pero el buffered explicit-offset path no debe asumir que NAS/SMB solo soporta una operación concurrente. Convertirlo en exploración adaptativa.
 
 ### P2 — alineación máxima Direct I/O
 
@@ -133,3 +131,4 @@ Una optimización se cierra únicamente cuando:
 ```
 
 Si alguno falla, el ítem permanece PARCIAL.
+
