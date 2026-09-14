@@ -198,9 +198,9 @@ internal sealed class SourceBufferLease : IDisposable
     {
         get
         {
-            var pointer = Pointer.ToInt64();
-            if (pointer == 0)
+            if (!IsPinned || !_pin.IsAllocated)
                 return 1;
+            var pointer = Pointer.ToInt64();
             var alignment = 1;
             while (alignment < DirectIoSourceReader.MaximumSupportedAlignment && pointer % (alignment * 2L) == 0)
                 alignment *= 2;
@@ -212,7 +212,7 @@ internal sealed class SourceBufferLease : IDisposable
         get
         {
             if (!IsPinned || !_pin.IsAllocated)
-                return IntPtr.Zero;
+                throw new InvalidOperationException("El buffer no está fijado; no existe un puntero estable para I/O directo.");
             return IntPtr.Add(_pin.AddrOfPinnedObject(), _offset);
         }
     }
