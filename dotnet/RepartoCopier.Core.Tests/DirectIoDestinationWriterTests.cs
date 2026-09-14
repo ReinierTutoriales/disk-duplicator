@@ -7,7 +7,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class DirectIoDestinationWriterTests
 {
     [TestMethod]
-    public void ExactLocalHddAndSsdAreEligibleWithoutFixedFileSizeFloor()
+    public void LocalHddAndSsdAreEligibleWithoutFixedFileSizeFloor()
     {
         var hdd = Device("SATA", StorageMediaKind.Rotational);
         var ssd = Device("NVMe", StorageMediaKind.SolidState);
@@ -20,7 +20,7 @@ public sealed class DirectIoDestinationWriterTests
     }
 
     [TestMethod]
-    public void NetworkAndUncertainIdentityCannotEnterUnbufferedWriter()
+    public void NetworkIsRejectedButAlignedUncertainLocalVolumeCanAttemptDirectWrite()
     {
         var network = Device("Network", StorageMediaKind.SolidState) with
         {
@@ -33,7 +33,7 @@ public sealed class DirectIoDestinationWriterTests
         };
 
         Assert.IsFalse(DirectIoDestinationWriter.IsEligible(network, 64L * 1024 * 1024));
-        Assert.IsFalse(DirectIoDestinationWriter.IsEligible(uncertain, 64L * 1024 * 1024));
+        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(uncertain, 64L * 1024 * 1024));
     }
 
     [TestMethod]
