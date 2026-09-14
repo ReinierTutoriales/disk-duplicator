@@ -99,9 +99,7 @@ public static class CopyEngine
 
     private const long InitialBufferBudget = 512L * 1024 * 1024;
 
-    // This budget protects Begin/End-heavy trees. Payload data is independently
-    // governed by AdaptiveByteBudget and per-device backlog/QD.
-    private const int ControlBacklogCapacity = 64 * 1024;
+
     private const int Retries = 2;
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
@@ -256,7 +254,6 @@ public static class CopyEngine
         var bufferBudget = AdaptiveByteBudget.CreateForSystem();
         var pipeline = new PipelineGovernor(bufferBudget, BlockSize);
         job.Telemetry.AttachPipelineGovernor(pipeline.Snapshot);
-        var controlBudget = new GlobalControlBacklogBudget(ControlBacklogCapacity);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         try
@@ -275,7 +272,6 @@ public static class CopyEngine
                     root,
                     index,
                     progress[index],
-                    controlBudget,
                     copy.DestinationDevices[index],
                     deviceSchedulers.For(copy.DestinationDevices[index])))
                 .ToArray();
@@ -991,50 +987,18 @@ public static class CopyEngine
         if (!worker.IsActive)
             return;
 
-        var controlOwned = false;
-        var queueOwned = false;
-        try
-        {
-            job.Token.ThrowIfCancellationRequested();
-            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+        job.Token.ThrowIfCancellationRequested();
+        await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+        if (!worker.IsActive)
+            return;
 
-            var controlWaitStarted = Stopwatch.GetTimestamp();
-            await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
-            var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
-            job.Telemetry.RecordControlBacklogWait(controlWait);
-            job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
-            controlOwned = true;
+        worker.IncrementQueueDepth();
+        if (worker.Channel.Writer.TryWrite(message))
+            return;
 
-            if (!worker.IsActive)
-            {
-                worker.ControlBudget.Release();
-                return;
-            }
-
-            worker.IncrementQueueDepth();
-            queueOwned = true;
-            if (worker.Channel.Writer.TryWrite(message))
-            {
-                controlOwned = false;
-                queueOwned = false;
-                return;
-            }
-
-            worker.DecrementQueueDepth();
-            queueOwned = false;
-            worker.ControlBudget.Release();
-            controlOwned = false;
-            if (worker.IsActive)
-                worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
-        }
-        catch
-        {
-            if (queueOwned)
-                worker.DecrementQueueDepth();
-            if (controlOwned)
-                worker.ControlBudget.Release();
-            throw;
-        }
+        worker.DecrementQueueDepth();
+        if (worker.IsActive)
+            worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
     }
 
     private static async Task WriterLoopAsync(
@@ -1050,8 +1014,6 @@ public static class CopyEngine
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
                 worker.DecrementQueueDepth();
-                if (message is ControlMessage)
-                    worker.ControlBudget.Release();
                 var data = message as DataMessage;
                 if (data is not null)
                     worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
@@ -1567,8 +1529,6 @@ public static class CopyEngine
         while (worker.Channel.Reader.TryRead(out var message))
         {
             worker.DecrementQueueDepth();
-            if (message is ControlMessage)
-                worker.ControlBudget.Release();
             if (message is DataMessage data)
                 worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
             ReleaseIfData(message);
@@ -2292,14 +2252,12 @@ public static class CopyEngine
             string root,
             int slot,
             DestinationProgress progress,
-            GlobalControlBacklogBudget controlBudget,
             StorageDeviceInfo device,
             DeviceScheduler deviceScheduler)
         {
             Root = root;
             Slot = slot;
             Progress = progress;
-            ControlBudget = controlBudget;
             Device = device;
             DeviceScheduler = deviceScheduler;
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
@@ -2313,7 +2271,6 @@ public static class CopyEngine
         public string Root { get; }
         public int Slot { get; }
         public DestinationProgress Progress { get; }
-        public GlobalControlBacklogBudget ControlBudget { get; }
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
         public Channel<FanoutMessage> Channel { get; }
