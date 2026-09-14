@@ -9,8 +9,11 @@ if ($text.Contains($old)) {
     [IO.File]::WriteAllText($telemetry, $text, [Text.UTF8Encoding]::new($false))
 }
 
+$negativeContract = [IO.Path]::GetFullPath('dotnet/RepartoCopier.Core.Tests/AdaptiveQueueDepthArchitectureTests.cs')
 $legacy = @()
-Get-ChildItem 'dotnet' -Recurse -Filter '*.cs' | ForEach-Object {
+Get-ChildItem 'dotnet' -Recurse -Filter '*.cs' | Where-Object {
+    $_.FullName -ne $negativeContract
+} | ForEach-Object {
     $matches = Select-String -Path $_.FullName -Pattern 'MaxOutstandingIo|RecommendedQueueDepth'
     foreach ($match in $matches) {
         $relative = [IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName)
