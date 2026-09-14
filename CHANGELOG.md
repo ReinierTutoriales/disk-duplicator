@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — main
+
+- Lectura Direct I/O del origen unificada en una única ruta overlapped/async con buffers alineados y fallback seguro.
+- Verificación post-copia automática migrada a CRC32 por bloques con read-back overlapped cuando el dispositivo es elegible.
+- Bloque FAN-OUT grande consolidado en 32 MiB; backlog y comentarios de política alineados con ese tamaño.
+- Eliminadas rutas síncronas/verify antiguas, telemetría sin productor, wrappers sin consumidor y APIs mantenidas únicamente para tests.
+- La escritura de destino continúa buffered con offsets explícitos; Direct I/O de escritura permanece como trabajo futuro y no se declara implementado.
+
 ## v2.0.0 — 2026-09-12
 
 RepartoCopier 2.0.0 establece el nuevo baseline nativo de Windows en C#/.NET 10 + WinUI 3 y reemplaza por completo la implementación activa anterior en Rust.

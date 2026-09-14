@@ -1,194 +1,106 @@
 # FAN-OUT Performance Audit & Roadmap
 
-## Objective
+## Objetivo
 
-Reach or exceed ExtremeCopy-style FAN-OUT behavior on independent physical destinations while preserving Disk Duplicator correctness guarantees: one source read, exact directory replication, empty directories, no mirror-delete, bounded memory, cancellation, recovery, integrity, and topology-aware scheduling.
+Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos físicos independientes sin debilitar integridad, recovery, cancelación, memoria acotada ni seguridad de topología. El rendimiento solo se considera demostrado mediante A/B reproducible en hardware Windows físico.
 
-Performance is considered proven only by repeatable hardware benchmarks. Architectural similarity alone is not a throughput claim.
+## Arquitectura vigente en `main`
 
-## Confirmed architecture today
+- FAN-OUT único: una lectura del origen alimenta a todos los destinos activos mediante `SharedBlock` con conteo de referencias.
+- Bloque grande: **32 MiB**.
+- Prefetch físico máximo: **8** bloques; pipeline de hash: **4**.
+- BLAKE3 del origen/SkipSame/recovery permanece separado de la verificación post-copia.
+- Lectura principal SSD elegible: Direct I/O con buffers alineados y `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED`, usando I/O async real.
+- Verificación post-copia automática: CRC32 por bloque generado una sola vez durante FAN-OUT; read-back Direct I/O overlapped cuando es elegible y fallback buffered async cuando no lo es.
+- Escritura actual: buffered, offsets explícitos, QD2 selectivo en SSD calificados. **No existe todavía Direct I/O de escritura.**
+- Scheduler y backlog por dispositivo físico; identidad incierta se trata conservadoramente.
+- Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
-- One source read path per file.
-- One `SharedBlock` payload is reference-counted across all active destinations.
-- Per-destination workers and channels.
-- Explicit-offset asynchronous writes.
-- Physical-device-aware schedulers; partitions on the same physical disk share one scheduler when identity is exact.
-- Global adaptive byte budget bounds live FAN-OUT payload memory.
-- Source prefetch + BLAKE3 hash pipeline for large files.
-- Telemetry already separates source read, hash, write, queue/fan-out waits, buffer waits, flush/commit/recovery, and physical-device backlog/QD.
+## Ventanas vigentes por rama
 
-## ExtremeCopy findings that matter
-
-ExtremeCopy builds a source -> duplicate-output -> per-destination transfer graph. The duplicate stage broadcasts the same source data to independent downstream branches. Different physical destination storage uses asynchronous transfer filters; same-physical-device cases are handled more conservatively. Some source paths use `FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN`.
-
-The important lesson is not to copy the legacy implementation literally. The useful principles are:
-
-1. Read the source once.
-2. Broadcast shared data to independent target pipelines.
-3. Keep target branches decoupled long enough to absorb transient latency.
-4. Use physical topology to avoid destructive concurrency on one device.
-5. Do not impose a per-block global barrier unless bounded-memory pressure actually requires it.
-
-## Changes already implemented
-
-### Phase 1 — topology-aware branch buffering
-
-Initial performance change:
-
-| Branch | Previous | Phase 1 |
+| Rama | Backlog | QD máximo actual |
 |---|---:|---:|
-| Network | 32 MiB | 32 MiB |
-| USB flash | 16 MiB | 64 MiB |
-| Rotational HDD | 32 MiB | 64 MiB |
-| Uncertain USB SSD | 32 MiB / QD1 | 64 MiB / QD1 |
-| Exact USB SSD | 64 MiB / QD1 if removable | 128 MiB / QD2 |
-| SATA SSD | 64 MiB / QD2 | 128 MiB / QD2 |
-| NVMe | 128 MiB / QD2 | 256 MiB / QD2 |
+| Network | 32 MiB | 1 |
+| Conservador/virtual/storage spaces | 64 MiB | 1 |
+| Rotational HDD | 128 MiB | 1 |
+| USB flash / USB SSD incierto | 128 MiB | 1 |
+| USB SSD exacto | 256 MiB | 2 |
+| SATA SSD | 256 MiB | 2 |
+| NVMe | 512 MiB | 2 |
 
-This phase passed the full Windows .NET CI after aligning the USB SSD policy tests.
+El backlog absorbe jitter; QD controla I/O físico simultáneo. No deben confundirse ni aumentarse sin evidencia.
 
-### Phase 2 — aggressive but bounded run-ahead
+## Cerrado e integrado
 
-The 16 MiB large-file block is shared by reference across destinations, so increasing branch backlog does not create one payload copy per destination. The global `AdaptiveByteBudget` remains the hard payload-memory ceiling.
+- Topología física e identidad con política conservadora cuando no puede demostrarse el disco real.
+- QD2 selectivo desde archivos de 8 MiB en SSD elegibles.
+- Buffers de origen alineados y Direct I/O.
+- H-10: la lectura Direct I/O del origen usa `OVERLAPPED`/async real; se eliminó la sesión síncrona.
+- H-11/H-12/H-13: se eliminaron la verificación antigua escondida en `HashFileAsync`, APIs síncronas obsoletas, ramas nulas/test-only innecesarias y telemetría de verify que ya no tenía productor.
+- Verificación automática CRC32 con `FastVerificationReader` como única ruta post-copia.
 
-New targets:
+## Prioridad actual
 
-| Branch | Phase 2 target | 16 MiB blocks | QD |
-|---|---:|---:|---:|
-| Network | 32 MiB | 2 | 1 |
-| Unknown/local conservative | 64 MiB | 4 | 1 |
-| USB flash | 128 MiB | 8 | 1 |
-| Rotational HDD | 128 MiB | 8 | 1 |
-| Uncertain USB SSD | 128 MiB | 8 | 1 |
-| Exact USB SSD/UASP | 256 MiB | 16 | 2 |
-| SATA SSD | 256 MiB | 16 | 2 |
-| NVMe | 512 MiB | 32 | 2 |
+### P0 — eliminar head-of-line entre ramas diferidas
 
-QD is deliberately not raised beyond 2 yet. Queue depth and run-ahead solve different problems: backlog absorbs pipeline jitter; QD controls simultaneous physical writes. Raising QD without device-specific evidence can reduce performance or increase latency.
+`DeliverDataAsync` entrega primero a las ramas con crédito inmediato, pero después espera la lista `deferred` secuencialmente. Si A sigue saturada y B ya tiene crédito, B todavía queda detrás de A.
 
-## Current bottlenecks / audit findings
+Corrección requerida:
+- reservas de backlog de ramas diferidas independientes;
+- entregar cada referencia del bloque tan pronto como su propia rama tenga crédito;
+- conservar orden dentro de cada destino, conteo de referencias, límites de memoria, cancelación y aislamiento de fallos.
 
-### P0 — deferred-branch head-of-line blocking
+Gates:
+- dos ramas diferidas liberadas en orden inverso;
+- la rama lista primero recibe el bloque primero;
+- cancelación/fallo no fuga backlog ni referencias.
 
-`DeliverDataAsync` first gives a block to branches that can reserve backlog immediately. Saturated branches are placed in a deferred list. The deferred list is then awaited sequentially.
+### P1 — Direct I/O selectivo de escritura
 
-Consequence: if deferred branch A is still full while deferred branch B becomes ready, B cannot receive the current block until A completes its reservation. This is unnecessary cross-device head-of-line blocking and is less independent than the ExtremeCopy transfer graph.
+Implementar solo después de cerrar P0 y sin sustituir ciegamente la ruta buffered. Requisitos:
+- elegibilidad por topología/media/alineación;
+- `NO_BUFFERING | OVERLAPPED` y offsets/buffers alineados;
+- tail correcto;
+- fallback cerrado solo para errores compatibles;
+- ruta buffered actual permanece como fallback, no como segunda política contradictoria;
+- telemetría que demuestre activación/fallback.
 
-Planned correction:
-- reserve/wake deferred branches independently;
-- deliver the current shared block to each branch as soon as its own credit becomes available;
-- retain ordering inside each destination;
-- retain one reference per destination;
-- retain global payload-memory bound;
-- preserve cancellation/failure accounting.
+### P1 — acelerar CRC32
 
-Required tests:
-- two independently throttled deferred branches released in reverse order;
-- verify the earlier-ready branch receives data first;
-- cancellation while one reservation is pending does not leak backlog or `SharedBlock` references;
-- failed destination does not stall healthy branches.
+`FastCrc32` sigue siendo tabla byte-a-byte. Optimizar únicamente con equivalencia IEEE CRC32 probada (por ejemplo slicing-by-8/16 o una ruta intrínseca validada) y medir CPU vs `VerifyReadTime`.
 
-### P0 — real hardware benchmark harness
+### P1 — QD4 adaptativo
 
-Architecture cannot prove 150 MB/s per destination. Add/export a repeatable benchmark result containing:
+No subir QD globalmente. Evaluar QD4 solo en SSD/NVMe/USB-SSD exactos después de P0 y Direct I/O de escritura, con rollback automático/política conservadora si throughput o latencia empeoran.
 
-- source physical read MB/s;
-- per-destination write MB/s;
-- aggregate logical write MB/s;
-- wall time;
-- source/hash/write CPU time;
-- `FanoutWait` / queue wait / buffer wait;
-- per-device backlog target, current and peak bytes;
-- max/peak outstanding I/O;
-- peak live FAN-OUT memory;
-- file count / total bytes / workload class;
-- source and destination physical-device identities and bus/media types.
+### P1 — mismo dispositivo físico origen/destino
 
-Acceptance target for independent capable devices: adding destinations must not divide source throughput by N. Example: a ~150 MB/s source should allow each sufficiently fast independent destination to approach ~150 MB/s, subject to controller/bus/device limits.
+Coordinar prefetch de origen y escritura cuando comparten el mismo disco, especialmente HDD, para evitar seek thrash. Mantener QD1 conservador hasta tener una política compartida medida.
 
-### P1 — same-physical source/destination scheduling
+### P2 — BLAKE3 y metadata/durabilidad
 
-Current scheduler forces destination QD1 when source and destination share a physical device, but source prefetch is not fully coordinated with destination writes. On an HDD this can still create read/write seek oscillation.
+Optimizar BLAKE3, flush/commit o small-file metadata solo si la telemetría demuestra que dominan. No debilitar recovery para ganar un benchmark.
 
-Planned correction:
-- detect same-physical source/destination early;
-- use a conservative shared-device pipeline policy;
-- reduce/disable deep source prefetch when it would induce HDD seek thrash;
-- benchmark HDD same-device copy separately from independent-disk FAN-OUT.
+## Benchmark físico contra ExtremeCopy
 
-### P1 — adaptive branch backlog
+Solo después de cerrar P0 y las mejoras seleccionadas. Usar mismo origen, destinos, dataset y opciones, con datos suficientemente grandes para superar cachés transitorias. Registrar:
 
-Static targets are safe starting points, not final optimization.
+- tiempo de copia, verificación y total;
+- MB/s del origen y de cada destino;
+- throughput lógico agregado;
+- CPU/RAM;
+- `SourceRead`, `SourceHash`, `FanoutWait`, `QueueWait`, `Write`, `VerifyRead`, `VerifyHash`;
+- backlog/QD por dispositivo y fallbacks Direct I/O;
+- topología/bus/media reales.
 
-Candidate policy:
-- increase branch window when writer starvation is observed and memory headroom exists;
-- hold/reduce when branch queue remains saturated;
-- never exceed global adaptive memory budget;
-- preserve a lower floor for independent physical disks to avoid transient jitter collapsing the whole FAN-OUT.
+La meta mínima es paridad reproducible con ExtremeCopy. “Arquitectura parecida” o CI hospedado no cuentan como prueba de rendimiento físico.
 
-### P1 — source prefetch depth
+## Regla permanente de unificación
 
-Large-file physical prefetch currently has a small bounded capacity relative to the new SSD/NVMe branch windows. Benchmark increasing/adapting prefetch after P0 head-of-line removal. Do not simply maximize it; source HDD and memory pressure must remain stable.
-
-### P1 — direct/unbuffered source fast path
-
-ExtremeCopy uses `FILE_FLAG_NO_BUFFERING` in relevant source paths. Disk Duplicator currently uses asynchronous buffered sequential I/O.
-
-Do not enable unbuffered I/O globally. A correct implementation needs:
-- sector/alignment discovery;
-- aligned native buffers;
-- aligned offsets and lengths;
-- tail handling;
-- buffered fallback;
-- benchmark comparison on HDD, USB SSD, SATA SSD and NVMe.
-
-Only keep the fast path where measurements show a win.
-
-### P1 — per-file durable flush cost
-
-Large files currently call durable flush before commit. This protects correctness but can dominate workloads with many files.
-
-Audit options without weakening recovery semantics:
-- retain write-through for tiny files;
-- measure flush time separately;
-- consider batched/checkpoint durability only if crash-recovery invariants remain explicit and tested.
-
-### P2 — hashing cost at multi-GB/s
-
-BLAKE3 during source read is unlikely to explain a 150 -> 75 MB/s collapse, but it can become material on NVMe-class throughput. Keep integrity by default; benchmark hash CPU utilization and only optimize if it becomes a measured bottleneck.
-
-## Test matrix
-
-Run all cases with 1, 2 and 4 independent destinations where hardware permits:
-
-- source: USB flash, SATA HDD, SATA SSD, NVMe;
-- destinations: homogeneous fast targets, mixed-speed targets, one intentionally slow target;
-- workload: one very large file, medium files, many small files, empty directories;
-- verify disabled/enabled;
-- skip-same disabled/enabled where applicable;
-- same physical source/destination special case;
-- cancellation during source read, backlog wait and physical write;
-- destination failure while other targets remain healthy.
-
-Correctness gates:
-- selected root folder name preserved;
-- exact directory structure preserved;
-- empty directories preserved;
-- no `.disk-duplicator` state inside copied tree;
-- no mirror-delete behavior;
-- hashes/sizes correct;
-- no leaked `.part`/backup files after successful completion;
-- recovery remains valid after interruption.
-
-## Performance decision rules
-
-Do not accept an optimization because it "looks faster" in code.
-
-Keep a change only when:
-1. CI and correctness tests pass;
-2. it does not weaken topology safety, recovery or bounded-memory guarantees;
-3. benchmark median improves or removes a demonstrated stall;
-4. regressions on other workload classes are understood and acceptable;
-5. the result is reproducible.
-
-For the ExtremeCopy comparison, the minimum success criterion is parity on the same source/targets/workload. The project goal is to exceed it where modern async I/O, topology detection and adaptive scheduling provide a measurable advantage.
+Una optimización no está terminada cuando aparece una ruta nueva. Se cierra solo cuando:
+1. el consumidor real usa la nueva ruta;
+2. se rastrean y migran todos los consumidores equivalentes;
+3. se elimina código, parámetros, telemetría y tests obsoletos;
+4. no quedan dos implementaciones del mismo propósito salvo un fallback explícito;
+5. existe un gate que impide reintroducir la arquitectura retirada;
+6. suite completa + WinUI Release pasan.

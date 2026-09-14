@@ -20,9 +20,9 @@ internal static class FanoutPerformancePolicy
 
     private const long ConservativeBacklog = 64L * MiB;  // 2 x 32 MiB
     private const long RotationalBacklog = 128L * MiB;   // 4 x 32 MiB
-    private const long UsbFlashBacklog = 128L * MiB;     // 8 x 16 MiB
+    private const long UsbFlashBacklog = 128L * MiB;     // 4 x 32 MiB
     private const long UsbSsdBacklog = 256L * MiB;       // 8 x 32 MiB
-    private const long SataSsdBacklog = 256L * MiB;      // 16 x 16 MiB
+    private const long SataSsdBacklog = 256L * MiB;      // 8 x 32 MiB
     private const long NvmeBacklog = 512L * MiB;         // 16 x 32 MiB
     private const long NetworkBacklog = 32L * MiB;
 

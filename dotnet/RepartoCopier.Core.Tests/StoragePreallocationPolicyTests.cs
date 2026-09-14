@@ -20,7 +20,6 @@ public sealed class StoragePreallocationPolicyTests
     [TestMethod]
     public void PolicyMatchesCurrentTemporaryVolumeAndHonorsThreshold()
     {
-        StoragePreallocationPolicy.ClearCacheForTests();
         var path = Path.Combine(Path.GetTempPath(), $"repartocopier-prealloc-{Guid.NewGuid():N}.part");
         var root = Path.GetPathRoot(path)!;
         var drive = new DriveInfo(root);

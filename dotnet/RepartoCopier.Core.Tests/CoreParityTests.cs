@@ -37,24 +37,6 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
-    public void SessionFormatRoundTripsUnicodeAndUnc()
-    {
-        var original = CopyPlan.Create(
-            @"C:\Música\Niño\日本語",
-            [@"D:\Copias", @"\\servidor\Datos compartidos"],
-            skipSame: true,
-            keepGoing: false);
-        var text = SessionStore.Render(original);
-        var loaded = SessionStore.Parse(text);
-
-        Assert.AreEqual(original.Source, loaded.Source);
-        CollectionAssert.AreEqual(original.Destinations.ToArray(), loaded.Destinations.ToArray());
-        Assert.AreEqual(original.SkipSame, loaded.SkipSame);
-        Assert.AreEqual(original.KeepGoing, loaded.KeepGoing);
-        Assert.IsFalse(text.Contains("Música", StringComparison.Ordinal));
-    }
-
-    [TestMethod]
     public void AtomicStorageReplacesWithoutLeavingSiblings()
     {
         using var temp = new TempDirectory("storage");
@@ -192,7 +174,11 @@ public sealed class CoreParityTests
         var file = RecoveryFileFor(source, "folder\\a.bin");
         var hash = Hasher.Hash(File.ReadAllBytes(source)).AsSpan().ToArray();
 
-        RecoveryManager.AppendDurable(destination, file, hash);
+        using (var writer = new RecoveryCheckpointWriter(destination))
+        {
+            writer.Append(file, hash);
+            writer.FlushCheckpoint();
+        }
 
         Assert.AreEqual(
             $"{{\"key\":\"{RecoveryManager.StateKey(file)}\"}}",

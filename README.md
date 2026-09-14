@@ -4,7 +4,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Versión actual
 
-**RepartoCopier v2.0.0** es el nuevo baseline C#/.NET/WinUI del proyecto. La versión histórica v1.4.3 permanece publicada sin modificaciones.
+**RepartoCopier v2.0.0** es el baseline C#/.NET/WinUI del proyecto. `main` contiene además la evolución de rendimiento posterior a v2.0.0. La versión histórica v1.4.3 permanece publicada sin modificaciones.
 
 ## Plataforma
 
@@ -16,9 +16,9 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Arquitectura
 
-`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos. No se implementan sustitutos visuales manuales cuando Windows ya ofrece el comportamiento.
+`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
 
-`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, verificación BLAKE3, recuperación transaccional, telemetría de rendimiento y protección de rutas. Las llamadas Win32 se mantienen aisladas y solo se usan cuando .NET o Windows App SDK no exponen la semántica requerida.
+`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para SkipSame/recovery y verificación post-copia automática mediante CRC32 por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
 
 ## Invariantes de copia
 
@@ -28,12 +28,15 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 - Un archivo seleccionado copia únicamente ese archivo.
 - Los archivos adicionales del destino no se eliminan.
 - El estado interno vive fuera del árbol copiado en `.disk-duplicator-state`.
-- Los destinos se verifican físicamente antes de confiar en recovery/skip.
+- Los destinos recién escritos se verifican automáticamente después de la copia.
+- Recovery y SkipSame conservan sus pruebas BLAKE3 independientes.
 - Symlinks, junctions, reparse points y solapamientos peligrosos se rechazan de forma fail-closed.
 
 ## Rendimiento
 
-El motor usa lectura compartida FAN-OUT, buffers compartidos, prefetch y presupuesto de RAM adaptativos, backpressure por destino, hashing BLAKE3 paralelo para bloques grandes y una ruta `WriteThrough` selectiva para archivos de un solo chunk. La telemetría de `CopyJob.DiagnosticsSnapshot()` permite identificar el cuello real antes de modificar parámetros.
+El hot path actual usa bloques compartidos de 32 MiB, prefetch acotado, presupuesto global de RAM, backpressure y scheduler por dispositivo físico. En orígenes SSD locales con identidad exacta y alineación conocida existe una ruta Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED`; la verificación usa el mismo principio cuando es elegible. Las escrituras de destino siguen siendo buffered con offsets explícitos y QD2 selectivo para SSD calificados; Direct I/O de escritura todavía no está implementado.
+
+La telemetría de `CopyJob.DiagnosticsSnapshot()` permite identificar el cuello real antes de modificar parámetros. La hoja de ruta vigente está en `docs/FANOUT-PERFORMANCE-ROADMAP.md`.
 
 ## Compilar
 

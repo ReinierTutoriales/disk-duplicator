@@ -148,13 +148,13 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
-    public void QueueTelemetryTracksPeakWithoutEnforcingYet()
+    public void RealBacklogReservationsTrackCurrentAndPeakBytes()
     {
         using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, 16L * 1024 * 1024);
 
-        scheduler.NoteQueuedBytes(8 * 1024 * 1024);
-        scheduler.NoteQueuedBytes(4 * 1024 * 1024);
-        scheduler.NoteDequeuedBytes(8 * 1024 * 1024);
+        Assert.IsTrue(scheduler.TryReserveBacklog(8 * 1024 * 1024));
+        Assert.IsTrue(scheduler.TryReserveBacklog(4 * 1024 * 1024));
+        scheduler.ReleaseBacklog(8 * 1024 * 1024);
 
         Assert.AreEqual(4L * 1024 * 1024, scheduler.QueuedBytes);
         Assert.AreEqual(12L * 1024 * 1024, scheduler.PeakQueuedBytes);
