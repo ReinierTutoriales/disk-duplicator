@@ -23,7 +23,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Apply runtime unification
+      - name: Apply safe runtime cleanup and logo layout fix
         run: python tools/unify_runtime.py
 
       - name: Restore core tests
@@ -38,12 +38,12 @@ jobs:
       - name: Build WinUI Release x64
         run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
 
-      - name: Commit unified runtime state
+      - name: Commit cleaned runtime state
         shell: pwsh
         run: |
           git config user.name "ReinierTutoriales"
           git config user.email "86568548+ReinierTutoriales@users.noreply.github.com"
-          git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs dotnet/RepartoCopier.WinUI/MainWindow.xaml
+          git add dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs dotnet/RepartoCopier.WinUI/MainWindow.xaml
           if (git diff --cached --quiet) { throw 'No product changes were produced.' }
-          git commit -m "refactor: unify automatic verification and crisp logo layout"
+          git commit -m "fix: unify performance docs and logo rendering"
           git push origin HEAD:main
