@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RepartoCopier.Core;
 
@@ -76,6 +77,34 @@ public sealed class DirectIoSourceReaderTests
         Assert.IsNotNull(method);
         var parameters = method.GetParameters();
         Assert.AreEqual(typeof(DirectIoSourceReader.OverlappedSession).MakeByRefType(), parameters[^1].ParameterType);
+    }
+
+    [TestMethod]
+    public async Task DirectIoSessionAcceptsExactUnalignedEofBeforeAlignmentGuard()
+    {
+        const int alignment = 4096;
+        const long length = 24L * 1024 * 1024 + 193;
+        using var invalidHandle = new SafeFileHandle(new IntPtr(-1), ownsHandle: false);
+        using var session = new DirectIoSourceReader.OverlappedSession(invalidHandle, alignment, length);
+        using var lease = SourceBufferLease.RentAligned(alignment, alignment);
+
+        var read = await session.ReadAsync(lease, alignment, length, CancellationToken.None);
+
+        Assert.AreEqual(0, read);
+        Assert.AreEqual(length, session.Length);
+    }
+
+    [TestMethod]
+    public async Task DirectIoSessionStillRejectsUnalignedNonEofOffset()
+    {
+        const int alignment = 4096;
+        const long length = 24L * 1024 * 1024 + 193;
+        using var invalidHandle = new SafeFileHandle(new IntPtr(-1), ownsHandle: false);
+        using var session = new DirectIoSourceReader.OverlappedSession(invalidHandle, alignment, length);
+        using var lease = SourceBufferLease.RentAligned(alignment, alignment);
+
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(async () =>
+            await session.ReadAsync(lease, alignment, alignment + 1L, CancellationToken.None));
     }
 
     [TestMethod]
