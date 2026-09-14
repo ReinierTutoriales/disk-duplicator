@@ -32,6 +32,8 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - El backlog por rama es **contabilidad/telemetría de presión**, no una barrera de admisión. `ReserveBacklog` es síncrono, `BacklogPressure` puede superar 1 y el límite duro del payload sigue siendo RAM global + QD físico adaptativo.
 - `DataMessage` usa un fast path dedicado: una sola comprobación de pausa/cancelación por bloque y enqueue directo por destino. No pasa por `DeliverControlAsync`, no usa two-pass/deferred y no existe `DeliverOneAsync`.
 - `DataMessage` no consume `GlobalControlBacklogBudget`; `BeginMessage` y `EndMessage` sí usan el control budget para proteger árboles con millones de archivos pequeños.
+- El commit de un archivo durable usa una única primitiva `AtomicFileCommit`: si el destino no existe, `File.Move`; si existe, `File.Replace` con backup/restauración defensiva. La vieja secuencia manual destino→backup→destino fue eliminada.
+- `RecoveryCheckpointWriter` ya agrupa manifest/journal hasta 128 archivos o ~1 s; recovery no hace fsync individual por archivo.
 - Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
 ## Cerrado e integrado
@@ -47,6 +49,7 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - **P1 payload/control backlog desacoplado**: `DataMessage` no consume el budget fijo de control; `Begin/End` sí. Gate de arquitectura bloquea el regreso de `countsData` y de la herencia incorrecta. Cierre: Windows .NET CI **#186 / 34851256674** verde.
 - **P1 QD físico adaptativo cerrado**: eliminados `SemaphoreSlim` fijo, `MaxOutstandingIo` y `RecommendedQueueDepth`; QD4/8/16 son solo arranque, Copy + Verify usan la ventana adaptativa, el gate demuestra crecimiento NVMe **QD16 → QD32** y la telemetría registra decisiones/óptimo observado. Cierre final: Windows .NET CI **#197 / 34856374422** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
 - **P1 FAN-OUT delivery hot path cerrado**: eliminados `TryReserveBacklog`, `ReserveBacklogAsync`, `QueueWaitTime`, `_queueWaitTicks`, `RecordQueueWait`, two-pass `deferred`, `backlogReserved` y `DeliverOneAsync`. `DataMessage` usa ruta propia de una pasada y control usa `DeliverControlAsync`. Cierre: Windows .NET CI **#198 / 34858264132** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
+- **P1 commit atómico cerrado**: `CopyEngine.CommitPart` y el dance manual de dos `File.Move` fueron eliminados; `AtomicFileCommit.Commit` usa `File.Replace` para destinos existentes, conserva recuperación defensiva y tiene tests para destino nuevo/existente. Cierre: Windows .NET CI **#201 / 34859244750** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
 - H-10: lectura Direct I/O del origen con `OVERLAPPED`/async real.
 - H-11/H-12/H-13: rutas antiguas de verificación y APIs obsoletas eliminadas.
 - P0 backlog por dispositivo convertido en soft watermark/telemetría sin gate de productor.
@@ -58,11 +61,11 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 
 El hard cap QD1 ya fue eliminado: ahora solo es el punto de partida. Falta coordinar explícitamente lectura/escritura cuando comparten el mismo medio, especialmente HDD, para evitar seek thrash y permitir que SSD/NVMe compartidos exploten concurrencia cuando el throughput físico mejore.
 
-### P1 — medir y reducir flush/commit del hot path
+### P1 — medir y reducir barreras de durabilidad restantes
 
-La auditoría confirmó que `RecoveryCheckpointWriter` **ya agrupa** estado: hasta 128 archivos o ~1 s antes de `FlushCheckpoint`, manteniendo el orden de durabilidad manifest → journal. No tratar recovery como fsync por archivo.
+`RecoveryCheckpointWriter` ya está batcheado y el reemplazo de namespace ya usa `File.Replace`. La barrera restante relevante es hacer durable el contenido antes del commit (`FlushToDisk` o `WriteThrough`). No eliminar esa garantía por intuición.
 
-El coste serial pendiente está en `FinishFile`: finalización/`FlushToDisk` del archivo, commit/rename y timestamp. Medir y reducir esas barreras donde sea posible sin romper el contrato de durabilidad. Para archivos pequeños también auditar si `WriteThroughFileThreshold = 4 MiB` mejora o empeora throughput real en datasets con muchos archivos.
+`WriteThroughFileThreshold = 4 MiB` intenta evitar un `FlushFileBuffers` separado cuando el archivo cabe en un writer chunk. Mantenerlo hasta benchmark físico específico de datasets con muchos archivos pequeños; si se cambia, debe ser por una política medida/adaptativa, no por otro umbral arbitrario.
 
 ### P1 — benchmark físico y tuning contra ExtremeCopy
 
