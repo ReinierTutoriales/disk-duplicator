@@ -1,3 +1,4 @@
+# One-shot migration; self-deletes after Core tests and WinUI Release pass.
 name: Migrate sequential block writes
 
 on:
