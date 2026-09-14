@@ -31,8 +31,6 @@ internal static class FastVerificationReader
                 }
                 catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
                 {
-                    // Unsupported unbuffered/overlapped combinations fall back to the
-                    // portable asynchronous reader. Hardware faults remain fatal.
                 }
             }
         }
@@ -49,10 +47,6 @@ internal static class FastVerificationReader
         CopyJob job,
         DestinationProgress progress)
     {
-        // DeviceScheduler is the physical-I/O authority. There is deliberately no
-        // verification-specific QD2/QD16 cap here. The global byte budget below is
-        // the memory authority shared by every destination verifier.
-        var depth = Math.Max(1, scheduler.MaxOutstandingIo);
         var pending = new Queue<PendingRead>();
         long offset = 0;
         var index = 0;
@@ -64,6 +58,7 @@ internal static class FastVerificationReader
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
+                var depth = Math.Max(1, scheduler.ExplorationQueueDepth);
                 while (index < plan.Blocks.Count && pending.Count < depth)
                 {
                     var expected = plan.Blocks[index++];
@@ -141,7 +136,7 @@ internal static class FastVerificationReader
         long offset,
         CancellationToken token)
     {
-        using var io = await scheduler.AcquireIoAsync(token).ConfigureAwait(false);
+        using var io = await scheduler.AcquireIoAsync(requestSize, token).ConfigureAwait(false);
         return await session.ReadAsync(buffer, requestSize, offset, token).ConfigureAwait(false);
     }
 
@@ -170,7 +165,7 @@ internal static class FastVerificationReader
             using var buffer = SourceBufferLease.RentBuffered(expected.Length);
             var filled = 0;
             var started = Stopwatch.GetTimestamp();
-            using (var io = await scheduler.AcquireIoAsync(job.Token).ConfigureAwait(false))
+            using (var io = await scheduler.AcquireIoAsync(expected.Length, job.Token).ConfigureAwait(false))
             {
                 while (filled < expected.Length)
                 {
