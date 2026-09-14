@@ -143,7 +143,6 @@ public static class DiagnosticsReport
                 .Append(" | preallocation=").Append(device.SupportsPreallocation)
                 .Append(" | profile=").Append(profile.Kind)
                 .Append(" | recommendedQD=").Append(profile.RecommendedQueueDepth.ToString(CultureInfo.InvariantCulture))
-                .Append(" | directIoCandidate=").Append(profile.AllowDirectIo)
                 .Append(" | logicalSector=").Append(device.LogicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | physicalSector=").Append(device.PhysicalSectorBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
                 .Append(" | alignmentOffset=").Append(device.SectorAlignmentOffsetBytes?.ToString(CultureInfo.InvariantCulture) ?? "unknown")
