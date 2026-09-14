@@ -98,8 +98,6 @@ public static class CopyEngine
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
-    private const int VerificationReadBufferSize = 8 * 1024 * 1024;
-    private const int VerificationDirectIoThreshold = 4 * 1024 * 1024;
     private const int PreallocationThreshold = 4 * 1024 * 1024;
     // Files at or below one writer chunk use Windows write-through instead of
     // paying for a separate FlushFileBuffers call after the write.
@@ -1371,116 +1369,31 @@ public static class CopyEngine
     private static async Task<byte[]> HashFileAsync(
         string path,
         CancellationToken token,
-        ResourceGovernor? resources = null,
-        CopyTelemetry? telemetry = null,
-        bool verification = false,
-        DestinationProgress? verificationProgress = null,
-        StorageDeviceInfo? directDevice = null,
-        DeviceScheduler? directScheduler = null)
+        ResourceGovernor? resources = null)
     {
         using var hasher = Hasher.New();
-        var bufferSize = verification ? VerificationReadBufferSize : 4 * 1024 * 1024;
-        var fileLength = verification ? new FileInfo(path).Length : 0L;
-        SourceBufferLease? buffer = null;
-        DirectIoSourceReader.Session? direct = null;
-        FileStream? buffered = null;
-        long totalRead = 0;
+        const int bufferSize = 4 * 1024 * 1024;
+        using var buffer = SourceBufferLease.RentBuffered(bufferSize);
+        await using var stream = OpenSourceStream(path);
 
-        try
+        while (true)
         {
-            var directOpened = verification &&
-                fileLength >= VerificationDirectIoThreshold &&
-                directDevice is not null &&
-                DirectIoSourceReader.TryOpenForVerification(path, directDevice, bufferSize, out direct);
+            var read = await stream.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
+            if (read == 0)
+                break;
 
-            if (directOpened)
+            if (resources is null)
             {
-                buffer = SourceBufferLease.RentAligned(bufferSize, direct!.Alignment);
+                hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
             }
             else
             {
-                buffer = SourceBufferLease.RentBuffered(bufferSize);
-                buffered = OpenSourceStream(path);
+                using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
+                hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
             }
-
-            while (true)
-            {
-                var readStarted = Stopwatch.GetTimestamp();
-                int read;
-                try
-                {
-                    if (directScheduler is null)
-                    {
-                        read = direct is not null
-                            ? direct.Read(buffer, bufferSize)
-                            : await buffered!.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        using var ioLease = await directScheduler.AcquireIoAsync(token).ConfigureAwait(false);
-                        read = direct is not null
-                            ? direct.Read(buffer, bufferSize)
-                            : await buffered!.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
-                    }
-                }
-                catch (Exception ex) when (direct is not null && DirectIoSourceReader.IsFallbackable(ex))
-                {
-                    direct.Dispose();
-                    direct = null;
-                    buffer.Dispose();
-                    buffer = SourceBufferLease.RentBuffered(bufferSize);
-                    buffered = OpenSourceStream(path);
-                    buffered.Position = totalRead;
-
-                    if (directScheduler is null)
-                    {
-                        read = await buffered.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        using var ioLease = await directScheduler.AcquireIoAsync(token).ConfigureAwait(false);
-                        read = await buffered.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
-                    }
-                }
-
-                var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                if (verification)
-                    telemetry?.RecordVerifyRead(read, readElapsed);
-                if (read == 0)
-                    break;
-
-                totalRead += read;
-                if (verification)
-                    verificationProgress?.AddVerified(read);
-
-                if (resources is null)
-                {
-                    var hashStarted = Stopwatch.GetTimestamp();
-                    hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
-                    if (verification)
-                        telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
-                }
-                else
-                {
-                    var cpuWaitStarted = Stopwatch.GetTimestamp();
-                    using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
-                    if (verification)
-                        telemetry?.RecordVerifyCpuWait(Stopwatch.GetElapsedTime(cpuWaitStarted));
-                    var hashStarted = Stopwatch.GetTimestamp();
-                    hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
-                    if (verification)
-                        telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
-                }
-            }
-            return hasher.Finalize().AsSpan().ToArray();
         }
-        finally
-        {
-            direct?.Dispose();
-            if (buffered is not null)
-                await buffered.DisposeAsync().ConfigureAwait(false);
-            buffer?.Dispose();
-        }
+
+        return hasher.Finalize().AsSpan().ToArray();
     }
 
     private static void CommitPart(string part, string destination, string backup)
