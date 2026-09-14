@@ -421,10 +421,16 @@ internal sealed class DeviceSchedulerMap : IDisposable
 {
     private readonly Dictionary<string, DeviceScheduler> _schedulers;
 
-    private DeviceSchedulerMap(Dictionary<string, DeviceScheduler> schedulers) =>
+    private DeviceSchedulerMap(
+        Dictionary<string, DeviceScheduler> schedulers,
+        DeviceScheduler? sharedSourceScheduler)
+    {
         _schedulers = schedulers;
+        SharedSourceScheduler = sharedSourceScheduler;
+    }
 
     public IReadOnlyCollection<DeviceScheduler> Schedulers => _schedulers.Values;
+    public DeviceScheduler? SharedSourceScheduler { get; }
 
     public IReadOnlyList<DeviceIoSnapshot> Snapshot() =>
         _schedulers.Values
@@ -445,6 +451,7 @@ internal sealed class DeviceSchedulerMap : IDisposable
         var destinationArray = destinations.ToArray();
         var groups = destinationArray.GroupBy(item => item.PhysicalDeviceId, StringComparer.OrdinalIgnoreCase);
         var schedulers = new Dictionary<string, DeviceScheduler>(StringComparer.OrdinalIgnoreCase);
+        DeviceScheduler? sharedSourceScheduler = null;
 
         foreach (var group in groups)
         {
@@ -457,15 +464,17 @@ internal sealed class DeviceSchedulerMap : IDisposable
 
             // Sharing source/destination on one physical disk starts cautiously
             // to avoid immediate seek thrash, but it is not a permanent QD1 cap.
-            if (source is not null && SharesPhysicalDevice(source, materializedGroup[0]))
+            var sharesSource = source is not null && SharesPhysicalDevice(source, materializedGroup[0]);
+            if (sharesSource)
                 initialDepth = 1;
 
-            schedulers.Add(
-                group.Key,
-                new DeviceScheduler(group.Key, initialDepth, backlogTarget, confidence));
+            var scheduler = new DeviceScheduler(group.Key, initialDepth, backlogTarget, confidence);
+            schedulers.Add(group.Key, scheduler);
+            if (sharesSource)
+                sharedSourceScheduler = scheduler;
         }
 
-        return new DeviceSchedulerMap(schedulers);
+        return new DeviceSchedulerMap(schedulers, sharedSourceScheduler);
     }
 
     internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
