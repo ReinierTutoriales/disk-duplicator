@@ -18,23 +18,25 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
-    public void ExactLocalSsdWithKnownSectorsIsEligible()
+    public void ExactLocalSsdAndHddWithKnownSectorsAreEligible()
     {
-        var device = Device("NVMe", StorageMediaKind.SolidState, 512, 4096);
+        var ssd = Device("NVMe", StorageMediaKind.SolidState, 512, 4096);
+        var hdd = Device("SATA", StorageMediaKind.Rotational, 512, 4096);
 
-        Assert.IsTrue(DirectIoSourceReader.IsEligible(device, 32 * 1024 * 1024));
-        Assert.AreEqual(4096, DirectIoSourceReader.RequiredAlignment(device));
+        Assert.IsTrue(DirectIoSourceReader.IsEligible(ssd, 32 * 1024 * 1024));
+        Assert.IsTrue(DirectIoSourceReader.IsEligible(hdd, 32 * 1024 * 1024));
+        Assert.AreEqual(4096, DirectIoSourceReader.RequiredAlignment(ssd));
+        Assert.AreEqual(4096, DirectIoSourceReader.RequiredAlignment(hdd));
     }
 
     [TestMethod]
-    public void NetworkHddUnknownIdentityAndMisalignedTransfersFallBack()
+    public void NetworkUnknownIdentityAndMisalignedTransfersFallBack()
     {
         var network = Device("Network", StorageMediaKind.SolidState, 512, 4096) with
         {
             IsNetwork = true,
             PhysicalDeviceNumber = null,
         };
-        var hdd = Device("SATA", StorageMediaKind.Rotational, 512, 4096);
         var unknownIdentity = Device("USB", StorageMediaKind.SolidState, 512, 4096) with
         {
             PhysicalDeviceNumber = null,
@@ -42,7 +44,6 @@ public sealed class DirectIoSourceReaderTests
         var ssd = Device("NVMe", StorageMediaKind.SolidState, 512, 4096);
 
         Assert.IsFalse(DirectIoSourceReader.IsEligible(network, 32 * 1024 * 1024));
-        Assert.IsFalse(DirectIoSourceReader.IsEligible(hdd, 32 * 1024 * 1024));
         Assert.IsFalse(DirectIoSourceReader.IsEligible(unknownIdentity, 32 * 1024 * 1024));
         Assert.IsFalse(DirectIoSourceReader.IsEligible(ssd, 32 * 1024 * 1024 - 1));
     }
