@@ -1238,7 +1238,7 @@ public static class CopyEngine
 
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         var commitStarted = Stopwatch.GetTimestamp();
-        CommitPart(current.PartPath, current.DestinationPath, current.BackupPath);
+        AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
         job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted), current.WriteThrough);
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         var recoveryStarted = Stopwatch.GetTimestamp();
@@ -1398,37 +1398,6 @@ public static class CopyEngine
         return hasher.Finalize().AsSpan().ToArray();
     }
 
-    private static void CommitPart(string part, string destination, string backup)
-    {
-        if (!File.Exists(destination))
-        {
-            File.Move(part, destination);
-            return;
-        }
-
-        WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
-        TryDelete(backup);
-        File.Move(destination, backup);
-        try
-        {
-            File.Move(part, destination);
-            TryDelete(backup);
-        }
-        catch (Exception commitError)
-        {
-            try
-            {
-                File.Move(backup, destination);
-            }
-            catch (Exception restoreError)
-            {
-                throw new IOException(
-                    $"CRÍTICO: falló el reemplazo de {destination} ({commitError.Message}) y también restaurar {backup} ({restoreError.Message}). El backup permanece en {backup}.",
-                    new AggregateException(commitError, restoreError));
-            }
-            throw new IOException($"No se pudo reemplazar {destination}; el original fue restaurado.", commitError);
-        }
-    }
 
     private static void EnsureDestinationDirectory(string root, string relative)
     {
