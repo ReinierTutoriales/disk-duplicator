@@ -176,6 +176,8 @@ public sealed class UnificationContractTests
             .SelectMany(method => method.GetParameters())
             .Any(parameter => string.Equals(parameter.Name, "countsData", StringComparison.Ordinal)));
 
+        var deliverData = deliveryMethods.Single(method => method.Name == "DeliverDataAsync");
+        Assert.AreEqual("DataMessage", deliverData.GetParameters()[1].ParameterType.Name);
         var deliverControl = deliveryMethods.Single(method => method.Name == "DeliverControlAsync");
         Assert.AreEqual("ControlMessage", deliverControl.GetParameters()[1].ParameterType.Name);
         var engineMethods = typeof(CopyEngine)
