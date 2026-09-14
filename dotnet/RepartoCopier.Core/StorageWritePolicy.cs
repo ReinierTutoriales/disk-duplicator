@@ -1,17 +1,17 @@
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// Selects the bounded buffered-write queue depth for one destination.
-/// QD2 is enabled only for medium/large local SSD writes on an exclusive
-/// physical-device scheduler. USB SSDs must first qualify through
-/// StorageIoProfile (fixed, TRIM-capable and exact physical-device identity).
+/// Selects useful destination write concurrency from physical-device capability
+/// and the current payload size. Depth is not globally capped at QD2; each slice
+/// must remain large enough to avoid turning sequential throughput into tiny-I/O
+/// overhead.
 /// </summary>
 public static class StorageWritePolicy
 {
     public const int ParallelFileThresholdBytes = 8 * 1024 * 1024;
     public const int MinimumParallelSliceBytes = 1024 * 1024;
 
-    public static int BufferedLargeWriteQueueDepth(
+    public static int LargeWriteQueueDepth(
         StorageDeviceInfo device,
         int schedulerMaxOutstandingIo,
         long fileSize,
@@ -32,9 +32,23 @@ public static class StorageWritePolicy
         }
 
         var profile = StorageIoProfile.For(device);
-        return profile.Kind is StorageProfileKind.UsbSsd or StorageProfileKind.SataSsd or StorageProfileKind.Nvme &&
-               profile.RecommendedQueueDepth >= 2
-            ? 2
-            : 1;
+        if (profile.Kind is not (StorageProfileKind.UsbSsd or StorageProfileKind.SataSsd or StorageProfileKind.Nvme))
+            return 1;
+
+        var payloadDepth = Math.Max(1, dataLength / MinimumParallelSliceBytes);
+        return Math.Max(
+            1,
+            Math.Min(
+                payloadDepth,
+                Math.Min(profile.RecommendedQueueDepth, schedulerMaxOutstandingIo)));
     }
+
+    // Temporary compatibility during the same writer migration. This member is
+    // removed once CopyEngine is switched to LargeWriteQueueDepth.
+    internal static int BufferedLargeWriteQueueDepth(
+        StorageDeviceInfo device,
+        int schedulerMaxOutstandingIo,
+        long fileSize,
+        int dataLength) =>
+        LargeWriteQueueDepth(device, schedulerMaxOutstandingIo, fileSize, dataLength);
 }
