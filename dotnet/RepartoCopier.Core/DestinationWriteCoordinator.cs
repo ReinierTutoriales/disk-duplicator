@@ -17,17 +17,23 @@ internal static class DestinationWriteCoordinator
         int requestedDepth,
         int minimumSliceBytes,
         DeviceScheduler scheduler,
-        CancellationToken token)
+        CancellationToken token,
+        int requiredAlignment = 1)
     {
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(scheduler);
         ArgumentOutOfRangeException.ThrowIfNegative(baseOffset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(requestedDepth);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(minimumSliceBytes);
+        if (requiredAlignment <= 0 || (requiredAlignment & (requiredAlignment - 1)) != 0)
+            throw new ArgumentOutOfRangeException(nameof(requiredAlignment));
+        if (requiredAlignment > 1 && (baseOffset % requiredAlignment != 0 || data.Length % requiredAlignment != 0))
+            throw new ArgumentException("La escritura Direct I/O debe comenzar y terminar en límites de sector.");
         if (data.IsEmpty)
             return 0;
 
-        var maximumUsefulDepth = Math.Max(1, data.Length / minimumSliceBytes);
+        var minimumAlignedSlice = AlignUp(minimumSliceBytes, requiredAlignment);
+        var maximumUsefulDepth = Math.Max(1, data.Length / minimumAlignedSlice);
         var depth = Math.Min(requestedDepth, maximumUsefulDepth);
         depth = Math.Min(depth, scheduler.MaxOutstandingIo);
         if (depth <= 1)
@@ -44,7 +50,10 @@ internal static class DestinationWriteCoordinator
             var bytesRemaining = data.Length - consumed;
             var length = index == depth - 1
                 ? bytesRemaining
-                : bytesRemaining / slicesRemaining;
+                : AlignDown(bytesRemaining / slicesRemaining, requiredAlignment);
+            if (length < minimumAlignedSlice && index != depth - 1)
+                throw new InvalidOperationException("La política de profundidad produjo un slice menor que el mínimo alineado.");
+
             var slice = data.Slice(consumed, length);
             var offset = checked(baseOffset + consumed);
             tasks[index] = WriteSliceAsync(handle, slice, offset, scheduler, token);
@@ -64,5 +73,16 @@ internal static class DestinationWriteCoordinator
     {
         using var io = await scheduler.AcquireIoAsync(token).ConfigureAwait(false);
         await ExplicitOffsetWriter.WriteOneAsync(handle, data, offset, token).ConfigureAwait(false);
+    }
+
+    private static int AlignDown(int value, int alignment) =>
+        alignment <= 1 ? value : value - value % alignment;
+
+    private static int AlignUp(int value, int alignment)
+    {
+        if (alignment <= 1)
+            return value;
+        var remainder = value % alignment;
+        return remainder == 0 ? value : checked(value + alignment - remainder);
     }
 }
