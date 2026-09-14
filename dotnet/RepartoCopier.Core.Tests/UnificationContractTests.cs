@@ -14,6 +14,8 @@ public sealed class UnificationContractTests
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.StorageDeviceProfile"));
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.SessionStore"));
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.DiagnosticsReport"));
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.GlobalControlBacklogBudget"));
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.WritePolicyDiagnosticsSnapshot"));
 
         var schedulerMethods = typeof(DeviceScheduler)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
@@ -28,11 +30,11 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(recoveryMethods, "AppendDurable");
 
-        var preallocationMethods = typeof(StoragePreallocationPolicy)
-            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(method => method.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(preallocationMethods, "ClearCacheForTests");
+        var preallocation = typeof(StoragePreallocationPolicy).GetMethod(
+            "GetPreallocationSize",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.IsNotNull(preallocation);
+        Assert.AreEqual(2, preallocation.GetParameters().Length);
 
         var storageMethods = typeof(AtomicStorage)
             .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
@@ -117,6 +119,10 @@ public sealed class UnificationContractTests
         CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationWriteBytes));
         CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationWriteOperations));
         CollectionAssert.Contains(snapshotProperties, nameof(CopyDiagnosticsSnapshot.DirectDestinationFallbacks));
+        CollectionAssert.DoesNotContain(snapshotProperties, "WriteThroughPolicy");
+        CollectionAssert.DoesNotContain(snapshotProperties, "BufferedPolicy");
+        CollectionAssert.DoesNotContain(snapshotProperties, "ControlBacklogWaitTime");
+        CollectionAssert.DoesNotContain(snapshotProperties, "PeakControlBacklogMessages");
 
         var currentFile = typeof(CopyEngine)
             .GetNestedType("CurrentFile", BindingFlags.NonPublic);
@@ -127,6 +133,7 @@ public sealed class UnificationContractTests
         CollectionAssert.Contains(currentProperties, "DirectSession");
         CollectionAssert.Contains(currentProperties, "DirectEnabled");
         CollectionAssert.Contains(currentProperties, "DirectRequested");
+        CollectionAssert.DoesNotContain(currentProperties, "WriteThrough");
         CollectionAssert.DoesNotContain(currentProperties, "PreferDirect");
     }
 
@@ -166,7 +173,7 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
-    public void PayloadMessagesStayOutsideControlBacklogBudgetArchitecture()
+    public void FanoutMessagesHaveNoFixedControlAdmissionGate()
     {
         var fanout = typeof(CopyEngine).GetNestedType("FanoutMessage", BindingFlags.NonPublic);
         var control = typeof(CopyEngine).GetNestedType("ControlMessage", BindingFlags.NonPublic);
@@ -193,10 +200,6 @@ public sealed class UnificationContractTests
             .SelectMany(method => method.GetParameters())
             .Any(parameter => string.Equals(parameter.Name, "countsData", StringComparison.Ordinal)));
 
-        var deliverData = deliveryMethods.Single(method => method.Name == "DeliverDataAsync");
-        Assert.AreEqual("DataMessage", deliverData.GetParameters()[1].ParameterType.Name);
-        var deliverControl = deliveryMethods.Single(method => method.Name == "DeliverControlAsync");
-        Assert.AreEqual("ControlMessage", deliverControl.GetParameters()[1].ParameterType.Name);
         var engineMethods = typeof(CopyEngine)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
             .Select(method => method.Name)
