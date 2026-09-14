@@ -40,4 +40,20 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(storageMethods, "ReadRegularFile");
     }
+
+    [TestMethod]
+    public void HardPerDeviceBacklogWaiterArchitectureStaysRemoved()
+    {
+        var nestedTypes = typeof(DeviceScheduler)
+            .GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(type => type.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(nestedTypes, "BacklogWaiter");
+
+        var fields = typeof(DeviceScheduler)
+            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(field => field.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(fields, "_backlogWaiters");
+    }
 }
