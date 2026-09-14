@@ -10,11 +10,7 @@ public sealed class PerformanceFreedomArchitectureTests
     [TestMethod]
     public void FixedSmallFilePerformanceFloorsStayRemoved()
     {
-        var writePolicyFields = typeof(StorageWritePolicy)
-            .GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(field => field.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(writePolicyFields, "ParallelFileThresholdBytes");
+        Assert.IsNull(typeof(CopyEngine).Assembly.GetType("RepartoCopier.Core.StorageWritePolicy"));
 
         var directWriterFields = typeof(DirectIoDestinationWriter)
             .GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
@@ -27,28 +23,6 @@ public sealed class PerformanceFreedomArchitectureTests
             .Select(field => field.Name)
             .ToArray();
         CollectionAssert.DoesNotContain(copyEngineFields, "SourcePrefetchThreshold");
-
-        var queueDepth = typeof(StorageWritePolicy).GetMethod(
-            nameof(StorageWritePolicy.LargeWriteQueueDepth),
-            BindingFlags.Static | BindingFlags.Public);
-        Assert.IsNotNull(queueDepth);
-        var parameters = queueDepth.GetParameters();
-        Assert.AreEqual(3, parameters.Length);
-        CollectionAssert.AreEqual(
-            new[] { "device", "schedulerExplorationDepth", "dataLength" },
-            parameters.Select(parameter => parameter.Name).ToArray());
-    }
-
-    [TestMethod]
-    public void SmallExactLocalPayloadCanUseAdaptiveParallelism()
-    {
-        var device = ExactLocalNvme();
-        const int payload = 256 * 1024;
-
-        var depth = StorageWritePolicy.LargeWriteQueueDepth(device, 64, payload);
-
-        Assert.IsGreaterThan(1, depth);
-        Assert.AreEqual(payload / StorageWritePolicy.MinimumParallelSliceBytes, depth);
     }
 
     [TestMethod]
