@@ -40,24 +40,28 @@ jobs:
 
           $corePath = 'dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs'
           $core = [System.IO.File]::ReadAllText($corePath)
-          $acquire = '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);'
-          $twoAcquires = $acquire + $nl + $acquire
-          $fourAcquires = $acquire + $nl + $acquire + $nl + $acquire + $nl + $acquire
-          $acquireCount = ([regex]::Matches($core, [regex]::Escape($twoAcquires))).Count
-          if ($acquireCount -ne 2) { throw "Expected 2 two-slot setup blocks, found $acquireCount." }
-          $core = $core.Replace($twoAcquires, $fourAcquires)
+          foreach ($indent in @('        ','            ')) {
+            $acquire = $indent + 'await governor.AcquirePrefetchSlotAsync(CancellationToken.None);'
+            $twoAcquires = $acquire + $nl + $acquire
+            $fourAcquires = $acquire + $nl + $acquire + $nl + $acquire + $nl + $acquire
+            $count = ([regex]::Matches($core, [regex]::Escape($twoAcquires))).Count
+            if ($count -ne 1) { throw "Expected one two-slot setup block at indent $($indent.Length), found $count." }
+            $core = $core.Replace($twoAcquires, $fourAcquires)
+          }
 
           $assertOld = 'Assert.AreEqual(2, governor.InFlight);'
           if (([regex]::Matches($core, [regex]::Escape($assertOld))).Count -ne 1) { throw 'Expected one in-flight=2 assertion.' }
           $core = $core.Replace($assertOld, 'Assert.AreEqual(4, governor.InFlight);')
 
-          $release = '        governor.ReleasePrefetchSlot();'
-          $assertZero = '        Assert.AreEqual(0, governor.InFlight);'
-          $twoReleases = $release + $nl + $release + $nl + $assertZero
-          $fourReleases = $release + $nl + $release + $nl + $release + $nl + $release + $nl + $assertZero
-          $releaseCount = ([regex]::Matches($core, [regex]::Escape($twoReleases))).Count
-          if ($releaseCount -ne 2) { throw "Expected 2 two-release teardown blocks, found $releaseCount." }
-          $core = $core.Replace($twoReleases, $fourReleases)
+          foreach ($indent in @('        ','            ')) {
+            $release = $indent + 'governor.ReleasePrefetchSlot();'
+            $assertZero = $indent + 'Assert.AreEqual(0, governor.InFlight);'
+            $twoReleases = $release + $nl + $release + $nl + $assertZero
+            $fourReleases = $release + $nl + $release + $nl + $release + $nl + $release + $nl + $assertZero
+            $count = ([regex]::Matches($core, [regex]::Escape($twoReleases))).Count
+            if ($count -ne 1) { throw "Expected one two-release teardown block at indent $($indent.Length), found $count." }
+            $core = $core.Replace($twoReleases, $fourReleases)
+          }
           [System.IO.File]::WriteAllText($corePath, $core, [System.Text.UTF8Encoding]::new($false))
 
           $fastPath = 'dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs'
