@@ -13,6 +13,7 @@ public sealed class UnificationContractTests
         var assembly = typeof(StorageIoProfile).Assembly;
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.StorageDeviceProfile"));
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.SessionStore"));
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.DiagnosticsReport"));
 
         var schedulerMethods = typeof(DeviceScheduler)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
@@ -32,5 +33,11 @@ public sealed class UnificationContractTests
             .Select(method => method.Name)
             .ToArray();
         CollectionAssert.DoesNotContain(preallocationMethods, "ClearCacheForTests");
+
+        var storageMethods = typeof(AtomicStorage)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(storageMethods, "ReadRegularFile");
     }
 }
