@@ -10,19 +10,20 @@ namespace RepartoCopier.Core;
 /// the hard memory ceiling.
 ///
 /// Targets are intentionally expressed as multiples of the 16 MiB large-file
-/// block used by CopyEngine. A one-block branch is too shallow to absorb normal
-/// device/USB latency jitter and can repeatedly stall the source pipeline.
+/// block used by CopyEngine. Because SharedBlock payload is reference-counted,
+/// deeper independent branch windows improve tolerance to transient device/USB
+/// latency without multiplying payload memory by destination count.
 /// </summary>
 internal static class FanoutPerformancePolicy
 {
     private const int MiB = 1024 * 1024;
 
-    private const long ConservativeBacklog = 64L * MiB; // 4 x 16 MiB
-    private const long RotationalBacklog = 64L * MiB;   // 4 x 16 MiB
-    private const long UsbFlashBacklog = 64L * MiB;     // 4 x 16 MiB
-    private const long UsbSsdBacklog = 128L * MiB;      // 8 x 16 MiB
-    private const long SataSsdBacklog = 128L * MiB;     // 8 x 16 MiB
-    private const long NvmeBacklog = 256L * MiB;        // 16 x 16 MiB
+    private const long ConservativeBacklog = 64L * MiB;  // 4 x 16 MiB
+    private const long RotationalBacklog = 128L * MiB;   // 8 x 16 MiB
+    private const long UsbFlashBacklog = 128L * MiB;     // 8 x 16 MiB
+    private const long UsbSsdBacklog = 256L * MiB;       // 16 x 16 MiB
+    private const long SataSsdBacklog = 256L * MiB;      // 16 x 16 MiB
+    private const long NvmeBacklog = 512L * MiB;         // 32 x 16 MiB
     private const long NetworkBacklog = 32L * MiB;
 
     internal static StorageIoProfile For(StorageDeviceInfo device)
@@ -54,7 +55,7 @@ internal static class FanoutPerformancePolicy
             return new(
                 StorageProfileKind.UsbSsd,
                 exactPhysicalIdentity ? 2 : 1,
-                exactPhysicalIdentity ? UsbSsdBacklog : ConservativeBacklog);
+                exactPhysicalIdentity ? UsbSsdBacklog : RotationalBacklog);
         }
 
         if (device.MediaKind == StorageMediaKind.SolidState &&
