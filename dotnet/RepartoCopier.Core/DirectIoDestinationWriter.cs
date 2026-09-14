@@ -16,12 +16,11 @@ internal static class DirectIoDestinationWriter
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
     private const uint FileFlagOverlapped = 0x40000000;
-    internal const int MinimumFileSize = 16 * 1024 * 1024;
 
     internal static bool IsEligible(StorageDeviceInfo device, long fileSize)
     {
         ArgumentNullException.ThrowIfNull(device);
-        if (!OperatingSystem.IsWindows() || fileSize < MinimumFileSize || device.IsNetwork || !device.ProbeSucceeded)
+        if (!OperatingSystem.IsWindows() || fileSize <= 0 || device.IsNetwork || !device.ProbeSucceeded)
             return false;
         if (StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact || !device.HasKnownSectorAlignment)
             return false;
