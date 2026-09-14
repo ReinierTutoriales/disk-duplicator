@@ -1,0 +1,19 @@
+name: One-time post-unification audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-post-unification-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Audit unified architecture
+        run: python tools/post_unification_audit.py
