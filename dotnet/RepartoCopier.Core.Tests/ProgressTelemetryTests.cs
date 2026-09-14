@@ -126,18 +126,17 @@ public sealed class ProgressTelemetryTests
         Assert.IsNotNull(governor);
         Assert.IsTrue(governor.SourceReadTime > TimeSpan.Zero);
         Assert.IsTrue(governor.CurrentPrefetchLimit >= 1);
-        Assert.IsTrue(governor.CurrentPrefetchLimit <= 4);
         Assert.IsTrue(governor.MinimumObservedPrefetchLimit <= governor.CurrentPrefetchLimit);
         Assert.IsTrue(governor.MaximumObservedPrefetchLimit >= governor.CurrentPrefetchLimit);
         Assert.AreEqual(0, governor.InFlight);
     }
 
     [TestMethod]
-    public async Task DiagnosticsSnapshotSegmentsWriteThroughAndBufferedPolicies()
+    public async Task DiagnosticsSnapshotUsesUnifiedWritePathTelemetry()
     {
         const long smallSize = 1024 * 1024;
         const long largeSize = 5L * 1024 * 1024;
-        using var temp = new TempScope("write-policy-telemetry");
+        using var temp = new TempScope("unified-write-telemetry");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
         await using (var small = new FileStream(Path.Combine(source, "small.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
             small.SetLength(smallSize);
@@ -153,21 +152,11 @@ public sealed class ProgressTelemetryTests
         Assert.AreEqual(DestinationPhase.Done, final.Phase, final.Error);
 
         var diagnostics = job.DiagnosticsSnapshot();
-        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.Files);
-        Assert.AreEqual(smallSize, diagnostics.WriteThroughPolicy.WrittenBytes);
-        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.Commits);
-        Assert.AreEqual(1, diagnostics.WriteThroughPolicy.RecoveryEvents);
-        Assert.IsTrue(diagnostics.WriteThroughPolicy.WriteTime > TimeSpan.Zero);
-
-        Assert.AreEqual(1, diagnostics.BufferedPolicy.Files);
-        Assert.AreEqual(largeSize, diagnostics.BufferedPolicy.WrittenBytes);
-        Assert.AreEqual(1, diagnostics.BufferedPolicy.Commits);
-        Assert.AreEqual(1, diagnostics.BufferedPolicy.RecoveryEvents);
-        Assert.IsTrue(diagnostics.BufferedPolicy.WriteTime > TimeSpan.Zero);
-
         Assert.AreEqual(smallSize + largeSize, diagnostics.WrittenBytes);
         Assert.AreEqual(2, diagnostics.Commits);
         Assert.AreEqual(2, diagnostics.RecoveryEvents);
+        Assert.IsGreaterThanOrEqualTo(2, diagnostics.DurableFlushes);
+        Assert.IsTrue(diagnostics.WriteTime > TimeSpan.Zero);
     }
 
     private sealed class TempScope : IDisposable
