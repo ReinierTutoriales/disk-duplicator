@@ -7,115 +7,68 @@ namespace RepartoCopier.Core.Tests;
 public sealed class StorageWritePolicyTests
 {
     [TestMethod]
-    public void SataSsdLargeExclusiveWriteCanUseQueueDepthEight()
+    public void ExactLocalSsdCanExploreFarBeyondLegacyProfileDepths()
     {
-        var device = Device("SATA", StorageMediaKind.SolidState, trim: true);
-
-        var qd = StorageWritePolicy.LargeWriteQueueDepth(
-            device,
-            schedulerMaxOutstandingIo: 8,
-            fileSize: 64L * 1024 * 1024,
-            dataLength: 32 * 1024 * 1024);
-
-        Assert.AreEqual(8, qd);
-    }
-
-    [TestMethod]
-    public void NvmeLargeExclusiveWriteCanUseQueueDepthSixteen()
-    {
-        var device = Device("NVMe", StorageMediaKind.SolidState, trim: true);
-
-        var qd = StorageWritePolicy.LargeWriteQueueDepth(
-            device,
-            schedulerMaxOutstandingIo: 16,
-            fileSize: 512L * 1024 * 1024,
-            dataLength: 32 * 1024 * 1024);
-
-        Assert.AreEqual(16, qd);
-    }
-
-    [TestMethod]
-    public void ExactUsbSsdLargeExclusiveWriteCanUseQueueDepthFour()
-    {
-        var device = Device("USB", StorageMediaKind.SolidState, trim: true);
-
-        var qd = StorageWritePolicy.LargeWriteQueueDepth(
-            device,
-            schedulerMaxOutstandingIo: 4,
-            fileSize: 64L * 1024 * 1024,
-            dataLength: 32 * 1024 * 1024);
-
-        Assert.AreEqual(4, qd);
-    }
-
-    [TestMethod]
-    public void PayloadSizeBoundsUsefulDepthWithoutGlobalQd2Cap()
-    {
+        var sata = Device("SATA", StorageMediaKind.SolidState, trim: true);
         var nvme = Device("NVMe", StorageMediaKind.SolidState, trim: true);
+        var usb = Device("USB", StorageMediaKind.SolidState, trim: true);
 
-        Assert.AreEqual(
-            8,
-            StorageWritePolicy.LargeWriteQueueDepth(
-                nvme,
-                schedulerMaxOutstandingIo: 16,
-                fileSize: 64L * 1024 * 1024,
-                dataLength: 8 * 1024 * 1024));
-
-        Assert.AreEqual(
-            1,
-            StorageWritePolicy.LargeWriteQueueDepth(
-                nvme,
-                schedulerMaxOutstandingIo: 16,
-                fileSize: 8L * 1024 * 1024 - 1,
-                dataLength: 8 * 1024 * 1024));
+        Assert.AreEqual(64, StorageWritePolicy.LargeWriteQueueDepth(
+            sata, schedulerExplorationDepth: 64, 256L * 1024 * 1024, 32 * 1024 * 1024));
+        Assert.AreEqual(128, StorageWritePolicy.LargeWriteQueueDepth(
+            nvme, schedulerExplorationDepth: 128, 512L * 1024 * 1024, 32 * 1024 * 1024));
+        Assert.AreEqual(32, StorageWritePolicy.LargeWriteQueueDepth(
+            usb, schedulerExplorationDepth: 32, 128L * 1024 * 1024, 32 * 1024 * 1024));
     }
 
     [TestMethod]
-    public void UncertainUsbSsdAndSharedPhysicalDiskStayQueueDepthOne()
+    public void ExactLocalHddAndSharedPhysicalDiskAreNotPermanentlyCappedAtOne()
     {
-        var uncertain = Device("USB", StorageMediaKind.SolidState, trim: true) with
-        {
-            PhysicalDeviceNumber = null,
-        };
+        var hdd = Device("SATA", StorageMediaKind.Rotational, trim: false);
         var shared = Device("SATA", StorageMediaKind.SolidState, trim: true) with
         {
             SharesPhysicalDevice = true,
         };
 
-        Assert.AreEqual(
-            1,
-            StorageWritePolicy.LargeWriteQueueDepth(
-                uncertain,
-                16,
-                64L * 1024 * 1024,
-                32 * 1024 * 1024));
-        Assert.AreEqual(
-            1,
-            StorageWritePolicy.LargeWriteQueueDepth(
-                shared,
-                16,
-                64L * 1024 * 1024,
-                32 * 1024 * 1024));
+        Assert.AreEqual(8, StorageWritePolicy.LargeWriteQueueDepth(
+            hdd, 8, 64L * 1024 * 1024, 32 * 1024 * 1024));
+        Assert.AreEqual(16, StorageWritePolicy.LargeWriteQueueDepth(
+            shared, 16, 64L * 1024 * 1024, 32 * 1024 * 1024));
     }
 
     [TestMethod]
-    public void HddFlashNetworkAndSmallTailStayQueueDepthOne()
+    public void PayloadSizeIsThePracticalExplorationBound()
     {
-        var hdd = Device("SATA", StorageMediaKind.Rotational, trim: false);
-        var flash = Device("USB", StorageMediaKind.SolidState, trim: false) with
+        var nvme = Device("NVMe", StorageMediaKind.SolidState, trim: true);
+        var qd = StorageWritePolicy.LargeWriteQueueDepth(
+            nvme,
+            schedulerExplorationDepth: 16_384,
+            fileSize: 64L * 1024 * 1024,
+            dataLength: 32 * 1024 * 1024);
+
+        Assert.AreEqual((32 * 1024 * 1024) / StorageWritePolicy.MinimumParallelSliceBytes, qd);
+    }
+
+    [TestMethod]
+    public void UnknownIdentityNetworkAndSmallFileRemainNonSpeculative()
+    {
+        var uncertain = Device("USB", StorageMediaKind.SolidState, trim: true) with
         {
-            Removable = true,
+            PhysicalDeviceNumber = null,
         };
         var network = Device("Network", StorageMediaKind.Unknown, trim: null) with
         {
             IsNetwork = true,
+            PhysicalDeviceNumber = null,
         };
-        var sata = Device("SATA", StorageMediaKind.SolidState, trim: true);
+        var nvme = Device("NVMe", StorageMediaKind.SolidState, trim: true);
 
-        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(hdd, 16, 64L * 1024 * 1024, 32 * 1024 * 1024));
-        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(flash, 16, 64L * 1024 * 1024, 32 * 1024 * 1024));
-        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(network, 16, 64L * 1024 * 1024, 32 * 1024 * 1024));
-        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(sata, 16, 64L * 1024 * 1024, 1024 * 1024));
+        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(
+            uncertain, 128, 64L * 1024 * 1024, 32 * 1024 * 1024));
+        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(
+            network, 128, 64L * 1024 * 1024, 32 * 1024 * 1024));
+        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(
+            nvme, 128, StorageWritePolicy.ParallelFileThresholdBytes - 1L, 32 * 1024 * 1024));
     }
 
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
