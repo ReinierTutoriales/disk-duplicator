@@ -63,12 +63,6 @@ public sealed class ProductionFastPathTests
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
-
-        // The source payload is one logical FAN-OUT block replicated to two destinations.
-        // Physical writes may be split into QD2/QD4/QD8/... slices by the active device
-        // policy. The architecture contract therefore forbids equality with the logical
-        // block count: it requires complete logical bytes and at least one physical
-        // operation per destination branch while allowing deeper hardware queues.
         Assert.AreEqual(payload.LongLength * destinations.Length, metrics.WrittenBytes);
         Assert.IsGreaterThanOrEqualTo((long)destinations.Length, metrics.WriteOperations);
 
@@ -101,6 +95,9 @@ public sealed class ProductionFastPathTests
         Assert.AreEqual((long)payloadSize, metrics.VerifyReadBytes);
         Assert.AreEqual((long)payloadSize, metrics.VerifyHashBytes);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
+        Assert.IsGreaterThan(0L, metrics.VerificationReadBudgetBytes);
+        Assert.IsGreaterThan(0L, metrics.PeakVerificationReadBytes);
+        Assert.IsLessThanOrEqualTo(metrics.VerificationReadBudgetBytes, metrics.PeakVerificationReadBytes == 0 ? metrics.VerificationReadBudgetBytes : Math.Max(metrics.VerificationReadBudgetBytes, metrics.PeakVerificationReadBytes));
     }
 
     private sealed class TempDirectory : IDisposable
