@@ -21,6 +21,7 @@ jobs:
       - name: Apply exact source-window and test replacements
         shell: pwsh
         run: |
+          $nl = [Environment]::NewLine
           $enginePath = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
           $engine = [System.IO.File]::ReadAllText($enginePath)
           $engineReplacements = [ordered]@{
@@ -39,21 +40,24 @@ jobs:
 
           $corePath = 'dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs'
           $core = [System.IO.File]::ReadAllText($corePath)
-          $acquirePattern = '(?m)^        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);\r?\n        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);$'
-          $acquireMatches = [regex]::Matches($core, $acquirePattern)
-          if ($acquireMatches.Count -ne 2) { throw "Expected 2 two-slot setup blocks, found $($acquireMatches.Count)." }
-          $fourAcquires = @('        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);') -join [Environment]::NewLine
-          $core = [regex]::Replace($core, $acquirePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourAcquires })
+          $acquire = '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);'
+          $twoAcquires = $acquire + $nl + $acquire
+          $fourAcquires = $acquire + $nl + $acquire + $nl + $acquire + $nl + $acquire
+          $acquireCount = ([regex]::Matches($core, [regex]::Escape($twoAcquires))).Count
+          if ($acquireCount -ne 2) { throw "Expected 2 two-slot setup blocks, found $acquireCount." }
+          $core = $core.Replace($twoAcquires, $fourAcquires)
 
           $assertOld = 'Assert.AreEqual(2, governor.InFlight);'
           if (([regex]::Matches($core, [regex]::Escape($assertOld))).Count -ne 1) { throw 'Expected one in-flight=2 assertion.' }
           $core = $core.Replace($assertOld, 'Assert.AreEqual(4, governor.InFlight);')
 
-          $releasePattern = '(?m)^        governor\.ReleasePrefetchSlot\(\);\r?\n        governor\.ReleasePrefetchSlot\(\);\r?\n        Assert\.AreEqual\(0, governor\.InFlight\);$'
-          $releaseMatches = [regex]::Matches($core, $releasePattern)
-          if ($releaseMatches.Count -ne 2) { throw "Expected 2 two-release teardown blocks, found $($releaseMatches.Count)." }
-          $fourReleases = @('        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        Assert.AreEqual(0, governor.InFlight);') -join [Environment]::NewLine
-          $core = [regex]::Replace($core, $releasePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourReleases })
+          $release = '        governor.ReleasePrefetchSlot();'
+          $assertZero = '        Assert.AreEqual(0, governor.InFlight);'
+          $twoReleases = $release + $nl + $release + $nl + $assertZero
+          $fourReleases = $release + $nl + $release + $nl + $release + $nl + $release + $nl + $assertZero
+          $releaseCount = ([regex]::Matches($core, [regex]::Escape($twoReleases))).Count
+          if ($releaseCount -ne 2) { throw "Expected 2 two-release teardown blocks, found $releaseCount." }
+          $core = $core.Replace($twoReleases, $fourReleases)
           [System.IO.File]::WriteAllText($corePath, $core, [System.Text.UTF8Encoding]::new($false))
 
           $fastPath = 'dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs'
