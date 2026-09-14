@@ -12,9 +12,11 @@ internal static class FastVerificationReader
         StorageDeviceInfo device,
         DeviceScheduler scheduler,
         VerificationPlan plan,
+        VerificationReadBudget readBudget,
         CopyJob job,
         DestinationProgress progress)
     {
+        ArgumentNullException.ThrowIfNull(readBudget);
         if (plan.Blocks.Count == 0)
             return plan.Length == 0;
 
@@ -25,7 +27,7 @@ internal static class FastVerificationReader
             {
                 try
                 {
-                    return await VerifyDirectAsync(path, device, scheduler, plan, direct!, job, progress).ConfigureAwait(false);
+                    return await VerifyDirectAsync(path, scheduler, plan, readBudget, direct!, job, progress).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
                 {
@@ -35,64 +37,100 @@ internal static class FastVerificationReader
             }
         }
 
-        return await VerifyBufferedAsync(path, plan, scheduler, job, progress).ConfigureAwait(false);
+        return await VerifyBufferedAsync(path, plan, scheduler, readBudget, job, progress).ConfigureAwait(false);
     }
 
     private static async Task<bool> VerifyDirectAsync(
         string path,
-        StorageDeviceInfo device,
         DeviceScheduler scheduler,
         VerificationPlan plan,
+        VerificationReadBudget readBudget,
         DirectIoSourceReader.OverlappedSession session,
         CopyJob job,
         DestinationProgress progress)
     {
-        var depth = device.MediaKind == StorageMediaKind.SolidState
-            ? Math.Clamp(scheduler.MaxOutstandingIo, 1, 2)
-            : 1;
+        // DeviceScheduler is the physical-I/O authority. There is deliberately no
+        // verification-specific QD2/QD16 cap here. The global byte budget below is
+        // the memory authority shared by every destination verifier.
+        var depth = Math.Max(1, scheduler.MaxOutstandingIo);
         var pending = new Queue<PendingRead>();
         long offset = 0;
         var index = 0;
 
-        while (index < plan.Blocks.Count || pending.Count > 0)
+        try
         {
-            job.Token.ThrowIfCancellationRequested();
-            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-
-            while (index < plan.Blocks.Count && pending.Count < depth)
+            while (index < plan.Blocks.Count || pending.Count > 0)
             {
-                var expected = plan.Blocks[index++];
-                var requestSize = AlignUp(expected.Length, session.Alignment);
-                var lease = SourceBufferLease.RentAligned(requestSize, session.Alignment);
-                var started = Stopwatch.GetTimestamp();
-                var task = ReadDirectAsync(session, scheduler, lease, requestSize, offset, job.Token);
-                pending.Enqueue(new PendingRead(expected, lease, started, task));
-                offset = checked(offset + expected.Length);
+                job.Token.ThrowIfCancellationRequested();
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+
+                while (index < plan.Blocks.Count && pending.Count < depth)
+                {
+                    var expected = plan.Blocks[index++];
+                    var requestSize = AlignUp(expected.Length, session.Alignment);
+                    var reservation = await readBudget.AcquireAsync(requestSize, job.Token).ConfigureAwait(false);
+                    SourceBufferLease? lease = null;
+                    try
+                    {
+                        lease = SourceBufferLease.RentAligned(requestSize, session.Alignment);
+                        var started = Stopwatch.GetTimestamp();
+                        var task = ReadDirectAsync(session, scheduler, lease, requestSize, offset, job.Token);
+                        pending.Enqueue(new PendingRead(expected, lease, reservation, started, task));
+                        lease = null;
+                        reservation = null!;
+                        offset = checked(offset + expected.Length);
+                    }
+                    finally
+                    {
+                        lease?.Dispose();
+                        reservation?.Dispose();
+                    }
+                }
+
+                var current = pending.Dequeue();
+                try
+                {
+                    var read = await current.Read.ConfigureAwait(false);
+                    var elapsed = Stopwatch.GetElapsedTime(current.Started);
+                    job.Telemetry.RecordVerifyRead(current.Expected.Length, elapsed);
+                    if (read < current.Expected.Length)
+                        throw new IOException($"Lectura incompleta durante verificación: {path}");
+
+                    var crcStarted = Stopwatch.GetTimestamp();
+                    var actual = FastCrc32.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
+                    job.Telemetry.RecordVerifyHash(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
+                    if (actual != current.Expected.Crc32)
+                        return false;
+                    progress.AddVerified(current.Expected.Length);
+                }
+                finally
+                {
+                    current.Buffer.Dispose();
+                    current.Reservation.Dispose();
+                }
             }
 
+            return offset == plan.Length;
+        }
+        finally
+        {
+            await DrainPendingAsync(pending).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task DrainPendingAsync(Queue<PendingRead> pending)
+    {
+        while (pending.Count > 0)
+        {
             var current = pending.Dequeue();
-            try
-            {
-                var read = await current.Read.ConfigureAwait(false);
-                var elapsed = Stopwatch.GetElapsedTime(current.Started);
-                job.Telemetry.RecordVerifyRead(current.Expected.Length, elapsed);
-                if (read < current.Expected.Length)
-                    throw new IOException($"Lectura incompleta durante verificación: {path}");
-
-                var crcStarted = Stopwatch.GetTimestamp();
-                var actual = FastCrc32.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
-                job.Telemetry.RecordVerifyHash(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
-                if (actual != current.Expected.Crc32)
-                    return false;
-                progress.AddVerified(current.Expected.Length);
-            }
+            try { await current.Read.ConfigureAwait(false); }
+            catch { }
             finally
             {
                 current.Buffer.Dispose();
+                current.Reservation.Dispose();
             }
         }
-
-        return offset == plan.Length;
     }
 
     private static async Task<int> ReadDirectAsync(
@@ -111,6 +149,7 @@ internal static class FastVerificationReader
         string path,
         VerificationPlan plan,
         DeviceScheduler scheduler,
+        VerificationReadBudget readBudget,
         CopyJob job,
         DestinationProgress progress)
     {
@@ -127,6 +166,7 @@ internal static class FastVerificationReader
         {
             job.Token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+            using var reservation = await readBudget.AcquireAsync(expected.Length, job.Token).ConfigureAwait(false);
             using var buffer = SourceBufferLease.RentBuffered(expected.Length);
             var filled = 0;
             var started = Stopwatch.GetTimestamp();
@@ -164,6 +204,7 @@ internal static class FastVerificationReader
     private sealed record PendingRead(
         VerificationBlock Expected,
         SourceBufferLease Buffer,
+        VerificationReadBudget.Lease Reservation,
         long Started,
         Task<int> Read);
 }
