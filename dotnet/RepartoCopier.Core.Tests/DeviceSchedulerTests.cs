@@ -78,16 +78,13 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
-    public async Task SoftBacklogTargetStillDoesNotBlockOverflowAdmission()
+    public void SoftBacklogTargetIsAccountingOnlyAndAllowsImmediateOverflow()
     {
         const int block = 8 * 1024 * 1024;
         using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, block);
 
-        Assert.IsTrue(scheduler.TryReserveBacklog(block));
-        Assert.IsFalse(scheduler.TryReserveBacklog(block));
-        var overflow = scheduler.ReserveBacklogAsync(block, CancellationToken.None);
-        Assert.IsTrue(overflow.IsCompletedSuccessfully);
-        await overflow;
+        scheduler.ReserveBacklog(block);
+        scheduler.ReserveBacklog(block);
 
         var snapshot = scheduler.Snapshot();
         Assert.AreEqual(2L * block, snapshot.QueuedBytes);

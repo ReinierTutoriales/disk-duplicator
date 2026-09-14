@@ -143,30 +143,14 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    public bool TryReserveBacklog(int bytes)
+    public void ReserveBacklog(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
         lock (_backlogGate)
         {
             ThrowIfDisposed();
-            var queued = Interlocked.Read(ref _queuedBytes);
-            if (queued + bytes > BacklogTargetBytes && queued != 0)
-                return false;
-            ReserveBacklogLocked(bytes);
-            return true;
-        }
-    }
-
-    public ValueTask ReserveBacklogAsync(int bytes, CancellationToken token)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-        token.ThrowIfCancellationRequested();
-        lock (_backlogGate)
-        {
-            ThrowIfDisposed();
             ReserveBacklogLocked(bytes);
         }
-        return ValueTask.CompletedTask;
     }
 
     public void ReleaseBacklog(int bytes)
