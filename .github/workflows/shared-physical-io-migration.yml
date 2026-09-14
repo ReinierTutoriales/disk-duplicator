@@ -1,0 +1,20 @@
+name: Shared physical I/O migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/shared-physical-io-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Coordinate shared source and destination I/O
+        shell: pwsh
+        run: ./tools/patch-shared-physical-io.ps1
