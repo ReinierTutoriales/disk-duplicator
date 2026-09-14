@@ -1,75 +1,3 @@
-$ErrorActionPreference = 'Stop'
-
-$identityPath = 'dotnet/RepartoCopier.Core/DeviceIdentityConfidence.cs'
-$schedulerPath = 'dotnet/RepartoCopier.Core/DeviceScheduler.cs'
-$testPath = 'dotnet/RepartoCopier.Core.Tests/StorageDeviceIdentityTests.cs'
-
-$identity = @'
-namespace RepartoCopier.Core;
-
-public enum DeviceIdentityConfidence
-{
-    Unknown = 0,
-    Partial = 1,
-    Exact = 2,
-}
-
-public static class StorageDeviceIdentity
-{
-    public static DeviceIdentityConfidence ConfidenceFor(StorageDeviceInfo device)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-        if (device.PhysicalDeviceNumber.HasValue)
-            return DeviceIdentityConfidence.Exact;
-        if (!string.IsNullOrWhiteSpace(device.VolumeRoot))
-            return DeviceIdentityConfidence.Partial;
-        return DeviceIdentityConfidence.Unknown;
-    }
-
-    internal static bool TryGetExactPhysicalDeviceNumber(StorageDeviceInfo device, out uint number)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-        if (ConfidenceFor(device) == DeviceIdentityConfidence.Exact &&
-            device.PhysicalDeviceNumber is uint physicalNumber)
-        {
-            number = physicalNumber;
-            return true;
-        }
-
-        number = default;
-        return false;
-    }
-
-    internal static bool SamePhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        TryGetExactPhysicalDeviceNumber(left, out var leftNumber) &&
-        TryGetExactPhysicalDeviceNumber(right, out var rightNumber) &&
-        leftNumber == rightNumber;
-
-    internal static bool ProvenDifferentPhysicalDevices(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        TryGetExactPhysicalDeviceNumber(left, out var leftNumber) &&
-        TryGetExactPhysicalDeviceNumber(right, out var rightNumber) &&
-        leftNumber != rightNumber;
-}
-'@
-Set-Content -Path $identityPath -Value $identity -NoNewline
-
-$scheduler = Get-Content -Raw $schedulerPath
-$old = @'
-    internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        left.PhysicalDeviceNumber is uint leftNumber &&
-        right.PhysicalDeviceNumber is uint rightNumber &&
-        leftNumber == rightNumber;
-'@
-$new = @'
-    internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        StorageDeviceIdentity.SamePhysicalDevice(left, right);
-'@
-$count = ([regex]::Matches($scheduler, [regex]::Escape($old))).Count
-if ($count -ne 1) { throw "Expected one legacy physical-device comparison, found $count." }
-$scheduler = $scheduler.Replace($old, $new)
-Set-Content -Path $schedulerPath -Value $scheduler -NoNewline
-
-$tests = @'
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RepartoCopier.Core;
 
@@ -179,10 +107,4 @@ public sealed class StorageDeviceIdentityTests
             null,
             false,
             "physical identity unresolved");
-}
-'@
-Set-Content -Path $testPath -Value $tests -NoNewline
-
-if ((Get-Content -Raw $schedulerPath) -match 'left\.PhysicalDeviceNumber is uint leftNumber') {
-    throw 'Legacy physical identity comparison remains in DeviceSchedulerMap.'
 }
