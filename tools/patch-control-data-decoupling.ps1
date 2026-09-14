@@ -22,19 +22,50 @@ Replace-Exact $copy @'
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 '@ 'clasificar mensajes de control'
 
-Replace-Exact $copy '        bool countsData,`n        CopyJob job)' '        CopyJob job)' 'eliminar countsData de DeliverAsync'
+Replace-Exact $copy @'
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job)
+'@ @'
+        FanoutMessage message,
+        CopyJob job)
+'@ 'eliminar countsData de DeliverAsync'
+
 Replace-Exact $copy '        if (countsData && message is DataMessage dataMessage)' '        if (message is DataMessage dataMessage)' 'tipar data en DeliverAsync'
 Replace-Exact $copy '                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);' '                await DeliverOneAsync(recipients[index], message, job).ConfigureAwait(false);' 'migrar control DeliverOne'
 
-$text = [IO.File]::ReadAllText($copy)
-$text = $text.Replace("                        countsData: true,`n                        job,", "                        job,")
-$text = $text.Replace("                    countsData: true,`n                    job,", "                    job,")
-$text = $text.Replace("        bool countsData,`n        CopyJob job,`n        bool backlogReserved = false)", "        CopyJob job,`n        bool backlogReserved = false)")
-$text = $text.Replace('DeliverAsync(active, new BeginMessage(entry), countsData: false, job)', 'DeliverAsync(active, new BeginMessage(entry), job)')
-$text = $text.Replace('DeliverAsync(active, new DataMessage(block), countsData: true, job)', 'DeliverAsync(active, new DataMessage(block), job)')
-$text = $text.Replace('DeliverAsync(active, new DataMessage(shared), countsData: true, job)', 'DeliverAsync(active, new DataMessage(shared), job)')
-$text = $text.Replace('DeliverAsync(active, new EndMessage(hash), countsData: false, job)', 'DeliverAsync(active, new EndMessage(hash), job)')
-[IO.File]::WriteAllText($copy, $text, [Text.UTF8Encoding]::new($false))
+Replace-Exact $copy @'
+                        message,
+                        countsData: true,
+                        job,
+                        backlogReserved: true).ConfigureAwait(false);
+'@ @'
+                        message,
+                        job,
+                        backlogReserved: true).ConfigureAwait(false);
+'@ 'migrar DeliverOne data rápida'
+
+Replace-Exact $copy @'
+                    message,
+                    countsData: true,
+                    job,
+                    backlogReserved: true).ConfigureAwait(false);
+'@ @'
+                    message,
+                    job,
+                    backlogReserved: true).ConfigureAwait(false);
+'@ 'migrar DeliverOne data diferida'
+
+Replace-Exact $copy @'
+        FanoutMessage message,
+        bool countsData,
+        CopyJob job,
+        bool backlogReserved = false)
+'@ @'
+        FanoutMessage message,
+        CopyJob job,
+        bool backlogReserved = false)
+'@ 'eliminar countsData de DeliverOne'
 
 Replace-Exact $copy @'
             var controlWaitStarted = Stopwatch.GetTimestamp();
@@ -106,6 +137,13 @@ Replace-Exact $copy @'
                 worker.ControlBudget.Release();
             if (message is DataMessage data)
 '@ 'drain libera solo mensajes de control'
+
+$text = [IO.File]::ReadAllText($copy)
+$text = $text.Replace('DeliverAsync(active, new BeginMessage(entry), countsData: false, job)', 'DeliverAsync(active, new BeginMessage(entry), job)')
+$text = $text.Replace('DeliverAsync(active, new DataMessage(block), countsData: true, job)', 'DeliverAsync(active, new DataMessage(block), job)')
+$text = $text.Replace('DeliverAsync(active, new DataMessage(shared), countsData: true, job)', 'DeliverAsync(active, new DataMessage(shared), job)')
+$text = $text.Replace('DeliverAsync(active, new EndMessage(hash), countsData: false, job)', 'DeliverAsync(active, new EndMessage(hash), job)')
+[IO.File]::WriteAllText($copy, $text, [Text.UTF8Encoding]::new($false))
 
 $text = [IO.File]::ReadAllText($copy)
 if ($text.Contains('countsData')) { throw 'countsData sigue presente' }
