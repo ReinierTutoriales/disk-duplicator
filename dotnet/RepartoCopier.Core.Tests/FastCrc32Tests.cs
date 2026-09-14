@@ -8,14 +8,14 @@ namespace RepartoCopier.Core.Tests;
 public sealed class FastCrc32Tests
 {
     [TestMethod]
-    public void MatchesStandardCrc32CheckVector()
+    public void MatchesStandardCrc32CCheckVector()
     {
         var bytes = Encoding.ASCII.GetBytes("123456789");
-        Assert.AreEqual(0xCBF43926u, FastCrc32.Compute(bytes));
+        Assert.AreEqual(0xE3069283u, FastCrc32.Compute(bytes));
     }
 
     [TestMethod]
-    public void EmptyPayloadMatchesStandardCrc32Identity()
+    public void EmptyPayloadMatchesCrc32CIdentity()
     {
         Assert.AreEqual(0u, FastCrc32.Compute(ReadOnlySpan<byte>.Empty));
     }
@@ -30,7 +30,7 @@ public sealed class FastCrc32Tests
     }
 
     [TestMethod]
-    public void SlicingBoundariesMatchByteWiseReference()
+    public void SlicingBoundariesMatchByteWiseCrc32CReference()
     {
         int[] lengths = [1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 4095, 4096, 4097];
         foreach (var length in lengths)
@@ -39,13 +39,17 @@ public sealed class FastCrc32Tests
             new Random(length * 7919).NextBytes(data);
             Assert.AreEqual(
                 ComputeReference(data),
+                FastCrc32.ComputeSoftware(data),
+                $"CRC32C software divergente en longitud de borde {length}.");
+            Assert.AreEqual(
+                FastCrc32.ComputeSoftware(data),
                 FastCrc32.Compute(data),
-                $"CRC32 divergente en longitud de borde {length}.");
+                $"Fast path CRC32C divergente en longitud de borde {length}.");
         }
     }
 
     [TestMethod]
-    public void RandomPayloadsMatchByteWiseReference()
+    public void RandomPayloadsMatchByteWiseCrc32CReference()
     {
         var random = new Random(0x5A17C32);
         for (var iteration = 0; iteration < 128; iteration++)
@@ -53,13 +57,39 @@ public sealed class FastCrc32Tests
             var length = random.Next(0, 256 * 1024);
             var data = new byte[length];
             random.NextBytes(data);
-            Assert.AreEqual(ComputeReference(data), FastCrc32.Compute(data), $"CRC32 divergente en longitud {length}.");
+            Assert.AreEqual(
+                ComputeReference(data),
+                FastCrc32.ComputeSoftware(data),
+                $"CRC32C software divergente en longitud {length}.");
+            Assert.AreEqual(
+                FastCrc32.ComputeSoftware(data),
+                FastCrc32.Compute(data),
+                $"Fast path CRC32C divergente en longitud {length}.");
+        }
+    }
+
+    [TestMethod]
+    public void HardwareAndSoftwareImplementationsAreBitIdenticalWhenHardwareExists()
+    {
+        if (!FastCrc32.IsHardwareAccelerated)
+            return;
+
+        var random = new Random(0x32C0FFEE);
+        int[] lengths = [0, 1, 3, 4, 7, 8, 9, 31, 32, 33, 4096, 65537, 1024 * 1024];
+        foreach (var length in lengths)
+        {
+            var data = new byte[length];
+            random.NextBytes(data);
+            Assert.AreEqual(
+                FastCrc32.ComputeSoftware(data),
+                FastCrc32.ComputeHardware(data),
+                $"Hardware/software CRC32C divergente en longitud {length}.");
         }
     }
 
     private static uint ComputeReference(ReadOnlySpan<byte> data)
     {
-        const uint polynomial = 0xEDB88320u;
+        const uint polynomial = 0x82F63B78u;
         var crc = 0xFFFFFFFFu;
         foreach (var value in data)
         {
