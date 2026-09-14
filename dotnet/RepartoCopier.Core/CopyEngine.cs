@@ -1016,6 +1016,10 @@ public static class CopyEngine
                         case BeginMessage begin:
                             current = BeginFile(worker, begin.Entry);
                             job.Telemetry.RecordFilePolicy(current.WriteThrough);
+                            if (current.DirectSession is not null)
+                                job.Telemetry.RecordDirectDestinationFile();
+                            else if (current.DirectRequested)
+                                job.Telemetry.RecordDirectDestinationFallback();
                             break;
                         case DataMessage chunkData when current is not null:
                             try
@@ -1135,7 +1139,7 @@ public static class CopyEngine
                 {
                     if (!block.IsAlignedFor(current.DirectSession.Alignment))
                     {
-                        SwitchToBuffered(current);
+                        SwitchToBuffered(current, job);
                     }
                     else
                     {
@@ -1150,10 +1154,11 @@ public static class CopyEngine
                                 StorageWritePolicy.MinimumParallelSliceBytes,
                                 worker.DeviceScheduler,
                                 job.Token).ConfigureAwait(false);
+                            job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
                         }
                         catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
                         {
-                            SwitchToBuffered(current);
+                            SwitchToBuffered(current, job);
                         }
                     }
                 }
@@ -1190,7 +1195,7 @@ public static class CopyEngine
                 {
                     worker.Progress.AddRetry();
                     await Task.Delay(75 * (attempt + 1), job.Token).ConfigureAwait(false);
-                    if (current.PreferDirect)
+                    if (current.DirectEnabled)
                     {
                         if (!DirectIoDestinationWriter.TryOpen(current.PartPath, worker.Device, current.Entry.Size, out var reopened))
                             throw new IOException($"No se pudo reabrir Direct I/O para {current.Entry.RelativePath} durante reintento.", ex);
@@ -1202,10 +1207,12 @@ public static class CopyEngine
         throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
     }
 
-    private static void SwitchToBuffered(CurrentFile current)
+    private static void SwitchToBuffered(CurrentFile current, CopyJob job)
     {
         current.DirectSession?.Dispose();
         current.DirectSession = null;
+        current.DirectEnabled = false;
+        job.Telemetry.RecordDirectDestinationFallback();
         ResetPartLength(current.PartPath, current.Copied);
         current.Stream = ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
     }
@@ -2311,7 +2318,7 @@ public static class CopyEngine
         FileStream? stream,
         DirectIoDestinationWriter.Session? directSession,
         bool writeThrough,
-        bool preferDirect)
+        bool directRequested)
     {
         public List<VerificationBlock> VerificationBlocks { get; } = [];
         public FileEntry Entry { get; } = entry;
@@ -2321,7 +2328,8 @@ public static class CopyEngine
         public FileStream? Stream { get; set; } = stream;
         public DirectIoDestinationWriter.Session? DirectSession { get; set; } = directSession;
         public bool WriteThrough { get; } = writeThrough;
-        public bool PreferDirect { get; } = preferDirect;
+        public bool DirectRequested { get; } = directRequested;
+        public bool DirectEnabled { get; set; } = directSession is not null;
         public long Copied { get; set; }
         public bool Failed { get; set; }
     }
