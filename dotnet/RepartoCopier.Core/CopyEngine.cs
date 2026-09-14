@@ -91,9 +91,9 @@ public sealed class CopyJob : IAsyncDisposable
 
 public static class CopyEngine
 {
-    private const int BlockSize = 16 * 1024 * 1024;
-    private const int SourcePrefetchPhysicalCapacity = 4;
-    private const int SourceHashPipelineCapacity = 2;
+    private const int BlockSize = 32 * 1024 * 1024;
+    private const int SourcePrefetchPhysicalCapacity = 8;
+    private const int SourceHashPipelineCapacity = 4;
     private const int SourcePrefetchThreshold = 16 * 1024 * 1024;
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
@@ -106,7 +106,7 @@ public static class CopyEngine
     private const long InitialBufferBudget = 512L * 1024 * 1024;
     private const long MaximumBufferBudget = 4L * 1024 * 1024 * 1024;
     private const long BufferBudgetGrowthStep = 256L * 1024 * 1024;
-    // 4 GiB / 16 MiB = 256 maximum live data blocks. At the public
+    // 4 GiB / 32 MiB = 128 maximum live data blocks. At the public
     // 256-destination ceiling that is 65,536 channel references. The same
     // global budget also bounds Begin/End-heavy trees whose payload-byte
     // budget would otherwise see almost no pressure.
@@ -1618,7 +1618,7 @@ public static class CopyEngine
     internal sealed class PipelineGovernor
     {
         private const int MinPrefetch = 1;
-        private const int InitialPrefetch = 2;
+        private const int InitialPrefetch = 4;
         private const int MaxPrefetch = SourcePrefetchPhysicalCapacity;
         private const int SamplesPerDecision = 8;
 

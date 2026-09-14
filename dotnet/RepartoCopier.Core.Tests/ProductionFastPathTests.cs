@@ -63,9 +63,9 @@ public sealed class ProductionFastPathTests
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
-        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two
-        // destinations the optimized writer must issue exactly four WriteAsync calls.
-        Assert.AreEqual(4L, metrics.WriteOperations);
+        // 20 MiB + 733 bytes now fits in one 32 MiB source block. With two
+        // destinations the writer must issue exactly two block writes on QD1 storage.
+        Assert.AreEqual(2L, metrics.WriteOperations);
     }
 
     [TestMethod]
