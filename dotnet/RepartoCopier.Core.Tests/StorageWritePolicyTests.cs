@@ -56,7 +56,7 @@ public sealed class StorageWritePolicyTests
     }
 
     [TestMethod]
-    public void ExactFixedUsbSsdLargeExclusiveWriteUsesQueueDepthTwo()
+    public void ExactUsbSsdLargeExclusiveWriteUsesQueueDepthTwo()
     {
         var device = Device("USB", StorageMediaKind.SolidState, trim: true);
 
@@ -70,7 +70,7 @@ public sealed class StorageWritePolicyTests
     }
 
     [TestMethod]
-    public void RemovableOrUncertainUsbSsdStaysQueueDepthOne()
+    public void ExactRemovableUsbSsdUsesQueueDepthTwoButUncertainIdentityStaysOne()
     {
         var removable = Device("USB", StorageMediaKind.SolidState, trim: true) with
         {
@@ -82,7 +82,7 @@ public sealed class StorageWritePolicyTests
         };
 
         Assert.AreEqual(
-            1,
+            2,
             StorageWritePolicy.BufferedLargeWriteQueueDepth(
                 removable,
                 2,
