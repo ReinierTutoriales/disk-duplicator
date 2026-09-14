@@ -7,28 +7,43 @@ namespace RepartoCopier.Core.Tests;
 public sealed class StorageIoProfileTests
 {
     [TestMethod]
+    public void PublicProfileShapeContainsOnlyProductionPolicyInputs()
+    {
+        var properties = typeof(StorageIoProfile)
+            .GetProperties()
+            .Select(property => property.Name)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                nameof(StorageIoProfile.DeviceBacklogTargetBytes),
+                nameof(StorageIoProfile.Kind),
+                nameof(StorageIoProfile.RecommendedQueueDepth),
+            },
+            properties);
+    }
+
+    [TestMethod]
     public void NetworkAndUsbFlashRemainConservative()
     {
         var network = Device("Network", StorageMediaKind.Unknown, isNetwork: true, preallocation: false);
         var usbFlash = Device("USB", StorageMediaKind.SolidState, isNetwork: false, preallocation: false, trim: false, removable: true);
 
         var networkProfile = StorageIoProfile.For(network);
-        Assert.AreEqual(1, networkProfile.RecommendedQueueDepth);
-        Assert.AreEqual(1, networkProfile.MaximumQueueDepth);
         Assert.AreEqual(StorageProfileKind.Network, networkProfile.Kind);
-        Assert.IsFalse(networkProfile.AllowDirectIo);
-        Assert.IsFalse(networkProfile.AllowPreallocation);
+        Assert.AreEqual(1, networkProfile.RecommendedQueueDepth);
+        Assert.AreEqual(32L * 1024 * 1024, networkProfile.DeviceBacklogTargetBytes);
 
         var flashProfile = StorageIoProfile.For(usbFlash);
-        Assert.AreEqual(1, flashProfile.RecommendedQueueDepth);
-        Assert.AreEqual(1, flashProfile.MaximumQueueDepth);
         Assert.AreEqual(StorageProfileKind.UsbFlash, flashProfile.Kind);
-        Assert.IsFalse(flashProfile.AllowDirectIo);
-        Assert.IsFalse(flashProfile.AllowPreallocation);
+        Assert.AreEqual(1, flashProfile.RecommendedQueueDepth);
+        Assert.AreEqual(16L * 1024 * 1024, flashProfile.DeviceBacklogTargetBytes);
     }
 
     [TestMethod]
-    public void UsbSsdCanBeBenchmarkedButStartsAtQueueDepthOne()
+    public void UsbSsdStartsAtQueueDepthOneWithBoundedBacklog()
     {
         var device = Device("USB", StorageMediaKind.SolidState, false, true, trim: true, removable: false);
 
@@ -36,10 +51,7 @@ public sealed class StorageIoProfileTests
 
         Assert.AreEqual(StorageProfileKind.UsbSsd, profile.Kind);
         Assert.AreEqual(1, profile.RecommendedQueueDepth);
-        Assert.AreEqual(2, profile.MaximumQueueDepth);
-        Assert.IsTrue(profile.BenchmarkCanRaiseQueueDepth);
-        Assert.IsTrue(profile.AllowPreallocation);
-        Assert.IsFalse(profile.AllowDirectIo);
+        Assert.AreEqual(32L * 1024 * 1024, profile.DeviceBacklogTargetBytes);
     }
 
     [TestMethod]
@@ -50,28 +62,11 @@ public sealed class StorageIoProfileTests
 
         Assert.AreEqual(StorageProfileKind.SataSsd, sata.Kind);
         Assert.AreEqual(2, sata.RecommendedQueueDepth);
-        Assert.AreEqual(2, sata.MaximumQueueDepth);
-        Assert.IsFalse(sata.AllowDirectIo);
-        Assert.IsTrue(sata.AllowPreallocation);
+        Assert.AreEqual(64L * 1024 * 1024, sata.DeviceBacklogTargetBytes);
 
         Assert.AreEqual(StorageProfileKind.Nvme, nvme.Kind);
         Assert.AreEqual(2, nvme.RecommendedQueueDepth);
-        Assert.AreEqual(4, nvme.MaximumQueueDepth);
-        Assert.IsTrue(nvme.BenchmarkCanRaiseQueueDepth);
-        Assert.IsTrue(nvme.AllowDirectIo);
-        Assert.IsTrue(nvme.AllowPreallocation);
-    }
-
-    [TestMethod]
-    public void NvmeDirectIoRequiresKnownAlignmentAndSafeFilesystem()
-    {
-        var missingAlignment = StorageIoProfile.For(
-            Device("NVMe", StorageMediaKind.SolidState, false, true, trim: true, alignmentOffset: null));
-        var unsafeFilesystem = StorageIoProfile.For(
-            Device("NVMe", StorageMediaKind.SolidState, false, false, trim: true, alignmentOffset: 0));
-
-        Assert.IsFalse(missingAlignment.AllowDirectIo);
-        Assert.IsFalse(unsafeFilesystem.AllowDirectIo);
+        Assert.AreEqual(128L * 1024 * 1024, nvme.DeviceBacklogTargetBytes);
     }
 
     [TestMethod]
@@ -82,8 +77,10 @@ public sealed class StorageIoProfileTests
 
         Assert.AreEqual(1, hdd.RecommendedQueueDepth);
         Assert.AreEqual(StorageProfileKind.Rotational, hdd.Kind);
+        Assert.AreEqual(32L * 1024 * 1024, hdd.DeviceBacklogTargetBytes);
         Assert.AreEqual(1, unknown.RecommendedQueueDepth);
         Assert.AreEqual(StorageProfileKind.Conservative, unknown.Kind);
+        Assert.AreEqual(32L * 1024 * 1024, unknown.DeviceBacklogTargetBytes);
     }
 
     private static StorageDeviceInfo Device(
