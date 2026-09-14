@@ -926,17 +926,22 @@ public static class CopyEngine
                 }
 
                 var backlogOwned = false;
+                var pendingPayloadOwned = false;
                 var queueOwned = false;
                 var blockOwned = true;
                 try
                 {
                     worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
                     backlogOwned = true;
+                    worker.ReservePendingPayload(message.Block.Length);
+                    pendingPayloadOwned = true;
 
                     if (!worker.IsActive)
                     {
                         worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
                         backlogOwned = false;
+                        worker.ReleasePendingPayload(message.Block.Length);
+                        pendingPayloadOwned = false;
                         message.Block.Release();
                         blockOwned = false;
                         continue;
@@ -948,6 +953,7 @@ public static class CopyEngine
                     {
                         queueOwned = false;
                         backlogOwned = false;
+                        pendingPayloadOwned = false;
                         blockOwned = false;
                         continue;
                     }
@@ -956,6 +962,8 @@ public static class CopyEngine
                     queueOwned = false;
                     worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
                     backlogOwned = false;
+                    worker.ReleasePendingPayload(message.Block.Length);
+                    pendingPayloadOwned = false;
                     message.Block.Release();
                     blockOwned = false;
                     if (worker.IsActive)
@@ -967,6 +975,8 @@ public static class CopyEngine
                         worker.DecrementQueueDepth();
                     if (backlogOwned)
                         worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
+                    if (pendingPayloadOwned)
+                        worker.ReleasePendingPayload(message.Block.Length);
                     if (blockOwned)
                         message.Block.Release();
                     throw;
@@ -1102,8 +1112,8 @@ public static class CopyEngine
                 }
                 finally
                 {
-                    if (dataOwnedByWriter)
-                        data?.Block.Release();
+                    if (dataOwnedByWriter && data is not null)
+                        ReleaseBranchBlock(worker, data.Block);
                     controlDelivery?.ReleaseBudget();
                 }
             }
@@ -1120,7 +1130,7 @@ public static class CopyEngine
         {
             if (current is not null)
             {
-                await ReleasePendingWritesAsync(current).ConfigureAwait(false);
+                await ReleasePendingWritesAsync(worker, current).ConfigureAwait(false);
                 current.Stream?.Dispose();
                 current.DirectSession?.Dispose();
                 TryDelete(current.PartPath);
@@ -1216,12 +1226,12 @@ public static class CopyEngine
                 current.RecordCompletedWrite(data.Length);
                 worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
-                block.Release();
+                ReleaseBranchBlock(worker, block);
                 return PendingWriteResult.Success();
             }
             catch (Exception ex)
             {
-                block.Release();
+                ReleaseBranchBlock(worker, block);
                 return PendingWriteResult.Failed(ex);
             }
         }
@@ -1253,7 +1263,7 @@ public static class CopyEngine
                 current.RecordCompletedWrite(data.Length);
                 worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
-                block.Release();
+                ReleaseBranchBlock(worker, block);
                 return PendingWriteResult.Success();
             }
             catch (Exception ex)
@@ -1274,7 +1284,7 @@ public static class CopyEngine
             }
         }
 
-        block.Release();
+        ReleaseBranchBlock(worker, block);
         return PendingWriteResult.Failed(
             new IOException($"No se pudo escribir {current.Entry.RelativePath} en offset {offset} después de reintentos.", last));
     }
@@ -1305,7 +1315,7 @@ public static class CopyEngine
         if (failure is not null)
         {
             foreach (var retry in results.Where(result => result.Status == PendingWriteStatus.NeedsBufferedRetry))
-                retry.RetryBlock?.Release();
+                ReleaseRetryBlock(worker, retry.RetryBlock);
             return failure.Error ?? new IOException($"Falló una escritura pendiente de {current.Entry.RelativePath}.");
         }
 
@@ -1325,7 +1335,7 @@ public static class CopyEngine
         catch (Exception ex)
         {
             foreach (var retry in fallback)
-                retry.RetryBlock?.Release();
+                ReleaseRetryBlock(worker, retry.RetryBlock);
             return ex;
         }
 
@@ -1345,7 +1355,7 @@ public static class CopyEngine
         return retryFailure?.Error;
     }
 
-    private static async Task ReleasePendingWritesAsync(CurrentFile current)
+    private static async Task ReleasePendingWritesAsync(DestinationWorker worker, CurrentFile current)
     {
         if (current.PendingWrites.Count == 0)
             return;
@@ -1353,7 +1363,19 @@ public static class CopyEngine
         current.PendingWrites.Clear();
         var results = await Task.WhenAll(pending).ConfigureAwait(false);
         foreach (var result in results)
-            result.RetryBlock?.Release();
+            ReleaseRetryBlock(worker, result.RetryBlock);
+    }
+
+    private static void ReleaseRetryBlock(DestinationWorker worker, SharedBlock? block)
+    {
+        if (block is not null)
+            ReleaseBranchBlock(worker, block);
+    }
+
+    private static void ReleaseBranchBlock(DestinationWorker worker, SharedBlock block)
+    {
+        worker.ReleasePendingPayload(block.Length);
+        block.Release();
     }
 
     private static void SwitchToBufferedAfterDrain(CurrentFile current, CopyJob job)
@@ -1687,22 +1709,21 @@ public static class CopyEngine
         {
             worker.DecrementQueueDepth();
             if (message is DataMessage data)
+            {
                 worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
-            ReleaseQueuedMessage(message);
+                ReleaseBranchBlock(worker, data.Block);
+            }
+            else
+            {
+                ReleaseQueuedControl(message);
+            }
         }
     }
 
-    private static void ReleaseQueuedMessage(FanoutMessage message)
+    private static void ReleaseQueuedControl(FanoutMessage message)
     {
-        switch (message)
-        {
-            case DataMessage data:
-                data.Block.Release();
-                break;
-            case ControlDelivery control:
-                control.ReleaseBudget();
-                break;
-        }
+        if (message is ControlDelivery control)
+            control.ReleaseBudget();
     }
 
     private static void TryDelete(string path)
@@ -2436,6 +2457,8 @@ public static class CopyEngine
         public Dictionary<string, VerificationPlan> VerificationPlans { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
+        private long _pendingPayloadBytes;
+        private long _peakPendingPayloadBytes;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
 
         public DestinationWorker(
@@ -2468,9 +2491,38 @@ public static class CopyEngine
         internal AdaptiveControlByteBudget ControlBudget { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
+        public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
+        public long PeakPendingPayloadBytes => Interlocked.Read(ref _peakPendingPayloadBytes);
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
+
+        public void ReservePendingPayload(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            var pending = Interlocked.Add(ref _pendingPayloadBytes, bytes);
+            var peak = Interlocked.Read(ref _peakPendingPayloadBytes);
+            while (pending > peak)
+            {
+                var observed = Interlocked.CompareExchange(ref _peakPendingPayloadBytes, pending, peak);
+                if (observed == peak)
+                    break;
+                peak = observed;
+            }
+        }
+
+        public void ReleasePendingPayload(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            while (true)
+            {
+                var current = Interlocked.Read(ref _pendingPayloadBytes);
+                if (current < bytes)
+                    throw new InvalidOperationException("La rama intentó liberar más payload FAN-OUT del que mantiene pendiente.");
+                if (Interlocked.CompareExchange(ref _pendingPayloadBytes, current - bytes, current) == current)
+                    return;
+            }
+        }
 
         public void IncrementQueueDepth()
         {
