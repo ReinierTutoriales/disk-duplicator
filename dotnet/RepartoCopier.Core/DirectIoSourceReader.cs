@@ -12,26 +12,26 @@ internal static class DirectIoSourceReader
     private const uint FileFlagSequentialScan = 0x08000000;
     private const uint FileFlagOverlapped = 0x40000000;
 
+    internal const int MaximumSupportedAlignment = 64 * 1024;
+
     internal static bool IsEligible(StorageDeviceInfo device, int transferSize) =>
-        IsEligibleCore(device, transferSize, solidStateOnly: true);
+        IsEligibleCore(device, transferSize);
 
     internal static bool IsVerificationEligible(StorageDeviceInfo device, int transferSize) =>
-        IsEligibleCore(device, transferSize, solidStateOnly: false);
+        IsEligibleCore(device, transferSize);
 
-    private static bool IsEligibleCore(StorageDeviceInfo device, int transferSize, bool solidStateOnly)
+    private static bool IsEligibleCore(StorageDeviceInfo device, int transferSize)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (!OperatingSystem.IsWindows() || transferSize <= 0 || device.IsNetwork || !device.ProbeSucceeded)
             return false;
         if (StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact)
             return false;
-        if (solidStateOnly && device.MediaKind != StorageMediaKind.SolidState)
-            return false;
         if (!device.HasKnownSectorAlignment)
             return false;
 
         var alignment = RequiredAlignment(device);
-        return alignment is >= 512 and <= 64 * 1024 &&
+        return alignment is >= 512 and <= MaximumSupportedAlignment &&
                IsPowerOfTwo(alignment) &&
                transferSize % alignment == 0;
     }
@@ -206,6 +206,13 @@ internal sealed class SourceBufferLease : IDisposable
 
     internal bool IsPinned => _pinned && _pin.IsAllocated;
     internal int Capacity => _capacity;
+
+    internal bool IsAlignedFor(int alignment)
+    {
+        if (alignment <= 0 || (alignment & (alignment - 1)) != 0)
+            throw new ArgumentOutOfRangeException(nameof(alignment));
+        return IsPinned && Pointer.ToInt64() % alignment == 0;
+    }
 
     internal Memory<byte> Memory
     {

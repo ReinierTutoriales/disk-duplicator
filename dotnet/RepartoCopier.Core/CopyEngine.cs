@@ -711,7 +711,7 @@ public static class CopyEngine
 
                     lease = direct is null
                         ? SourceBufferLease.RentBuffered(readBufferSize)
-                        : SourceBufferLease.RentAligned(readBufferSize, direct.Alignment);
+                        : SourceBufferLease.RentAligned(readBufferSize, DirectIoSourceReader.MaximumSupportedAlignment);
 
                     var readStarted = Stopwatch.GetTimestamp();
                     int read;
@@ -1022,7 +1022,7 @@ public static class CopyEngine
                             {
                                 if (!current.Failed)
                                 {
-                                    await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
+                                    await WriteWithRetryAsync(worker, current, chunkData.Block, job).ConfigureAwait(false);
                                     current.VerificationBlocks.Add(new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));
                                     current.Copied += chunkData.Block.Length;
                                     worker.Progress.AddWritten(chunkData.Block.Length);
@@ -1033,6 +1033,8 @@ public static class CopyEngine
                                 current.Failed = true;
                                 current.Stream?.Dispose();
                                 current.Stream = null;
+                                current.DirectSession?.Dispose();
+                                current.DirectSession = null;
                                 TryDelete(current.PartPath);
                                 if (current.Copied > 0) worker.Progress.RollbackWritten((ulong)current.Copied);
                                 if (options.KeepGoing) worker.Progress.MarkError(ex.Message);
@@ -1067,6 +1069,7 @@ public static class CopyEngine
             if (current is not null)
             {
                 current.Stream?.Dispose();
+                current.DirectSession?.Dispose();
                 TryDelete(current.PartPath);
                 if (current.Copied > 0 && !current.Failed)
                     worker.Progress.RollbackWritten((ulong)current.Copied);
@@ -1089,21 +1092,30 @@ public static class CopyEngine
         var part = transient.PartPath;
         TryDelete(part);
         var writeThrough = entry.Size <= WriteThroughFileThreshold;
-        var stream = OpenPartStream(
-            part,
-            FileMode.CreateNew,
-            offset: 0,
-            writeThrough,
-            StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold));
-        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, writeThrough);
+        var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold);
+        FileStream? stream = null;
+        DirectIoDestinationWriter.Session? directSession = null;
+        var preferDirect = !writeThrough && DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
+        if (preferDirect)
+        {
+            using (OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough: false, preallocationSize)) { }
+            if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
+                stream = ReopenPart(part, 0, writeThrough: false);
+        }
+        else
+        {
+            stream = OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough, preallocationSize);
+        }
+        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, writeThrough, preferDirect);
     }
 
     private static async Task WriteWithRetryAsync(
         DestinationWorker worker,
         CurrentFile current,
-        ReadOnlyMemory<byte> data,
+        SharedBlock block,
         CopyJob job)
     {
+        var data = block.Memory;
         Exception? last = null;
         for (var attempt = 0; attempt <= Retries; attempt++)
         {
@@ -1111,21 +1123,54 @@ public static class CopyEngine
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             try
             {
-                current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
                 var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
                     worker.Device,
                     worker.DeviceScheduler.MaxOutstandingIo,
                     current.Entry.Size,
                     data.Length);
                 var started = Stopwatch.GetTimestamp();
-                var operations = await DestinationWriteCoordinator.WriteAsync(
-                    current.Stream.SafeFileHandle,
-                    data,
-                    current.Copied,
-                    queueDepth,
-                    StorageWritePolicy.MinimumParallelSliceBytes,
-                    worker.DeviceScheduler,
-                    job.Token).ConfigureAwait(false);
+                var operations = 0;
+
+                if (current.DirectSession is not null)
+                {
+                    if (!block.IsAlignedFor(current.DirectSession.Alignment))
+                    {
+                        SwitchToBuffered(current);
+                    }
+                    else
+                    {
+                        try
+                        {
+                            operations = await current.DirectSession.WriteAsync(
+                                data,
+                                current.Copied,
+                                current.Entry.Size,
+                                payloadIsAligned: true,
+                                queueDepth,
+                                StorageWritePolicy.MinimumParallelSliceBytes,
+                                worker.DeviceScheduler,
+                                job.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
+                        {
+                            SwitchToBuffered(current);
+                        }
+                    }
+                }
+
+                if (current.DirectSession is null)
+                {
+                    current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+                    operations = await DestinationWriteCoordinator.WriteAsync(
+                        current.Stream.SafeFileHandle,
+                        data,
+                        current.Copied,
+                        queueDepth,
+                        StorageWritePolicy.MinimumParallelSliceBytes,
+                        worker.DeviceScheduler,
+                        job.Token).ConfigureAwait(false);
+                }
+
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
                 job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started), current.WriteThrough);
@@ -1138,19 +1183,38 @@ public static class CopyEngine
                 last = ex;
                 current.Stream?.Dispose();
                 current.Stream = null;
-                using (var reset = new FileStream(current.PartPath, FileMode.Open, FileAccess.Write, FileShare.None))
-                {
-                    reset.SetLength(current.Copied);
-                    reset.Flush(flushToDisk: true);
-                }
+                current.DirectSession?.Dispose();
+                current.DirectSession = null;
+                ResetPartLength(current.PartPath, current.Copied);
                 if (attempt < Retries)
                 {
                     worker.Progress.AddRetry();
                     await Task.Delay(75 * (attempt + 1), job.Token).ConfigureAwait(false);
+                    if (current.PreferDirect)
+                    {
+                        if (!DirectIoDestinationWriter.TryOpen(current.PartPath, worker.Device, current.Entry.Size, out var reopened))
+                            throw new IOException($"No se pudo reabrir Direct I/O para {current.Entry.RelativePath} durante reintento.", ex);
+                        current.DirectSession = reopened;
+                    }
                 }
             }
         }
         throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
+    }
+
+    private static void SwitchToBuffered(CurrentFile current)
+    {
+        current.DirectSession?.Dispose();
+        current.DirectSession = null;
+        ResetPartLength(current.PartPath, current.Copied);
+        current.Stream = ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+    }
+
+    private static void ResetPartLength(string path, long length)
+    {
+        using var reset = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+        reset.SetLength(length);
+        reset.Flush(flushToDisk: true);
     }
 
 
@@ -1168,6 +1232,8 @@ public static class CopyEngine
             current.Failed = true;
             current.Stream?.Dispose();
             current.Stream = null;
+            current.DirectSession?.Dispose();
+            current.DirectSession = null;
             TryDelete(current.PartPath);
             worker.Progress.RollbackWritten((ulong)current.Copied);
             var error = $"Tamaño inesperado en {current.Entry.RelativePath}";
@@ -1176,7 +1242,16 @@ public static class CopyEngine
             return;
         }
 
-        if (current.Stream is not null)
+        if (current.DirectSession is not null)
+        {
+            var flushStarted = Stopwatch.GetTimestamp();
+            current.DirectSession.FinalizeLength(current.Entry.Size);
+            current.DirectSession.FlushToDisk();
+            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+            current.DirectSession.Dispose();
+            current.DirectSession = null;
+        }
+        else if (current.Stream is not null)
         {
             if (!current.WriteThrough)
             {
@@ -1569,6 +1644,8 @@ public static class CopyEngine
         public int Length { get; }
         public uint VerificationCrc32 { get; }
         public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
+        internal bool IsAlignedFor(int alignment) =>
+            (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
 
         public void Release()
         {
@@ -2231,8 +2308,10 @@ public static class CopyEngine
         string destinationPath,
         string partPath,
         string backupPath,
-        FileStream stream,
-        bool writeThrough)
+        FileStream? stream,
+        DirectIoDestinationWriter.Session? directSession,
+        bool writeThrough,
+        bool preferDirect)
     {
         public List<VerificationBlock> VerificationBlocks { get; } = [];
         public FileEntry Entry { get; } = entry;
@@ -2240,7 +2319,9 @@ public static class CopyEngine
         public string PartPath { get; } = partPath;
         public string BackupPath { get; } = backupPath;
         public FileStream? Stream { get; set; } = stream;
+        public DirectIoDestinationWriter.Session? DirectSession { get; set; } = directSession;
         public bool WriteThrough { get; } = writeThrough;
+        public bool PreferDirect { get; } = preferDirect;
         public long Copied { get; set; }
         public bool Failed { get; set; }
     }
