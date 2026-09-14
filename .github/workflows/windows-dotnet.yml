@@ -1,7 +1,8 @@
 name: Windows .NET CI
 
 # Permanent gate for the integrated FAN-OUT engine and Windows application.
-# Validates physical-device scheduling, backlog, and QD2 writer changes on every main update.
+# Validates topology/backpressure, overlapped Direct I/O source/verify paths,
+# buffered explicit-offset destination writes, recovery, and the WinUI product.
 on:
   push:
     branches: [main]
