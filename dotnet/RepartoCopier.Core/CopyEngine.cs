@@ -1041,6 +1041,7 @@ public static class CopyEngine
                 var controlDelivery = message as ControlDelivery;
                 var effectiveMessage = controlDelivery?.Message ?? message;
                 var data = effectiveMessage as DataMessage;
+                var dataOwnedByWriter = data is not null;
                 if (data is not null)
                     worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
                 try
@@ -1053,40 +1054,47 @@ public static class CopyEngine
                     switch (effectiveMessage)
                     {
                         case BeginMessage begin:
+                            if (current is not null)
+                                throw new InvalidOperationException("Se recibió Begin antes de cerrar el archivo anterior.");
                             current = BeginFile(worker, begin.Entry);
                             if (current.DirectSession is not null)
                                 job.Telemetry.RecordDirectDestinationFile();
                             else if (current.DirectRequested)
                                 job.Telemetry.RecordDirectDestinationFallback();
                             break;
+
                         case DataMessage chunkData when current is not null:
-                            try
+                            if (current.Failed)
+                                break;
+
+                            if (current.DirectFallbackRequested)
                             {
-                                if (!current.Failed)
+                                var fallbackError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                                if (fallbackError is not null)
                                 {
-                                    await WriteWithRetryAsync(worker, current, chunkData.Block, job).ConfigureAwait(false);
-                                    current.VerificationBlocks.Add(new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));
-                                    current.Copied += chunkData.Block.Length;
-                                    worker.Progress.AddWritten(chunkData.Block.Length);
+                                    FailCurrentFile(worker, current, options, fallbackError.Message);
+                                    break;
                                 }
                             }
-                            catch (Exception ex) when (ex is not OperationCanceledException)
-                            {
-                                current.Failed = true;
-                                current.Stream?.Dispose();
-                                current.Stream = null;
-                                current.DirectSession?.Dispose();
-                                current.DirectSession = null;
-                                TryDelete(current.PartPath);
-                                if (current.Copied > 0) worker.Progress.RollbackWritten((ulong)current.Copied);
-                                if (options.KeepGoing) worker.Progress.MarkError(ex.Message);
-                                else worker.Fail(ex.Message);
-                            }
+
+                            var offset = current.ReserveWriteOffset(chunkData.Block.Length);
+                            current.VerificationBlocks.Add(
+                                new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));
+                            current.PendingWrites.Add(
+                                WriteBlockAtOffsetAsync(worker, current, chunkData.Block, offset, job));
+                            dataOwnedByWriter = false;
+                            PruneCompletedSuccesses(current);
                             break;
+
                         case DataMessage:
                             break;
+
                         case EndMessage end when current is not null:
-                            FinishFile(worker, current, end.Hash, options, recovery, job);
+                            var pendingError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                            if (pendingError is not null)
+                                FailCurrentFile(worker, current, options, pendingError.Message);
+                            if (!current.Failed)
+                                FinishFile(worker, current, end.Hash, options, recovery, job);
                             current = null;
                             break;
                     }
@@ -1094,7 +1102,8 @@ public static class CopyEngine
                 }
                 finally
                 {
-                    data?.Block.Release();
+                    if (dataOwnedByWriter)
+                        data?.Block.Release();
                     controlDelivery?.ReleaseBudget();
                 }
             }
@@ -1111,6 +1120,7 @@ public static class CopyEngine
         {
             if (current is not null)
             {
+                await ReleasePendingWritesAsync(current).ConfigureAwait(false);
                 current.Stream?.Dispose();
                 current.DirectSession?.Dispose();
                 TryDelete(current.PartPath);
@@ -1140,125 +1150,249 @@ public static class CopyEngine
         DirectIoDestinationWriter.Session? directSession = null;
         if (directRequested)
         {
-            using (OpenPartStream(part, FileMode.CreateNew, offset: 0, preallocationSize)) { }
+            using (OpenPartStream(part, FileMode.CreateNew, preallocationSize)) { }
             if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
-                stream = ReopenPart(part, 0);
+                stream = ReopenPart(part);
         }
         else
         {
-            stream = OpenPartStream(part, FileMode.CreateNew, offset: 0, preallocationSize);
+            stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
         }
         return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
     }
 
-    private static async Task WriteWithRetryAsync(
+    private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
         CurrentFile current,
         SharedBlock block,
+        long offset,
         CopyJob job)
     {
         var data = block.Memory;
         Exception? last = null;
-        for (var attempt = 0; attempt <= Retries; attempt++)
+        var direct = current.DirectSession;
+
+        if (direct is not null)
         {
-            job.Token.ThrowIfCancellationRequested();
-            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
             try
             {
+                job.Token.ThrowIfCancellationRequested();
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+                if (!block.IsAlignedFor(direct.Alignment))
+                {
+                    var alignmentError = new InvalidOperationException("El bloque FAN-OUT no conserva la alineación requerida por Direct I/O.");
+                    current.RequestDirectFallback();
+                    return PendingWriteResult.NeedsBufferedRetry(block, offset, alignmentError);
+                }
+
                 var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
                     worker.Device,
                     worker.DeviceScheduler.ExplorationQueueDepth,
                     data.Length);
                 var started = Stopwatch.GetTimestamp();
-                var operations = 0;
-
-                if (current.DirectSession is not null)
+                int operations;
+                try
                 {
-                    if (!block.IsAlignedFor(current.DirectSession.Alignment))
-                    {
-                        SwitchToBuffered(current, job);
-                    }
-                    else
-                    {
-                        try
-                        {
-                            operations = await current.DirectSession.WriteAsync(
-                                data,
-                                current.Copied,
-                                current.Entry.Size,
-                                payloadIsAligned: true,
-                                queueDepth,
-                                StorageWritePolicy.MinimumParallelSliceBytes,
-                                worker.DeviceScheduler,
-                                job.Token).ConfigureAwait(false);
-                            job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
-                        }
-                        catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
-                        {
-                            SwitchToBuffered(current, job);
-                        }
-                    }
-                }
-
-                if (current.DirectSession is null)
-                {
-                    current.Stream ??= ReopenPart(current.PartPath, current.Copied);
-                    operations = await DestinationWriteCoordinator.WriteAsync(
-                        current.Stream.SafeFileHandle,
+                    operations = await direct.WriteAsync(
                         data,
-                        current.Copied,
+                        offset,
+                        current.Entry.Size,
+                        payloadIsAligned: true,
                         queueDepth,
                         StorageWritePolicy.MinimumParallelSliceBytes,
                         worker.DeviceScheduler,
                         job.Token).ConfigureAwait(false);
                 }
+                catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
+                {
+                    current.RequestDirectFallback();
+                    return PendingWriteResult.NeedsBufferedRetry(block, offset, ex);
+                }
+
+                job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
+                for (var operation = 0; operation < operations; operation++)
+                    job.Telemetry.RecordWriteOperation();
+                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                current.RecordCompletedWrite(data.Length);
+                worker.Progress.AddWritten(data.Length);
+                worker.NoteProgress();
+                block.Release();
+                return PendingWriteResult.Success();
+            }
+            catch (Exception ex)
+            {
+                block.Release();
+                return PendingWriteResult.Failed(ex);
+            }
+        }
+
+        for (var attempt = 0; attempt <= Retries; attempt++)
+        {
+            try
+            {
+                job.Token.ThrowIfCancellationRequested();
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+                var stream = current.Stream ?? throw new IOException($"No existe handle buffered para {current.Entry.RelativePath}.");
+                var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
+                    worker.Device,
+                    worker.DeviceScheduler.ExplorationQueueDepth,
+                    data.Length);
+                var started = Stopwatch.GetTimestamp();
+                var operations = await DestinationWriteCoordinator.WriteAsync(
+                    stream.SafeFileHandle,
+                    data,
+                    offset,
+                    queueDepth,
+                    StorageWritePolicy.MinimumParallelSliceBytes,
+                    worker.DeviceScheduler,
+                    job.Token).ConfigureAwait(false);
 
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
                 job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                current.RecordCompletedWrite(data.Length);
+                worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
-                return;
+                block.Release();
+                return PendingWriteResult.Success();
             }
-            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 last = ex;
-                current.Stream?.Dispose();
-                current.Stream = null;
-                current.DirectSession?.Dispose();
-                current.DirectSession = null;
-                ResetPartLength(current.PartPath, current.Copied);
-                if (attempt < Retries)
+                if (ex is OperationCanceledException || attempt >= Retries)
+                    break;
+                worker.Progress.AddRetry();
+                try
                 {
-                    worker.Progress.AddRetry();
                     await Task.Delay(75 * (attempt + 1), job.Token).ConfigureAwait(false);
-                    if (current.DirectEnabled)
-                    {
-                        if (!DirectIoDestinationWriter.TryOpen(current.PartPath, worker.Device, current.Entry.Size, out var reopened))
-                            throw new IOException($"No se pudo reabrir Direct I/O para {current.Entry.RelativePath} durante reintento.", ex);
-                        current.DirectSession = reopened;
-                    }
+                }
+                catch (Exception delayError)
+                {
+                    last = delayError;
+                    break;
                 }
             }
         }
-        throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
+
+        block.Release();
+        return PendingWriteResult.Failed(
+            new IOException($"No se pudo escribir {current.Entry.RelativePath} en offset {offset} después de reintentos.", last));
     }
 
-    private static void SwitchToBuffered(CurrentFile current, CopyJob job)
+    private static void PruneCompletedSuccesses(CurrentFile current)
     {
-        current.DirectSession?.Dispose();
+        for (var index = current.PendingWrites.Count - 1; index >= 0; index--)
+        {
+            var pending = current.PendingWrites[index];
+            if (pending.IsCompletedSuccessfully && pending.Result.Status == PendingWriteStatus.Success)
+                current.PendingWrites.RemoveAt(index);
+        }
+    }
+
+    private static async Task<Exception?> DrainPendingWritesAsync(
+        DestinationWorker worker,
+        CurrentFile current,
+        CopyJob job)
+    {
+        if (current.PendingWrites.Count == 0)
+            return null;
+
+        var pending = current.PendingWrites.ToArray();
+        current.PendingWrites.Clear();
+        var results = await Task.WhenAll(pending).ConfigureAwait(false);
+
+        var failure = results.FirstOrDefault(result => result.Status == PendingWriteStatus.Failed);
+        if (failure is not null)
+        {
+            foreach (var retry in results.Where(result => result.Status == PendingWriteStatus.NeedsBufferedRetry))
+                retry.RetryBlock?.Release();
+            return failure.Error ?? new IOException($"Falló una escritura pendiente de {current.Entry.RelativePath}.");
+        }
+
+        var fallback = results
+            .Where(result => result.Status == PendingWriteStatus.NeedsBufferedRetry)
+            .ToArray();
+        if (fallback.Length == 0)
+        {
+            current.ClearDirectFallbackRequest();
+            return null;
+        }
+
+        try
+        {
+            SwitchToBufferedAfterDrain(current, job);
+        }
+        catch (Exception ex)
+        {
+            foreach (var retry in fallback)
+                retry.RetryBlock?.Release();
+            return ex;
+        }
+
+        current.ClearDirectFallbackRequest();
+        var retries = fallback.Select(result =>
+        {
+            worker.Progress.AddRetry();
+            return WriteBlockAtOffsetAsync(
+                worker,
+                current,
+                result.RetryBlock ?? throw new InvalidOperationException("Fallback sin bloque retenido."),
+                result.Offset,
+                job);
+        }).ToArray();
+        var retryResults = await Task.WhenAll(retries).ConfigureAwait(false);
+        var retryFailure = retryResults.FirstOrDefault(result => result.Status != PendingWriteStatus.Success);
+        return retryFailure?.Error;
+    }
+
+    private static async Task ReleasePendingWritesAsync(CurrentFile current)
+    {
+        if (current.PendingWrites.Count == 0)
+            return;
+        var pending = current.PendingWrites.ToArray();
+        current.PendingWrites.Clear();
+        var results = await Task.WhenAll(pending).ConfigureAwait(false);
+        foreach (var result in results)
+            result.RetryBlock?.Release();
+    }
+
+    private static void SwitchToBufferedAfterDrain(CurrentFile current, CopyJob job)
+    {
+        if (current.DirectSession is null)
+            return;
+        current.DirectSession.Dispose();
         current.DirectSession = null;
         current.DirectEnabled = false;
         job.Telemetry.RecordDirectDestinationFallback();
-        ResetPartLength(current.PartPath, current.Copied);
-        current.Stream = ReopenPart(current.PartPath, current.Copied);
+
+        using (var normalize = new FileStream(current.PartPath, FileMode.Open, FileAccess.Write, FileShare.None))
+        {
+            normalize.SetLength(current.Entry.Size);
+            normalize.Flush(flushToDisk: true);
+        }
+        current.Stream = ReopenPart(current.PartPath);
     }
 
-    private static void ResetPartLength(string path, long length)
+    private static void FailCurrentFile(
+        DestinationWorker worker,
+        CurrentFile current,
+        CopyOptions options,
+        string error)
     {
-        using var reset = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-        reset.SetLength(length);
-        reset.Flush(flushToDisk: true);
+        if (current.Failed)
+            return;
+        current.Failed = true;
+        current.Stream?.Dispose();
+        current.Stream = null;
+        current.DirectSession?.Dispose();
+        current.DirectSession = null;
+        TryDelete(current.PartPath);
+        if (current.Copied > 0)
+            worker.Progress.RollbackWritten((ulong)current.Copied);
+        if (options.KeepGoing)
+            worker.Progress.MarkError(error);
+        else
+            worker.Fail(error);
     }
 
 
@@ -1527,17 +1661,16 @@ public static class CopyEngine
         fileSize <= LargeBufferSize ? LargeBufferSize :
         BlockSize;
 
-    private static FileStream ReopenPart(string path, long offset) =>
-        OpenPartStream(path, FileMode.Open, offset, preallocationSize: 0);
+    private static FileStream ReopenPart(string path) =>
+        OpenPartStream(path, FileMode.Open, preallocationSize: 0);
 
     private static FileStream OpenPartStream(
         string path,
         FileMode mode,
-        long offset,
         long preallocationSize)
     {
         var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
-        var stream = new FileStream(path, new FileStreamOptions
+        return new FileStream(path, new FileStreamOptions
         {
             Mode = mode,
             Access = FileAccess.Write,
@@ -1546,9 +1679,6 @@ public static class CopyEngine
             BufferSize = 1,
             PreallocationSize = preallocationSize,
         });
-        if (offset != 0)
-            stream.Position = offset;
-        return stream;
     }
 
     private static void DrainAndRelease(DestinationWorker worker)
@@ -2368,6 +2498,29 @@ public static class CopyEngine
         }
     }
 
+    private enum PendingWriteStatus
+    {
+        Success,
+        NeedsBufferedRetry,
+        Failed,
+    }
+
+    private sealed record PendingWriteResult(
+        PendingWriteStatus Status,
+        SharedBlock? RetryBlock,
+        long Offset,
+        Exception? Error)
+    {
+        internal static PendingWriteResult Success() =>
+            new(PendingWriteStatus.Success, null, 0, null);
+
+        internal static PendingWriteResult NeedsBufferedRetry(SharedBlock block, long offset, Exception error) =>
+            new(PendingWriteStatus.NeedsBufferedRetry, block, offset, error);
+
+        internal static PendingWriteResult Failed(Exception error) =>
+            new(PendingWriteStatus.Failed, null, 0, error);
+    }
+
     private sealed class CurrentFile(
         FileEntry entry,
         string destinationPath,
@@ -2377,7 +2530,11 @@ public static class CopyEngine
         DirectIoDestinationWriter.Session? directSession,
         bool directRequested)
     {
+        private long _copied;
+        private int _directFallbackRequested;
+
         public List<VerificationBlock> VerificationBlocks { get; } = [];
+        public List<Task<PendingWriteResult>> PendingWrites { get; } = [];
         public FileEntry Entry { get; } = entry;
         public string DestinationPath { get; } = destinationPath;
         public string PartPath { get; } = partPath;
@@ -2386,7 +2543,31 @@ public static class CopyEngine
         public DirectIoDestinationWriter.Session? DirectSession { get; set; } = directSession;
         public bool DirectRequested { get; } = directRequested;
         public bool DirectEnabled { get; set; } = directSession is not null;
-        public long Copied { get; set; }
+        public long ScheduledBytes { get; private set; }
+        public long Copied => Interlocked.Read(ref _copied);
+        public bool DirectFallbackRequested => Volatile.Read(ref _directFallbackRequested) != 0;
         public bool Failed { get; set; }
+
+        public long ReserveWriteOffset(int length)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(length);
+            var offset = ScheduledBytes;
+            var next = checked(offset + length);
+            if (next > Entry.Size)
+                throw new IOException($"La tubería intentó programar más bytes que el tamaño de {Entry.RelativePath}.");
+            ScheduledBytes = next;
+            return offset;
+        }
+
+        public void RecordCompletedWrite(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            var completed = Interlocked.Add(ref _copied, bytes);
+            if (completed > Entry.Size)
+                throw new IOException($"La tubería completó más bytes que el tamaño de {Entry.RelativePath}.");
+        }
+
+        public void RequestDirectFallback() => Interlocked.Exchange(ref _directFallbackRequested, 1);
+        public void ClearDirectFallbackRequest() => Interlocked.Exchange(ref _directFallbackRequested, 0);
     }
 }
