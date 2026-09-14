@@ -2231,7 +2231,10 @@ public static class CopyEngine
             var total = checked((long)Math.Min(memory.ullTotalPhys, (ulong)long.MaxValue));
             var reserve = Math.Max(2L * 1024 * 1024 * 1024, total / 4);
             var additional = Math.Max(0L, available - reserve);
-            return additional >= long.MaxValue - usedBytes ? long.MaxValue : usedBytes + additional;
+            var safe = additional >= long.MaxValue - usedBytes ? long.MaxValue : usedBytes + additional;
+            // Even under memory pressure the engine must be able to make forward progress
+            // with one source block; this is a floor, never an upper throughput ceiling.
+            return Math.Max((long)BlockSize, safe);
         }
 
         private List<Waiter>? PumpWaitersLocked()
