@@ -22,7 +22,7 @@ internal static class DirectIoDestinationWriter
         ArgumentNullException.ThrowIfNull(device);
         if (!OperatingSystem.IsWindows() || fileSize <= 0 || device.IsNetwork || !device.ProbeSucceeded)
             return false;
-        if (StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact || !device.HasKnownSectorAlignment)
+        if (!device.HasKnownSectorAlignment)
             return false;
 
         var alignment = DirectIoSourceReader.RequiredAlignment(device);
