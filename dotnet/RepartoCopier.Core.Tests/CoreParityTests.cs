@@ -344,7 +344,8 @@ public sealed class CoreParityTests
     [TestMethod]
     public async Task PipelineGovernorCancellationDoesNotLeakPrefetchCapacity()
     {
-        var governor = new CopyEngine.PipelineGovernor();
+        var pipelineBudget = new CopyEngine.AdaptiveByteBudget(4, 4);
+        var governor = new CopyEngine.PipelineGovernor(pipelineBudget, 1);
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
         await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
@@ -449,7 +450,8 @@ public sealed class CoreParityTests
     [TestMethod]
     public async Task PipelineGovernorRepeatedCancellationStressDoesNotLeakSlots()
     {
-        var governor = new CopyEngine.PipelineGovernor();
+        var pipelineBudget = new CopyEngine.AdaptiveByteBudget(4, 4);
+        var governor = new CopyEngine.PipelineGovernor(pipelineBudget, 1);
         for (var iteration = 0; iteration < 200; iteration++)
         {
             await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
