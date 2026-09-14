@@ -1643,7 +1643,7 @@ public static class CopyEngine
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 
-    private sealed class ControlDelivery : FanoutMessage
+    private sealed record ControlDelivery : FanoutMessage
     {
         private AdaptiveControlByteBudget? _budget;
         private readonly int _reservedBytes;
