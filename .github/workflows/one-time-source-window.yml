@@ -18,31 +18,78 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Apply exact CopyEngine tuning replacements
+      - name: Apply exact source-window and test replacements
         shell: pwsh
         run: |
-          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
-          $text = [System.IO.File]::ReadAllText($path)
-          $replacements = [ordered]@{
+          $enginePath = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $engine = [System.IO.File]::ReadAllText($enginePath)
+          $engineReplacements = [ordered]@{
             'private const int BlockSize = 16 * 1024 * 1024;' = 'private const int BlockSize = 32 * 1024 * 1024;'
             'private const int SourcePrefetchPhysicalCapacity = 4;' = 'private const int SourcePrefetchPhysicalCapacity = 8;'
             'private const int SourceHashPipelineCapacity = 2;' = 'private const int SourceHashPipelineCapacity = 4;'
             'private const int InitialPrefetch = 2;' = 'private const int InitialPrefetch = 4;'
             '// 4 GiB / 16 MiB = 256 maximum live data blocks. At the public' = '// 4 GiB / 32 MiB = 128 maximum live data blocks. At the public'
           }
-          foreach ($old in $replacements.Keys) {
-            $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
-            if ($count -ne 1) { throw "Expected exactly one match for [$old], found $count." }
-            $text = $text.Replace($old, $replacements[$old])
+          foreach ($old in $engineReplacements.Keys) {
+            $count = ([regex]::Matches($engine, [regex]::Escape($old))).Count
+            if ($count -ne 1) { throw "Expected exactly one engine match for [$old], found $count." }
+            $engine = $engine.Replace($old, $engineReplacements[$old])
           }
-          [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          [System.IO.File]::WriteAllText($enginePath, $engine, [System.Text.UTF8Encoding]::new($false))
 
-          $changed = @(git diff --name-only)
-          if ($changed.Count -ne 1 -or $changed[0] -ne $path) {
+          $corePath = 'dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs'
+          $core = [System.IO.File]::ReadAllText($corePath)
+          $acquirePattern = '(?m)^        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);\r?\n        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);$'
+          $acquireMatches = [regex]::Matches($core, $acquirePattern)
+          if ($acquireMatches.Count -ne 2) { throw "Expected 2 two-slot setup blocks, found $($acquireMatches.Count)." }
+          $fourAcquires = @(
+            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
+            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
+            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
+            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);'
+          ) -join [Environment]::NewLine
+          $core = [regex]::Replace($core, $acquirePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourAcquires })
+
+          $assertOld = 'Assert.AreEqual(2, governor.InFlight);'
+          if (([regex]::Matches($core, [regex]::Escape($assertOld))).Count -ne 1) { throw 'Expected one in-flight=2 assertion.' }
+          $core = $core.Replace($assertOld, 'Assert.AreEqual(4, governor.InFlight);')
+
+          $releasePattern = '(?m)^        governor\.ReleasePrefetchSlot\(\);\r?\n        governor\.ReleasePrefetchSlot\(\);\r?\n        Assert\.AreEqual\(0, governor\.InFlight\);$'
+          $releaseMatches = [regex]::Matches($core, $releasePattern)
+          if ($releaseMatches.Count -ne 2) { throw "Expected 2 two-release teardown blocks, found $($releaseMatches.Count)." }
+          $fourReleases = @(
+            '        governor.ReleasePrefetchSlot();',
+            '        governor.ReleasePrefetchSlot();',
+            '        governor.ReleasePrefetchSlot();',
+            '        governor.ReleasePrefetchSlot();',
+            '        Assert.AreEqual(0, governor.InFlight);'
+          ) -join [Environment]::NewLine
+          $core = [regex]::Replace($core, $releasePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourReleases })
+          [System.IO.File]::WriteAllText($corePath, $core, [System.Text.UTF8Encoding]::new($false))
+
+          $fastPath = 'dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs'
+          $fast = [System.IO.File]::ReadAllText($fastPath)
+          $oldComment = @'
+        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two
+        // destinations the optimized writer must issue exactly four WriteAsync calls.
+        Assert.AreEqual(4L, metrics.WriteOperations);
+'@
+          $newComment = @'
+        // 20 MiB + 733 bytes now fits in one 32 MiB source block. With two
+        // destinations the writer must issue exactly two block writes on QD1 storage.
+        Assert.AreEqual(2L, metrics.WriteOperations);
+'@
+          if (([regex]::Matches($fast, [regex]::Escape($oldComment))).Count -ne 1) { throw 'Expected one 16 MiB write-operation assertion block.' }
+          $fast = $fast.Replace($oldComment, $newComment)
+          [System.IO.File]::WriteAllText($fastPath, $fast, [System.Text.UTF8Encoding]::new($false))
+
+          $expected = @($enginePath, $corePath, $fastPath) | Sort-Object
+          $changed = @(git diff --name-only | Sort-Object)
+          if (($changed -join '|') -ne ($expected -join '|')) {
             throw "Unexpected changed files: $($changed -join ', ')"
           }
           git diff --check
-          git diff -- $path
+          git diff -- $enginePath $corePath $fastPath
 
       - uses: actions/setup-dotnet@v5
         with:
@@ -65,6 +112,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add dotnet/RepartoCopier.Core/CopyEngine.cs
+          git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs
           git commit -m 'perf(core): raise active source window to 32 MiB and 4-8 prefetch'
           git push origin HEAD:main
