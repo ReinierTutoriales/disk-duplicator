@@ -79,6 +79,8 @@ public sealed record CopyDiagnosticsSnapshot(
     public long DirectDestinationWriteBytes { get; init; }
     public long DirectDestinationWriteOperations { get; init; }
     public int DirectDestinationFallbacks { get; init; }
+    public long VerificationReadBudgetBytes { get; init; }
+    public long PeakVerificationReadBytes { get; init; }
 
     private static WritePolicyDiagnosticsSnapshot EmptyWritePolicy =>
         new(0, 0, TimeSpan.Zero, 0, TimeSpan.Zero, 0, TimeSpan.Zero);
@@ -113,6 +115,7 @@ internal sealed class CopyTelemetry
     private long _writeThroughRecoveryTicks, _bufferedRecoveryTicks;
     private long _verifyReadBytes, _verifyReadTicks;
     private long _verifyHashBytes, _verifyHashTicks;
+    private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
     private int _peakControlBacklogMessages;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
@@ -212,6 +215,11 @@ internal sealed class CopyTelemetry
 
     internal void RecordVerifyRead(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyReadBytes, bytes); AddTicks(ref _verifyReadTicks, elapsed); }
     internal void RecordVerifyHash(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyHashBytes, bytes); AddTicks(ref _verifyHashTicks, elapsed); }
+    internal void RecordVerificationBufferBudget(long budgetBytes, long peakBytes)
+    {
+        if (budgetBytes > 0) Interlocked.Exchange(ref _verificationReadBudgetBytes, budgetBytes);
+        if (peakBytes > 0) UpdateMax(ref _peakVerificationReadBytes, peakBytes);
+    }
     internal void RecordCopyPhase(TimeSpan elapsed) => AddTicks(ref _copyPhaseTicks, elapsed);
     internal void RecordVerifyPhase(TimeSpan elapsed) => AddTicks(ref _verifyPhaseTicks, elapsed);
 
@@ -289,6 +297,8 @@ internal sealed class CopyTelemetry
             DirectDestinationWriteBytes = Interlocked.Read(ref _directDestinationWriteBytes),
             DirectDestinationWriteOperations = Interlocked.Read(ref _directDestinationWriteOperations),
             DirectDestinationFallbacks = Volatile.Read(ref _directDestinationFallbacks),
+            VerificationReadBudgetBytes = Interlocked.Read(ref _verificationReadBudgetBytes),
+            PeakVerificationReadBytes = Interlocked.Read(ref _peakVerificationReadBytes),
         };
     }
 
