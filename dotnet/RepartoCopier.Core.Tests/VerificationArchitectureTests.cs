@@ -26,6 +26,24 @@ public sealed class VerificationArchitectureTests
     }
 
     [TestMethod]
+    public void VerificationHasNoFixedSizeOrQd2Thresholds()
+    {
+        var fields = typeof(FastVerificationReader)
+            .GetFields(BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            .Select(field => field.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(fields, "DirectThreshold");
+
+        var methods = typeof(FastVerificationReader)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(methods, "ReadDirectAsync");
+        CollectionAssert.Contains(methods, "ReadBufferedAsync");
+        CollectionAssert.Contains(methods, "VerifyBufferedAsync");
+    }
+
+    [TestMethod]
     public void VerificationBudgetHasNoFixedGigabyteCeilingField()
     {
         var fields = typeof(VerificationReadBudget)
