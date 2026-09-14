@@ -15,6 +15,13 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 1
+      - name: Normalize temporary migration script
+        shell: pwsh
+        run: |
+          $path = 'tools/patch-direct-destination.ps1'
+          $text = [IO.File]::ReadAllText($path)
+          $text = $text.Replace('throw "$Label: patrón exacto no encontrado"', 'throw "${Label}: patrón exacto no encontrado"')
+          [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false))
       - name: Integrate Direct I/O destination path
         shell: pwsh
         run: ./tools/patch-direct-destination.ps1
