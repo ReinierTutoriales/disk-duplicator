@@ -2,6 +2,7 @@ from pathlib import Path
 
 path = Path('tools/apply_extreme_verify.py')
 text = path.read_text(encoding='utf-8')
+
 old = '''engine = regex_once(
     engine,
     r"(\\n\\s*(?:private|internal) sealed class CurrentFile[^\\n]*\\n\\s*\\{)",
@@ -20,5 +21,19 @@ engine = replace_once(
 '''
 if old not in text:
     raise RuntimeError('CurrentFile patch block not found in optimizer')
-path.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+text = text.replace(old, new, 1)
+
+old_capture = '''    "                            await WriteWithRetryAsync(worker, current, data.Block.Memory, job).ConfigureAwait(false);",
+    "                            await WriteWithRetryAsync(worker, current, data.Block.Memory, job).ConfigureAwait(false);\\n                            current.VerificationBlocks.Add(new VerificationBlock(data.Block.Length, data.Block.VerificationCrc32));",
+    "capture verification block",
+'''
+new_capture = '''    "                                    await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);",
+    "                                    await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);\\n                                    current.VerificationBlocks.Add(new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));",
+    "capture verification block",
+'''
+if old_capture not in text:
+    raise RuntimeError('DataMessage capture patch block not found in optimizer')
+text = text.replace(old_capture, new_capture, 1)
+
+path.write_text(text, encoding='utf-8', newline='\n')
 print('optimizer patch fixed')
