@@ -56,6 +56,16 @@ public sealed class DirectIoSourceReaderTests
         Assert.ThrowsExactly<InvalidOperationException>(() => _ = lease.Pointer);
     }
 
+    [TestMethod]
+    public void FallbackOnlyMasksUnsupportedDirectIoNotHardwareFaults()
+    {
+        foreach (var code in new[] { 1, 5, 50, 87 })
+            Assert.IsTrue(DirectIoSourceReader.IsFallbackable(new DirectIoSourceReader.DirectIoReadException(code, "unsupported")));
+
+        foreach (var code in new[] { 23, 1117 })
+            Assert.IsFalse(DirectIoSourceReader.IsFallbackable(new DirectIoSourceReader.DirectIoReadException(code, "hardware fault")));
+    }
+
     private static StorageDeviceInfo Device(
         string bus,
         StorageMediaKind media,
