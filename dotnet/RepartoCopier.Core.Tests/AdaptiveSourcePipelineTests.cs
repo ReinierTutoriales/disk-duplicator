@@ -16,6 +16,7 @@ public sealed class AdaptiveSourcePipelineTests
         var budget = new CopyEngine.AdaptiveByteBudget(512L * 1024 * 1024, eightGiB);
         const int blocks = 160; // 5 GiB at 32 MiB per block.
 
+        Assert.AreEqual(256, budget.GetAdmissibleConcurrency(BlockSize));
         for (var index = 0; index < blocks; index++)
             await budget.AcquireAsync(BlockSize, CancellationToken.None);
 
