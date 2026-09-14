@@ -7,11 +7,9 @@ def replace_exact(text: str, old: str, new: str, expected: int, label: str) -> s
         raise RuntimeError(f"{label}: expected {expected} matches, found {count}")
     return text.replace(old, new)
 
-engine_path = Path("dotnet/RepartoCopier.Core/CopyEngine.cs")
-engine = engine_path.read_text(encoding="utf-8")
-engine = replace_exact(engine, "Verify: false,", "Verify: true,", 2, "automatic verification defaults")
-engine_path.write_text(engine, encoding="utf-8", newline="\n")
-
+# Keep CopyEngine's API default unchanged. The WinUI production workflow already
+# forces Verify=true without exposing a selector, while tests and API callers can
+# still opt out explicitly when they need copy-only behavior.
 policy_path = Path("dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs")
 policy = policy_path.read_text(encoding="utf-8")
 replacements = {
