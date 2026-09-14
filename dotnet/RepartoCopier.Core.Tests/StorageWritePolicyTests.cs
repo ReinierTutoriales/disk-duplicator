@@ -21,6 +21,27 @@ public sealed class StorageWritePolicyTests
     }
 
     [TestMethod]
+    public void MediumSsdFileUsesQueueDepthTwo()
+    {
+        var device = Device("SATA", StorageMediaKind.SolidState, trim: true);
+
+        Assert.AreEqual(
+            2,
+            StorageWritePolicy.BufferedLargeWriteQueueDepth(
+                device,
+                schedulerMaxOutstandingIo: 2,
+                fileSize: 8L * 1024 * 1024,
+                dataLength: 8 * 1024 * 1024));
+        Assert.AreEqual(
+            1,
+            StorageWritePolicy.BufferedLargeWriteQueueDepth(
+                device,
+                schedulerMaxOutstandingIo: 2,
+                fileSize: 8L * 1024 * 1024 - 1,
+                dataLength: 8 * 1024 * 1024 - 1));
+    }
+
+    [TestMethod]
     public void NvmeLargeExclusiveWriteUsesQueueDepthTwoNotFour()
     {
         var device = Device("NVMe", StorageMediaKind.SolidState, trim: true);
