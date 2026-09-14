@@ -75,15 +75,6 @@ public static class AtomicStorage
         }
     }
 
-    public static byte[] ReadRegularFile(string path, long maxBytes, string label)
-    {
-        WindowsPath.EnsureRegularFile(path, label);
-        var info = new FileInfo(path);
-        if (info.Length > maxBytes)
-            throw new IOException($"{label} es demasiado grande (máximo {maxBytes} bytes).");
-        return File.ReadAllBytes(path);
-    }
-
     private static void TryDelete(string path)
     {
         try
