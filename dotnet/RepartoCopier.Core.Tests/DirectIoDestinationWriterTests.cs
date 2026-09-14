@@ -63,14 +63,12 @@ public sealed class DirectIoDestinationWriterTests
                 0,
                 alignedBytes + tailBytes,
                 payload.IsAlignedFor(alignment),
-                requestedDepth: 8,
-                minimumSliceBytes: 64 * 1024,
                 scheduler,
                 CancellationToken.None);
             session.FinalizeLength(alignedBytes + tailBytes);
             session.FlushToDisk();
 
-            Assert.IsGreaterThan(1, operations);
+            Assert.AreEqual(2, operations, "El cuerpo alineado y el tail acolchado deben ser dos escrituras completas, sin fragmentación intrabloque.");
             Assert.AreEqual(alignedBytes + tailBytes, RandomAccess.GetLength(handle));
 
             session.Dispose();
