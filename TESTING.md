@@ -46,7 +46,7 @@ Ejecutar en Windows real. Para cada combinación origen/destino disponible (USB 
 - **Secuencial grande:** uno o varios archivos suficientemente grandes para superar ampliamente caché/prefetch y observar throughput sostenido.
 - **Mixto:** archivos pequeños, medianos y grandes con subdirectorios y carpetas vacías.
 - **Small-file:** miles de archivos pequeños para ejercer metadata, commit y recovery.
-- **Verificación:** repetir con verificación física habilitada.
+- **Verificación:** la aplicación verifica automáticamente; medir por separado copia, verificación y tiempo total. Los tests internos pueden desactivar `Verify` solo para aislar la fase de copia.
 - **Contención:** cuando sea posible, destinos que compartan y que no compartan controlador/hub para distinguir límite del motor de límite del bus.
 
 Para cada ejecución conservar:
@@ -67,7 +67,7 @@ Antes de comparar dos cambios, usar el mismo dataset, origen, destinos, opciones
 - `SourceHashTime` dominante respecto a lectura: investigar CPU/BLAKE3 antes de tocar I/O.
 - `WriteTime` dominante: límite de destino/controlador/filesystem; confirmar con throughput físico.
 - `DurableFlushTime`, `CommitTime` o `RecoveryTime` dominantes en small-file: optimizar metadata/durabilidad solo si se preserva el contrato transaccional.
-- `VerifyHashTime` dominante: revisar concurrencia CPU; `VerifyReadTime` dominante: el límite es lectura física de destinos.
+- `VerifyHashTime` dominante: el CRC32 es el cuello de CPU y debe optimizarse antes de aumentar I/O; `VerifyReadTime` dominante: el límite es lectura física de destinos.
 
 ## Pruebas de fallo físico antes de release
 

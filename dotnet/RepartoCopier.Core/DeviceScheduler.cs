@@ -157,17 +157,6 @@ internal sealed class DeviceScheduler : IDisposable
         CompleteBacklogWaiters(ready);
     }
 
-    // Kept for focused scheduler tests/diagnostics. Production FAN-OUT uses the
-    // reservation APIs above so the target is actually enforced.
-    public void NoteQueuedBytes(int bytes)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-        var queued = Interlocked.Add(ref _queuedBytes, bytes);
-        UpdateMax(ref _peakQueuedBytes, queued);
-    }
-
-    public void NoteDequeuedBytes(int bytes) => ReleaseBacklog(bytes);
-
     private async Task WaitForBacklogAsync(BacklogWaiter waiter, CancellationToken token)
     {
         try

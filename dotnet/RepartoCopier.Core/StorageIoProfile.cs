@@ -27,12 +27,3 @@ public sealed record StorageIoProfile(
         FanoutPerformancePolicy.For(device);
 }
 
-public sealed record StorageDeviceProfile(
-    StorageDeviceInfo Device,
-    StorageIoProfile Io)
-{
-    public static StorageDeviceProfile Create(StorageDeviceInfo device) =>
-        new(device, StorageIoProfile.For(device));
-
-    public string DeviceId => Device.PhysicalDeviceId;
-}

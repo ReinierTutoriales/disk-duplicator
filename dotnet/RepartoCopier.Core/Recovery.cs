@@ -148,21 +148,6 @@ internal static class RecoveryManager
     internal static string LegacyManifestKey(string relativePath) =>
         relativePath.Replace('\\', '/');
 
-    internal static void AppendDurable(
-        string destinationRoot,
-        RecoveryFile file,
-        ReadOnlySpan<byte> hash)
-    {
-        if (hash.Length != 32)
-            throw new ArgumentException("BLAKE3 debe contener exactamente 32 bytes.", nameof(hash));
-
-        StateLayout.PrepareStateDirectory(destinationRoot);
-        var manifestLine = $"{Convert.ToHexString(hash).ToLowerInvariant()}  {ManifestKey(file.RelativePath)}{Environment.NewLine}";
-        AppendAndFlush(StateLayout.ManifestPath(destinationRoot), manifestLine, "manifest");
-        var journalLine = $"{{\"key\":\"{StateKey(file)}\"}}{Environment.NewLine}";
-        AppendAndFlush(StateLayout.JournalPath(destinationRoot), journalLine, "state");
-    }
-
     internal static Dictionary<string, byte[]> LoadManifestHashes(string destinationRoot)
     {
         var path = StateLayout.ManifestPath(destinationRoot);
@@ -524,27 +509,6 @@ internal static class RecoveryManager
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
-    }
-
-    private static void AppendAndFlush(string path, string line, string label)
-    {
-        var parent = Path.GetDirectoryName(path)
-            ?? throw new IOException($"Ruta inválida de {label}: {path}");
-        Directory.CreateDirectory(parent);
-        WindowsPath.EnsureNormalDirectory(parent, $"La carpeta de {label}");
-        if (File.Exists(path) || Directory.Exists(path))
-            EnsureOwnedRegularFile(path, label);
-
-        using var stream = new FileStream(
-            path,
-            FileMode.Append,
-            FileAccess.Write,
-            FileShare.Read,
-            64 * 1024,
-            FileOptions.WriteThrough);
-        var bytes = Encoding.UTF8.GetBytes(line);
-        stream.Write(bytes);
-        stream.Flush(flushToDisk: true);
     }
 
     private static FileStream OpenNewDurable(string path) =>

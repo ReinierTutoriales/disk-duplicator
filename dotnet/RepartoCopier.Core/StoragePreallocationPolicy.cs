@@ -36,5 +36,4 @@ internal static class StoragePreallocationPolicy
         return allowed ? fileSize : 0;
     }
 
-    internal static void ClearCacheForTests() => VolumePolicy.Clear();
 }
