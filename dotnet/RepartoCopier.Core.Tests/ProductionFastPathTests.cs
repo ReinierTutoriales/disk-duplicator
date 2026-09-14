@@ -45,7 +45,7 @@ public sealed class ProductionFastPathTests
     }
 
     [TestMethod]
-    public async Task LargeSharedBlocksAreWrittenWithOneIoOperationPerDestinationBlock()
+    public async Task LargeSharedBlocksPreserveLogicalFanOutWhileAllowingVariablePhysicalWriteDepth()
     {
         using var temp = new TempDirectory();
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
@@ -63,9 +63,24 @@ public sealed class ProductionFastPathTests
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
-        // 20 MiB + 733 bytes now fits in one 32 MiB source block. With two
-        // destinations the writer must issue exactly two block writes on QD1 storage.
-        Assert.AreEqual(2L, metrics.WriteOperations);
+
+        // The source payload is one logical FAN-OUT block replicated to two destinations.
+        // Physical writes may be split into QD2/QD4/QD8/... slices by the active device
+        // policy. The architecture contract therefore forbids equality with the logical
+        // block count: it requires complete logical bytes and at least one physical
+        // operation per destination branch while allowing deeper hardware queues.
+        Assert.AreEqual(payload.LongLength * destinations.Length, metrics.WrittenBytes);
+        Assert.IsGreaterThanOrEqualTo((long)destinations.Length, metrics.WriteOperations);
+
+        var expected = SHA256.HashData(payload);
+        foreach (var destination in destinations)
+        {
+            var copied = Path.Combine(destination, "Origen", "large.bin");
+            Assert.IsTrue(File.Exists(copied));
+            Assert.AreEqual(payload.LongLength, new FileInfo(copied).Length);
+            await using var stream = File.OpenRead(copied);
+            CollectionAssert.AreEqual(expected, await SHA256.HashDataAsync(stream));
+        }
     }
 
     [TestMethod]
