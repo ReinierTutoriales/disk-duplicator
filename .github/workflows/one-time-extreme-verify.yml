@@ -1,4 +1,5 @@
 name: One-time Extreme-style verification optimizer
+# retry: capture-block-v2
 
 on:
   push:
