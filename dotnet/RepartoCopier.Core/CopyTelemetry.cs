@@ -63,6 +63,11 @@ public sealed record CopyDiagnosticsSnapshot(
     public int DirectDestinationFallbacks { get; init; }
     public long VerificationReadBudgetBytes { get; init; }
     public long PeakVerificationReadBytes { get; init; }
+    public long BranchReplayWriteBytes { get; init; }
+    public TimeSpan BranchReplayWriteTime { get; init; }
+    public long BranchReplayReadBytes { get; init; }
+    public TimeSpan BranchReplayReadTime { get; init; }
+    public long BranchReplaySegments { get; init; }
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -87,6 +92,8 @@ internal sealed class CopyTelemetry
     private long _verifyReadBytes, _verifyReadTicks;
     private long _verifyHashBytes, _verifyHashTicks;
     private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
+    private long _branchReplayWriteBytes, _branchReplayWriteTicks;
+    private long _branchReplayReadBytes, _branchReplayReadTicks, _branchReplaySegments;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
 
@@ -143,6 +150,8 @@ internal sealed class CopyTelemetry
         if (budgetBytes > 0) Interlocked.Exchange(ref _verificationReadBudgetBytes, budgetBytes);
         if (peakBytes > 0) UpdateMax(ref _peakVerificationReadBytes, peakBytes);
     }
+    internal void RecordBranchReplayWrite(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayWriteBytes, bytes); AddTicks(ref _branchReplayWriteTicks, elapsed); Interlocked.Increment(ref _branchReplaySegments); }
+    internal void RecordBranchReplayRead(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayReadBytes, bytes); AddTicks(ref _branchReplayReadTicks, elapsed); }
     internal void RecordCopyPhase(TimeSpan elapsed) => AddTicks(ref _copyPhaseTicks, elapsed);
     internal void RecordVerifyPhase(TimeSpan elapsed) => AddTicks(ref _verifyPhaseTicks, elapsed);
 
@@ -191,6 +200,11 @@ internal sealed class CopyTelemetry
             DirectDestinationFallbacks = Volatile.Read(ref _directDestinationFallbacks),
             VerificationReadBudgetBytes = Interlocked.Read(ref _verificationReadBudgetBytes),
             PeakVerificationReadBytes = Interlocked.Read(ref _peakVerificationReadBytes),
+            BranchReplayWriteBytes = Interlocked.Read(ref _branchReplayWriteBytes),
+            BranchReplayWriteTime = ToTimeSpan(Interlocked.Read(ref _branchReplayWriteTicks)),
+            BranchReplayReadBytes = Interlocked.Read(ref _branchReplayReadBytes),
+            BranchReplayReadTime = ToTimeSpan(Interlocked.Read(ref _branchReplayReadTicks)),
+            BranchReplaySegments = Interlocked.Read(ref _branchReplaySegments),
         };
     }
 

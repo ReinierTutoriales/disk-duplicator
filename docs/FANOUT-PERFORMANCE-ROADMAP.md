@@ -68,9 +68,9 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 
 `DeviceScheduler.RecordCompletionLocked` ya reevalúa usando una onda de concurrencia realmente observada (`_samplePeakObservedConcurrency`) y demanda efectiva, sin un piso fijo arbitrario de completions. El siguiente paso no es volver a cambiar la política por intuición: medir tiempo-hasta-QD-útil en hardware físico y modificarla solo si el benchmark demuestra una exploración insuficiente.
 
-### P1 — slow-branch decoupling
+### VALIDACIÓN FÍSICA — slow-branch decoupling
 
-Una rama permanentemente más lenta conserva referencias a `SharedBlock` durante más tiempo. Mientras exista headroom de RAM esto no afecta a las ramas rápidas; bajo presión sostenida puede terminar frenando al productor. Diseñar desacoplamiento por rama que preserve una sola lectura física del source: ventana dinámica por destino, batching/deferred write y, si el benchmark lo justifica, spill/replay para la rama atrasada. No resolverlo limitando todas las ramas a la velocidad del destino lento.
+Integrado replay por rama: cuando una rama supera su `BacklogTargetBytes` y existen múltiples destinos, el payload se deriva a un `BranchReplayStore` temporal append-only, se libera inmediatamente la referencia de esa rama al `SharedBlock` y el writer la reproduce después conservando CRC32C, offsets y una sola lectura física del source. El replay es best-effort: si el volumen temporal no puede aceptarlo se conserva la ruta shared normal. Telemetría expone bytes/tiempo/segmentos de replay. Pendiente únicamente medir en hardware real el punto de activación y el coste del volumen temporal.
 
 ### P1 — BlockSize / ventana de lectura adaptativos
 
@@ -131,4 +131,3 @@ Una optimización se cierra únicamente cuando:
 ```
 
 Si alguno falla, el ítem permanece PARCIAL.
-

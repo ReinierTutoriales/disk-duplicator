@@ -361,6 +361,7 @@ public static class CopyEngine
             {
                 worker.Channel.Writer.TryComplete();
                 DrainAndRelease(worker);
+                worker.Dispose();
             }
         }
     }
@@ -947,9 +948,34 @@ public static class CopyEngine
                         continue;
                     }
 
+                    FanoutMessage branchMessage = message;
+                    if (recipients.Count > 1 &&
+                        worker.PendingPayloadBytes >= Math.Max(0L, worker.DeviceScheduler.BacklogTargetBytes - message.Block.Length))
+                    {
+                        try
+                        {
+                            var replayStarted = Stopwatch.GetTimestamp();
+                            var segment = await worker.ReplayStore.SpillAsync(
+                                message.Block.Memory,
+                                message.Block.VerificationCrc32,
+                                job.Token).ConfigureAwait(false);
+                            job.Telemetry.RecordBranchReplayWrite(
+                                segment.Length,
+                                Stopwatch.GetElapsedTime(replayStarted));
+                            message.Block.Release();
+                            blockOwned = false;
+                            branchMessage = new ReplayDataMessage(segment);
+                        }
+                        catch (IOException)
+                        {
+                            // Replay is an optimization. If the temporary volume cannot
+                            // accept it, preserve correctness by keeping the shared block.
+                        }
+                    }
+
                     worker.IncrementQueueDepth();
                     queueOwned = true;
-                    if (worker.Channel.Writer.TryWrite(message))
+                    if (worker.Channel.Writer.TryWrite(branchMessage))
                     {
                         queueOwned = false;
                         backlogOwned = false;
@@ -1051,9 +1077,13 @@ public static class CopyEngine
                 var controlDelivery = message as ControlDelivery;
                 var effectiveMessage = controlDelivery?.Message ?? message;
                 var data = effectiveMessage as DataMessage;
+                var replay = effectiveMessage as ReplayDataMessage;
                 var dataOwnedByWriter = data is not null;
+                var replayOwnedByWriter = replay is not null;
                 if (data is not null)
                     worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
+                else if (replay is not null)
+                    worker.DeviceScheduler.ReleaseBacklog(replay.Segment.Length);
                 try
                 {
                     if (!worker.IsActive)
@@ -1096,7 +1126,31 @@ public static class CopyEngine
                             PruneCompletedSuccesses(current);
                             break;
 
+                        case ReplayDataMessage replayData when current is not null:
+                            if (current.Failed)
+                                break;
+
+                            if (current.DirectFallbackRequested)
+                            {
+                                var fallbackError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                                if (fallbackError is not null)
+                                {
+                                    FailCurrentFile(worker, current, options, fallbackError.Message);
+                                    break;
+                                }
+                            }
+
+                            var replayOffset = current.ReserveWriteOffset(replayData.Segment.Length);
+                            current.VerificationBlocks.Add(
+                                new VerificationBlock(replayData.Segment.Length, replayData.Segment.VerificationCrc32));
+                            current.PendingWrites.Add(
+                                WriteReplayBlockAtOffsetAsync(worker, current, replayData.Segment, replayOffset, job));
+                            replayOwnedByWriter = false;
+                            PruneCompletedSuccesses(current);
+                            break;
+
                         case DataMessage:
+                        case ReplayDataMessage:
                             break;
 
                         case EndMessage end when current is not null:
@@ -1114,6 +1168,8 @@ public static class CopyEngine
                 {
                     if (dataOwnedByWriter && data is not null)
                         ReleaseBranchBlock(worker, data.Block);
+                    if (replayOwnedByWriter && replay is not null)
+                        worker.ReleasePendingPayload(replay.Segment.Length);
                     controlDelivery?.ReleaseBudget();
                 }
             }
@@ -1171,6 +1227,37 @@ public static class CopyEngine
         return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
     }
 
+    private static async Task<PendingWriteResult> WriteReplayBlockAtOffsetAsync(
+        DestinationWorker worker,
+        CurrentFile current,
+        BranchReplayStore.Segment segment,
+        long offset,
+        CopyJob job)
+    {
+        SourceBufferLease? lease = SourceBufferLease.RentAligned(
+            segment.Length,
+            DirectIoSourceReader.MaximumSupportedAlignment);
+        try
+        {
+            var replayStarted = Stopwatch.GetTimestamp();
+            await worker.ReplayStore.ReadAsync(
+                segment,
+                lease.Memory[..segment.Length],
+                job.Token).ConfigureAwait(false);
+            job.Telemetry.RecordBranchReplayRead(
+                segment.Length,
+                Stopwatch.GetElapsedTime(replayStarted));
+            var block = new SharedBlock(lease, segment.Length, segment.VerificationCrc32);
+            lease = null;
+            return await WriteBlockAtOffsetAsync(worker, current, block, offset, job).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            lease?.Dispose();
+            worker.ReleasePendingPayload(segment.Length);
+            return PendingWriteResult.Failed(ex);
+        }
+    }
     private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
         CurrentFile current,
@@ -1701,6 +1788,11 @@ public static class CopyEngine
                 worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
                 ReleaseBranchBlock(worker, data.Block);
             }
+            else if (message is ReplayDataMessage replay)
+            {
+                worker.DeviceScheduler.ReleaseBacklog(replay.Segment.Length);
+                worker.ReleasePendingPayload(replay.Segment.Length);
+            }
             else
             {
                 ReleaseQueuedControl(message);
@@ -1772,7 +1864,8 @@ public static class CopyEngine
             if (buffer is null)
                 return;
             buffer.Dispose();
-            _budget.Release(_reservedBytes);
+            if (_budget is not null && _reservedBytes > 0)
+                _budget.Release(_reservedBytes);
         }
     }
 
@@ -1780,6 +1873,7 @@ public static class CopyEngine
     private abstract record ControlMessage : FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
+    private sealed record ReplayDataMessage(BranchReplayStore.Segment Segment) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
@@ -1812,7 +1906,7 @@ public static class CopyEngine
         private SourceBufferLease? _buffer;
         private int _references;
         private readonly int _reservedBytes;
-        private readonly AdaptiveByteBudget _budget;
+        private readonly AdaptiveByteBudget? _budget;
 
         public SharedBlock(byte[] buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
             : this(SourceBufferLease.OwnPooled(buffer, reservedBytes), length, reservedBytes, references, budget)
@@ -1827,6 +1921,16 @@ public static class CopyEngine
             _reservedBytes = reservedBytes;
             _references = references;
             _budget = budget;
+        }
+
+        internal SharedBlock(SourceBufferLease buffer, int length, uint verificationCrc32)
+        {
+            _buffer = buffer;
+            Length = length;
+            VerificationCrc32 = verificationCrc32;
+            _reservedBytes = 0;
+            _references = 1;
+            _budget = null;
         }
 
         public int Length { get; }
@@ -1845,7 +1949,8 @@ public static class CopyEngine
             var buffer = Interlocked.Exchange(ref _buffer, null)
                 ?? throw new InvalidOperationException("SharedBlock perdió su buffer antes de la última liberación.");
             buffer.Dispose();
-            _budget.Release(_reservedBytes);
+            if (_budget is not null && _reservedBytes > 0)
+                _budget.Release(_reservedBytes);
         }
     }
 
@@ -2440,7 +2545,7 @@ public static class CopyEngine
         }
     }
 
-    private sealed class DestinationWorker
+    private sealed class DestinationWorker : IDisposable
     {
         public Dictionary<string, VerificationPlan> VerificationPlans { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
@@ -2463,6 +2568,7 @@ public static class CopyEngine
             Device = device;
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
+            ReplayStore = new BranchReplayStore();
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2477,6 +2583,7 @@ public static class CopyEngine
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
+        internal BranchReplayStore ReplayStore { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
@@ -2536,6 +2643,8 @@ public static class CopyEngine
             Progress.SetPhase(DestinationPhase.Failed, error);
             Channel.Writer.TryComplete();
         }
+
+        public void Dispose() => ReplayStore.Dispose();
     }
 
     private enum PendingWriteStatus
@@ -2611,4 +2720,3 @@ public static class CopyEngine
         public void ClearDirectFallbackRequest() => Interlocked.Exchange(ref _directFallbackRequested, 0);
     }
 }
-
