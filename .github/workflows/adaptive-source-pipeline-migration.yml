@@ -1,0 +1,20 @@
+name: Adaptive source pipeline migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/adaptive-source-pipeline-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Integrate adaptive source pipeline
+        shell: pwsh
+        run: ./tools/patch-adaptive-source-pipeline.ps1
