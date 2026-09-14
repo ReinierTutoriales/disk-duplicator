@@ -97,7 +97,7 @@ public sealed class ProductionFastPathTests
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
         Assert.IsGreaterThan(0L, metrics.VerificationReadBudgetBytes);
         Assert.IsGreaterThan(0L, metrics.PeakVerificationReadBytes);
-        Assert.IsLessThanOrEqualTo(metrics.VerificationReadBudgetBytes, metrics.PeakVerificationReadBytes == 0 ? metrics.VerificationReadBudgetBytes : Math.Max(metrics.VerificationReadBudgetBytes, metrics.PeakVerificationReadBytes));
+        Assert.IsLessThanOrEqualTo(metrics.PeakVerificationReadBytes, metrics.VerificationReadBudgetBytes);
     }
 
     private sealed class TempDirectory : IDisposable
