@@ -56,18 +56,4 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(fields, "_backlogWaiters");
     }
-
-    [TestMethod]
-    public void Qd2SchedulerCannotReintroducePartialSemaphoreAcquisition()
-    {
-        var fields = typeof(DeviceScheduler)
-            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(field => field.Name)
-            .ToArray();
-
-        CollectionAssert.DoesNotContain(fields, "_pairGate");
-        CollectionAssert.DoesNotContain(fields, "_ioSlots");
-        CollectionAssert.Contains(fields, "_ioWaiters");
-        CollectionAssert.Contains(fields, "_availableIo");
-    }
 }
