@@ -1,0 +1,20 @@
+name: Adaptive QD telemetry migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/adaptive-qd-telemetry-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Close adaptive QD telemetry
+        shell: pwsh
+        run: ./tools/patch-adaptive-qd-telemetry.ps1
