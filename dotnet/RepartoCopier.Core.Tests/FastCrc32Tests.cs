@@ -15,6 +15,12 @@ public sealed class FastCrc32Tests
     }
 
     [TestMethod]
+    public void EmptyPayloadMatchesStandardCrc32Identity()
+    {
+        Assert.AreEqual(0u, FastCrc32.Compute(ReadOnlySpan<byte>.Empty));
+    }
+
+    [TestMethod]
     public void DifferentPayloadsProduceDifferentBlockChecksums()
     {
         var first = new byte[1024 * 1024];
