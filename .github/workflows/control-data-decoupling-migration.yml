@@ -15,6 +15,6 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 1
-      - name: Decouple payload data from control backlog
+      - name: Decouple payload data from control backlog (hardened)
         shell: pwsh
         run: ./tools/patch-control-data-decoupling.ps1
