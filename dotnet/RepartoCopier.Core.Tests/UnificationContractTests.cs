@@ -131,6 +131,24 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void ObsoleteBacklogAdmissionAndQueueWaitTelemetryStayRemoved()
+    {
+        var schedulerMethods = typeof(DeviceScheduler)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(schedulerMethods, "TryReserveBacklog");
+        CollectionAssert.DoesNotContain(schedulerMethods, "ReserveBacklogAsync");
+        CollectionAssert.Contains(schedulerMethods, "ReserveBacklog");
+
+        var diagnosticsProperties = typeof(CopyDiagnosticsSnapshot)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(diagnosticsProperties, "QueueWaitTime");
+    }
+
+    [TestMethod]
     public void PayloadMessagesStayOutsideControlBacklogBudgetArchitecture()
     {
         var fanout = typeof(CopyEngine).GetNestedType("FanoutMessage", BindingFlags.NonPublic);

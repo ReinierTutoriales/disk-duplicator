@@ -37,7 +37,6 @@ public sealed record CopyDiagnosticsSnapshot(
     TimeSpan SourceHashTime,
     TimeSpan BufferWaitTime,
     TimeSpan FanoutWaitTime,
-    TimeSpan QueueWaitTime,
     TimeSpan ControlBacklogWaitTime,
     long WrittenBytes,
     long WriteOperations,
@@ -102,7 +101,7 @@ internal sealed class CopyTelemetry
     private int _directDestinationFiles, _directDestinationFallbacks;
     private long _directDestinationWriteBytes, _directDestinationWriteOperations;
     private long _sourceHashBytes, _sourceHashTicks;
-    private long _bufferWaitTicks, _fanoutWaitTicks, _queueWaitTicks, _controlBacklogWaitTicks;
+    private long _bufferWaitTicks, _fanoutWaitTicks, _controlBacklogWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
     private int _flushes, _commits, _recoveryEvents;
     private long _flushTicks, _commitTicks, _recoveryTicks;
@@ -142,7 +141,6 @@ internal sealed class CopyTelemetry
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
     internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
-    internal void RecordQueueWait(TimeSpan elapsed) => AddTicks(ref _queueWaitTicks, elapsed);
     internal void RecordControlBacklogWait(TimeSpan elapsed) => AddTicks(ref _controlBacklogWaitTicks, elapsed);
 
     internal void RecordFilePolicy(bool writeThrough)
@@ -270,7 +268,6 @@ internal sealed class CopyTelemetry
             Interlocked.Read(ref _sourceHashBytes), ToTimeSpan(Interlocked.Read(ref _sourceHashTicks)),
             ToTimeSpan(Interlocked.Read(ref _bufferWaitTicks)),
             ToTimeSpan(Interlocked.Read(ref _fanoutWaitTicks)),
-            ToTimeSpan(Interlocked.Read(ref _queueWaitTicks)),
             ToTimeSpan(Interlocked.Read(ref _controlBacklogWaitTicks)),
             Interlocked.Read(ref _writtenBytes), Interlocked.Read(ref _writeOperations), ToTimeSpan(Interlocked.Read(ref _writeTicks)),
             Volatile.Read(ref _flushes), ToTimeSpan(Interlocked.Read(ref _flushTicks)),

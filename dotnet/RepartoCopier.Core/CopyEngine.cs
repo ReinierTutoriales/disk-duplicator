@@ -835,7 +835,6 @@ public static class CopyEngine
         DataMessage message,
         CopyJob job)
     {
-        List<DestinationWorker> deferred = [];
         var index = 0;
         try
         {
@@ -848,55 +847,19 @@ public static class CopyEngine
                     continue;
                 }
 
-                if (worker.DeviceScheduler.TryReserveBacklog(message.Block.Length))
-                {
-                    await DeliverOneAsync(
-                        worker,
-                        message,
-                        job,
-                        backlogReserved: true).ConfigureAwait(false);
-                    continue;
-                }
-
-                deferred.Add(worker);
-            }
-        }
-        catch
-        {
-            foreach (var _ in deferred)
-                message.Block.Release();
-            for (var remaining = index + 1; remaining < recipients.Count; remaining++)
-                message.Block.Release();
-            throw;
-        }
-
-        for (var deferredIndex = 0; deferredIndex < deferred.Count; deferredIndex++)
-        {
-            var worker = deferred[deferredIndex];
-            var reserved = false;
-            try
-            {
-                var waitStarted = Stopwatch.GetTimestamp();
-                await worker.DeviceScheduler
-                    .ReserveBacklogAsync(message.Block.Length, job.Token)
-                    .ConfigureAwait(false);
-                reserved = true;
-                job.Telemetry.RecordQueueWait(Stopwatch.GetElapsedTime(waitStarted));
-
+                worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
                 await DeliverOneAsync(
                     worker,
                     message,
                     job,
                     backlogReserved: true).ConfigureAwait(false);
             }
-            catch
-            {
-                if (!reserved)
-                    message.Block.Release();
-                for (var remaining = deferredIndex + 1; remaining < deferred.Count; remaining++)
-                    message.Block.Release();
-                throw;
-            }
+        }
+        catch
+        {
+            for (var remaining = index + 1; remaining < recipients.Count; remaining++)
+                message.Block.Release();
+            throw;
         }
     }
 
