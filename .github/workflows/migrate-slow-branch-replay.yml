@@ -1,0 +1,46 @@
+name: Migrate slow branch replay
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tools/patch-slow-branch-replay.ps1'
+      - '.github/workflows/migrate-slow-branch-replay.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Rebase on latest main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+      - name: Apply slow branch replay
+        shell: pwsh
+        run: ./tools/patch-slow-branch-replay.ps1
+      - name: Core tests
+        shell: pwsh
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
+      - name: WinUI release build
+        shell: pwsh
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -p:Platform=x64
+      - name: Commit migration and cleanup
+        shell: pwsh
+        run: |
+          git rm tools/patch-slow-branch-replay.ps1 .github/workflows/migrate-slow-branch-replay.yml
+          git add dotnet docs
+          git status --short
+          git commit -m "perf: decouple lagging destination branches with replay"
+          git pull --rebase origin main
+          git push origin main
