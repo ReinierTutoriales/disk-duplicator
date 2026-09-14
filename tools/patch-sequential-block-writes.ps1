@@ -160,8 +160,15 @@ $tests = Get-Content -LiteralPath $fastTestsPath -Raw
 $tests = $tests.Replace(
     'public async Task LargeSharedBlocksPreserveLogicalFanOutWhileAllowingVariablePhysicalWriteDepth()',
     'public async Task LargeSharedBlocksRemainSinglePhysicalWritesPerDestination()')
+$methodMarker = 'public async Task LargeSharedBlocksRemainSinglePhysicalWritesPerDestination()'
+$methodIndex = $tests.IndexOf($methodMarker)
+if ($methodIndex -lt 0) { throw 'ProductionFastPath aligned-write method marker not found.' }
+$payloadPattern = 'var payload = new byte[20 * 1024 * 1024 + 733];'
+$payloadIndex = $tests.IndexOf($payloadPattern, $methodIndex)
+if ($payloadIndex -lt 0) { throw 'ProductionFastPath aligned-write payload pattern not found.' }
+$tests = $tests.Remove($payloadIndex, $payloadPattern.Length).Insert($payloadIndex, 'var payload = new byte[20 * 1024 * 1024];')
 $oldAssert = '        Assert.IsGreaterThanOrEqualTo((long)destinations.Length, metrics.WriteOperations);'
-$newAssert = '        Assert.AreEqual((long)destinations.Length, metrics.WriteOperations, "Un bloque FAN-OUT menor de 32 MiB debe permanecer como una sola escritura física por destino.");'
+$newAssert = '        Assert.AreEqual((long)destinations.Length, metrics.WriteOperations, "Un bloque FAN-OUT alineado menor de 32 MiB debe permanecer como una sola escritura física por destino.");'
 if (-not $tests.Contains($oldAssert)) { throw 'ProductionFastPath write-operation assertion not found.' }
 $tests = $tests.Replace($oldAssert, $newAssert)
 Set-Content -LiteralPath $fastTestsPath -Value $tests -Encoding utf8
