@@ -8,7 +8,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class ExplicitOffsetWriterTests
 {
     [TestMethod]
-    public async Task VariableDepthBlockFollowedByTailPreservesExactBytes()
+    public async Task FullBlockFollowedByTailPreservesExactBytesWithoutIntraBlockSplitting()
     {
         var path = Path.Combine(Path.GetTempPath(), $"repartocopier-offset-{Guid.NewGuid():N}.bin");
         try
@@ -32,8 +32,6 @@ public sealed class ExplicitOffsetWriterTests
                     stream.SafeFileHandle,
                     block,
                     0,
-                    requestedDepth: 16,
-                    StorageWritePolicy.MinimumParallelSliceBytes,
                     scheduler,
                     CancellationToken.None);
 
@@ -41,12 +39,10 @@ public sealed class ExplicitOffsetWriterTests
                     stream.SafeFileHandle,
                     tail,
                     block.LongLength,
-                    requestedDepth: 16,
-                    StorageWritePolicy.MinimumParallelSliceBytes,
                     scheduler,
                     CancellationToken.None);
 
-                Assert.AreEqual(16, blockOperations);
+                Assert.AreEqual(1, blockOperations);
                 Assert.AreEqual(1, tailOperations);
                 Assert.AreEqual(0L, stream.Position, "RandomAccess no debe depender del cursor de FileStream.");
                 stream.Flush(flushToDisk: true);
