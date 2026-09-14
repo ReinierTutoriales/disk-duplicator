@@ -237,4 +237,36 @@ public sealed class UnificationContractTests
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.GlobalControlBacklogBudget"));
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.ControlBacklogCapacity"));
     }
+
+    [TestMethod]
+    public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
+    {
+        var engineMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(engineMethods, "WriteWithRetryAsync");
+        CollectionAssert.DoesNotContain(engineMethods, "SwitchToBuffered");
+        CollectionAssert.DoesNotContain(engineMethods, "ResetPartLength");
+        CollectionAssert.Contains(engineMethods, "WriteBlockAtOffsetAsync");
+        CollectionAssert.Contains(engineMethods, "DrainPendingWritesAsync");
+        CollectionAssert.Contains(engineMethods, "PruneCompletedSuccesses");
+        CollectionAssert.Contains(engineMethods, "SwitchToBufferedAfterDrain");
+
+        var currentFile = typeof(CopyEngine).GetNestedType("CurrentFile", BindingFlags.NonPublic);
+        Assert.IsNotNull(currentFile);
+        var properties = currentFile
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(properties, "PendingWrites");
+        CollectionAssert.Contains(properties, "ScheduledBytes");
+        CollectionAssert.Contains(properties, "Copied");
+        CollectionAssert.Contains(properties, "DirectFallbackRequested");
+
+        var reserve = currentFile.GetMethod("ReserveWriteOffset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNotNull(reserve);
+        var record = currentFile.GetMethod("RecordCompletedWrite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNotNull(record);
+    }
 }
