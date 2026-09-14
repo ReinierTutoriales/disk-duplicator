@@ -15,6 +15,6 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 1
-      - name: Migrate and audit adaptive QD consumers
+      - name: Migrate and audit adaptive QD consumers (negative contracts excluded)
         shell: pwsh
         run: ./tools/patch-adaptive-qd-consumers.ps1
