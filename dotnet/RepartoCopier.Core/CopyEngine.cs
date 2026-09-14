@@ -1112,27 +1112,22 @@ public static class CopyEngine
             try
             {
                 current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
-                var queueDepth = StorageWritePolicy.BufferedLargeWriteQueueDepth(
+                var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
                     worker.Device,
                     worker.DeviceScheduler.MaxOutstandingIo,
                     current.Entry.Size,
                     data.Length);
                 var started = Stopwatch.GetTimestamp();
-
-                if (queueDepth >= 2)
-                {
-                    await WriteQueueDepthTwoAsync(worker, current, data, job).ConfigureAwait(false);
-                }
-                else
-                {
-                    using var ioLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-                    await ExplicitOffsetWriter.WriteOneAsync(
-                        current.Stream.SafeFileHandle,
-                        data,
-                        current.Copied,
-                        job.Token).ConfigureAwait(false);
+                var operations = await DestinationWriteCoordinator.WriteAsync(
+                    current.Stream.SafeFileHandle,
+                    data,
+                    current.Copied,
+                    queueDepth,
+                    StorageWritePolicy.MinimumParallelSliceBytes,
+                    worker.DeviceScheduler,
+                    job.Token).ConfigureAwait(false);
+                for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                }
                 job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started), current.WriteThrough);
                 worker.NoteProgress();
                 return;
@@ -1158,45 +1153,6 @@ public static class CopyEngine
         throw new IOException($"No se pudo escribir {current.Entry.RelativePath} después de reintentos.", last);
     }
 
-    private static async Task WriteQueueDepthTwoAsync(
-        DestinationWorker worker,
-        CurrentFile current,
-        ReadOnlyMemory<byte> data,
-        CopyJob job)
-    {
-        var stream = current.Stream
-            ?? throw new InvalidOperationException("El .part no está abierto para escritura QD2.");
-        var firstLength = data.Length / 2;
-        var secondLength = data.Length - firstLength;
-        if (firstLength < StorageWritePolicy.MinimumParallelSliceBytes ||
-            secondLength < StorageWritePolicy.MinimumParallelSliceBytes)
-        {
-            using var fallbackLease = await worker.DeviceScheduler.AcquireIoAsync(job.Token).ConfigureAwait(false);
-            await ExplicitOffsetWriter.WriteOneAsync(
-                stream.SafeFileHandle,
-                data,
-                current.Copied,
-                job.Token).ConfigureAwait(false);
-            job.Telemetry.RecordWriteOperation();
-            return;
-        }
-
-        using var pairLease = await worker.DeviceScheduler.AcquireIoPairAsync(job.Token).ConfigureAwait(false);
-
-        var firstOffset = current.Copied;
-        var secondOffset = checked(firstOffset + firstLength);
-        var handle = stream.SafeFileHandle;
-
-        await ExplicitOffsetWriter.WriteTwoAsync(
-            handle,
-            data[..firstLength],
-            firstOffset,
-            data.Slice(firstLength, secondLength),
-            secondOffset,
-            job.Token).ConfigureAwait(false);
-        job.Telemetry.RecordWriteOperation();
-        job.Telemetry.RecordWriteOperation();
-    }
 
     private static void FinishFile(
         DestinationWorker worker,
