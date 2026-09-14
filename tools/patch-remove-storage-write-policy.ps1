@@ -56,7 +56,7 @@ $oldNetwork = @'
 if (-not $roadmap.Contains($oldNetwork)) { throw 'Network QD1 roadmap block not found.' }
 $roadmap = $roadmap.Replace($oldNetwork, '')
 
-$closedAnchor = '- `PendingRead` de verificación convertido a valor readonly para eliminar la asignación de heap por entrada pendiente.'
+$closedAnchor = '- Descriptor `PendingRead` de verificación convertido a valor readonly para eliminar la asignación de heap por entrada pendiente.'
 $closedReplacement = $closedAnchor + "`r`n- `StorageWritePolicy` y sus tests eliminados tras quedar huérfanos con la migración full-block; el QD productivo queda gobernado únicamente por `DeviceScheduler` + `FanoutPerformancePolicy`."
 if (-not $roadmap.Contains($closedAnchor)) { throw 'Closed-items anchor not found.' }
 $roadmap = $roadmap.Replace($closedAnchor, $closedReplacement)
