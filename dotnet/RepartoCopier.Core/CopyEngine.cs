@@ -96,10 +96,7 @@ public static class CopyEngine
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
-    private const int PreallocationThreshold = 4 * 1024 * 1024;
-    // Files at or below one writer chunk use Windows write-through instead of
-    // paying for a separate FlushFileBuffers call after the write.
-    private const int WriteThroughFileThreshold = 4 * 1024 * 1024;
+
     private const long InitialBufferBudget = 512L * 1024 * 1024;
 
     // This budget protects Begin/End-heavy trees. Payload data is independently
@@ -1069,7 +1066,6 @@ public static class CopyEngine
                     {
                         case BeginMessage begin:
                             current = BeginFile(worker, begin.Entry);
-                            job.Telemetry.RecordFilePolicy(current.WriteThrough);
                             if (current.DirectSession is not null)
                                 job.Telemetry.RecordDirectDestinationFile();
                             else if (current.DirectRequested)
@@ -1150,21 +1146,20 @@ public static class CopyEngine
         var part = transient.PartPath;
         TryDelete(part);
         var directRequested = DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
-        var writeThrough = !directRequested && entry.Size <= WriteThroughFileThreshold;
-        var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold);
+        var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size);
         FileStream? stream = null;
         DirectIoDestinationWriter.Session? directSession = null;
         if (directRequested)
         {
-            using (OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough: false, preallocationSize)) { }
+            using (OpenPartStream(part, FileMode.CreateNew, offset: 0, preallocationSize)) { }
             if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
-                stream = ReopenPart(part, 0, writeThrough: false);
+                stream = ReopenPart(part, 0);
         }
         else
         {
-            stream = OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough, preallocationSize);
+            stream = OpenPartStream(part, FileMode.CreateNew, offset: 0, preallocationSize);
         }
-        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, writeThrough, directRequested);
+        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
     }
 
     private static async Task WriteWithRetryAsync(
@@ -1218,7 +1213,7 @@ public static class CopyEngine
 
                 if (current.DirectSession is null)
                 {
-                    current.Stream ??= ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+                    current.Stream ??= ReopenPart(current.PartPath, current.Copied);
                     operations = await DestinationWriteCoordinator.WriteAsync(
                         current.Stream.SafeFileHandle,
                         data,
@@ -1231,7 +1226,7 @@ public static class CopyEngine
 
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started), current.WriteThrough);
+                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
                 worker.NoteProgress();
                 return;
             }
@@ -1267,7 +1262,7 @@ public static class CopyEngine
         current.DirectEnabled = false;
         job.Telemetry.RecordDirectDestinationFallback();
         ResetPartLength(current.PartPath, current.Copied);
-        current.Stream = ReopenPart(current.PartPath, current.Copied, current.WriteThrough);
+        current.Stream = ReopenPart(current.PartPath, current.Copied);
     }
 
     private static void ResetPartLength(string path, long length)
@@ -1313,12 +1308,9 @@ public static class CopyEngine
         }
         else if (current.Stream is not null)
         {
-            if (!current.WriteThrough)
-            {
-                var flushStarted = Stopwatch.GetTimestamp();
-                current.Stream.Flush(flushToDisk: true);
-                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
-            }
+            var flushStarted = Stopwatch.GetTimestamp();
+            current.Stream.Flush(flushToDisk: true);
+            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
             current.Stream.Dispose();
             current.Stream = null;
         }
@@ -1330,7 +1322,7 @@ public static class CopyEngine
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         var commitStarted = Stopwatch.GetTimestamp();
         AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
-        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted), current.WriteThrough);
+        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         var recoveryStarted = Stopwatch.GetTimestamp();
         recovery.Append(
@@ -1340,7 +1332,7 @@ public static class CopyEngine
                 current.Entry.Size,
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
-        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted), current.WriteThrough);
+        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
         worker.VerificationPlans[PathKey(current.Entry.RelativePath)] =
             new VerificationPlan(current.Entry.Size, current.VerificationBlocks.ToArray());
         worker.Progress.MarkDone();
@@ -1546,19 +1538,16 @@ public static class CopyEngine
         fileSize <= LargeBufferSize ? LargeBufferSize :
         BlockSize;
 
-    private static FileStream ReopenPart(string path, long offset, bool writeThrough) =>
-        OpenPartStream(path, FileMode.Open, offset, writeThrough, preallocationSize: 0);
+    private static FileStream ReopenPart(string path, long offset) =>
+        OpenPartStream(path, FileMode.Open, offset, preallocationSize: 0);
 
     private static FileStream OpenPartStream(
         string path,
         FileMode mode,
         long offset,
-        bool writeThrough,
         long preallocationSize)
     {
         var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
-        if (writeThrough)
-            options |= FileOptions.WriteThrough;
         var stream = new FileStream(path, new FileStreamOptions
         {
             Mode = mode,
@@ -2366,7 +2355,6 @@ public static class CopyEngine
         string backupPath,
         FileStream? stream,
         DirectIoDestinationWriter.Session? directSession,
-        bool writeThrough,
         bool directRequested)
     {
         public List<VerificationBlock> VerificationBlocks { get; } = [];
@@ -2376,7 +2364,6 @@ public static class CopyEngine
         public string BackupPath { get; } = backupPath;
         public FileStream? Stream { get; set; } = stream;
         public DirectIoDestinationWriter.Session? DirectSession { get; set; } = directSession;
-        public bool WriteThrough { get; } = writeThrough;
         public bool DirectRequested { get; } = directRequested;
         public bool DirectEnabled { get; set; } = directSession is not null;
         public long Copied { get; set; }
