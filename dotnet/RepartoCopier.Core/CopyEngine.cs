@@ -92,7 +92,7 @@ public sealed class CopyJob : IAsyncDisposable
 public static class CopyEngine
 {
     private const int BlockSize = 32 * 1024 * 1024;
-    private const int SourcePrefetchThreshold = 16 * 1024 * 1024;
+
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
@@ -405,7 +405,8 @@ public static class CopyEngine
 
                 await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
 
-                var sourceResult = entry.Size >= SourcePrefetchThreshold
+                var readBufferSize = ReadBufferSizeFor(entry.Size);
+                var sourceResult = entry.Size > readBufferSize
                     ? await ReadAndFanOutPrefetchedAsync(
                         entry,
                         copy.SourceDevice,
@@ -416,6 +417,7 @@ public static class CopyEngine
                         sharedSourceScheduler).ConfigureAwait(false)
                     : await ReadAndFanOutSequentialAsync(
                         entry,
+                        copy.SourceDevice,
                         active,
                         bufferBudget,
                         job,
@@ -448,6 +450,7 @@ public static class CopyEngine
 
     private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
         FileEntry entry,
+        StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
@@ -455,79 +458,111 @@ public static class CopyEngine
         DeviceScheduler? sharedSourceScheduler)
     {
         using var hasher = Hasher.New();
-        await using var source = OpenSourceStream(entry.SourcePath);
         var readBufferSize = ReadBufferSizeFor(entry.Size);
-        long totalRead = 0;
-
-        while (true)
+        DirectIoSourceReader.OverlappedSession? direct = null;
+        FileStream? buffered = null;
+        try
         {
-            job.Token.ThrowIfCancellationRequested();
-            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-            var budgetStarted = Stopwatch.GetTimestamp();
-            await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
-            var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
-            pipeline.RecordBudgetWait(budgetElapsed);
-            job.Telemetry.RecordBufferWait(budgetElapsed);
-            job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
-            var rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
-            int read;
-            try
+            if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
+                buffered = OpenSourceStream(entry.SourcePath);
+
+            long totalRead = 0;
+            while (totalRead < entry.Size)
             {
-                var readStarted = Stopwatch.GetTimestamp();
-                DeviceScheduler.IoLease? sourceIo = null;
+                job.Token.ThrowIfCancellationRequested();
+                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+                var budgetStarted = Stopwatch.GetTimestamp();
+                await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
+                var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
+                pipeline.RecordBudgetWait(budgetElapsed);
+                job.Telemetry.RecordBufferWait(budgetElapsed);
+                job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
+
+                SourceBufferLease? lease = SourceBufferLease.RentAligned(
+                    readBufferSize,
+                    DirectIoSourceReader.MaximumSupportedAlignment);
+                var budgetOwned = true;
+                int read;
                 try
                 {
-                    if (sharedSourceScheduler is not null)
-                        sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, job.Token).ConfigureAwait(false);
-                    read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
+                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                    var readStarted = Stopwatch.GetTimestamp();
+                    DeviceScheduler.IoLease? sourceIo = null;
+                    try
+                    {
+                        if (sharedSourceScheduler is not null)
+                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
+
+                        if (direct is not null)
+                        {
+                            try
+                            {
+                                read = await direct.ReadAsync(lease, readBufferSize, totalRead, job.Token).ConfigureAwait(false);
+                                job.Telemetry.RecordDirectSourceRead(read);
+                            }
+                            catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                            {
+                                direct.Dispose();
+                                direct = null;
+                                job.Telemetry.RecordDirectSourceFallback();
+                                buffered = OpenSourceStream(entry.SourcePath);
+                                buffered.Position = totalRead;
+                                read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            read = await buffered!.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        sourceIo?.Dispose();
+                    }
+                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
+                    pipeline.RecordSourceRead(readElapsed);
+                    job.Telemetry.RecordSourceRead(read, readElapsed);
+
+                    if (read == 0)
+                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
+
+                    totalRead += read;
+                    var hashStarted = Stopwatch.GetTimestamp();
+                    hasher.UpdateWithJoin(lease.Memory.Span[..read]);
+                    job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
+                    active.RemoveAll(worker => !worker.IsActive);
+                    if (active.Count == 0)
+                        return null;
+
+                    var block = new SharedBlock(lease, read, readBufferSize, active.Count, bufferBudget);
+                    lease = null;
+                    budgetOwned = false;
+                    var deliveryStarted = Stopwatch.GetTimestamp();
+                    await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
+                    var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
+                    pipeline.RecordDeliveryWait(deliveryElapsed);
+                    job.Telemetry.RecordFanoutWait(deliveryElapsed);
+                    active.RemoveAll(worker => !worker.IsActive);
+                    if (active.Count == 0)
+                        return null;
                 }
                 finally
                 {
-                    sourceIo?.Dispose();
+                    lease?.Dispose();
+                    if (budgetOwned)
+                        bufferBudget.Release(readBufferSize);
                 }
-                var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                pipeline.RecordSourceRead(readElapsed);
-                job.Telemetry.RecordSourceRead(read, readElapsed);
-            }
-            catch
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release(readBufferSize);
-                throw;
             }
 
-            if (read == 0)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release(readBufferSize);
-                break;
-            }
-
-            totalRead += read;
-            var hashStarted = Stopwatch.GetTimestamp();
-            hasher.UpdateWithJoin(rented.AsSpan(0, read));
-            job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
-            active.RemoveAll(worker => !worker.IsActive);
-            if (active.Count == 0)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release(readBufferSize);
-                return null;
-            }
-
-            var block = new SharedBlock(rented, read, readBufferSize, active.Count, bufferBudget);
-            var deliveryStarted = Stopwatch.GetTimestamp();
-            await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
-            var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-            pipeline.RecordDeliveryWait(deliveryElapsed);
-            job.Telemetry.RecordFanoutWait(deliveryElapsed);
-            active.RemoveAll(worker => !worker.IsActive);
-            if (active.Count == 0)
-                return null;
+            ValidateCompletedSourceRead(entry, totalRead);
+            return new SourceReadResult(totalRead, hasher.Finalize().AsSpan().ToArray());
         }
-
-        ValidateCompletedSourceRead(entry, totalRead);
-        return new SourceReadResult(totalRead, hasher.Finalize().AsSpan().ToArray());
+        finally
+        {
+            direct?.Dispose();
+            if (buffered is not null)
+                await buffered.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
@@ -725,7 +760,7 @@ public static class CopyEngine
                 buffered = OpenSourceStream(entry.SourcePath);
 
             long totalRead = 0;
-            while (true)
+            while (totalRead < entry.Size)
             {
                 token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(token).ConfigureAwait(false);
@@ -743,9 +778,12 @@ public static class CopyEngine
                     job.Telemetry.RecordBufferWait(budgetElapsed);
                     job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
 
-                    lease = direct is null
-                        ? SourceBufferLease.RentBuffered(readBufferSize)
-                        : SourceBufferLease.RentAligned(readBufferSize, DirectIoSourceReader.MaximumSupportedAlignment);
+                    // FAN-OUT payloads are always aligned, even when the source itself
+                    // falls back to buffered I/O, so every capable destination can keep
+                    // using Direct I/O without a whole-block staging copy.
+                    lease = SourceBufferLease.RentAligned(
+                        readBufferSize,
+                        DirectIoSourceReader.MaximumSupportedAlignment);
 
                     var readStarted = Stopwatch.GetTimestamp();
                     int read;
@@ -771,13 +809,17 @@ public static class CopyEngine
                                 job.Telemetry.RecordDirectSourceFallback();
                                 buffered = OpenSourceStream(entry.SourcePath);
                                 buffered.Position = totalRead;
-                                lease = SourceBufferLease.RentBuffered(readBufferSize);
-                                read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                                lease = SourceBufferLease.RentAligned(
+                                    readBufferSize,
+                                    DirectIoSourceReader.MaximumSupportedAlignment);
+                                var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                                read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                             }
                         }
                         else
                         {
-                            read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                            var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                        read = await buffered!.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                         }
                     }
                     finally
@@ -796,7 +838,7 @@ public static class CopyEngine
                         budgetOwned = false;
                         pipeline.ReleasePrefetchSlot();
                         slotOwned = false;
-                        break;
+                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
                     }
 
                     totalRead += read;
@@ -1107,12 +1149,12 @@ public static class CopyEngine
         var transient = StateLayout.TransientPaths(worker.Root, destination);
         var part = transient.PartPath;
         TryDelete(part);
-        var writeThrough = entry.Size <= WriteThroughFileThreshold;
+        var directRequested = DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
+        var writeThrough = !directRequested && entry.Size <= WriteThroughFileThreshold;
         var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size, PreallocationThreshold);
         FileStream? stream = null;
         DirectIoDestinationWriter.Session? directSession = null;
-        var preferDirect = !writeThrough && DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
-        if (preferDirect)
+        if (directRequested)
         {
             using (OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough: false, preallocationSize)) { }
             if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
@@ -1122,7 +1164,7 @@ public static class CopyEngine
         {
             stream = OpenPartStream(part, FileMode.CreateNew, offset: 0, writeThrough, preallocationSize);
         }
-        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, writeThrough, preferDirect);
+        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, writeThrough, directRequested);
     }
 
     private static async Task WriteWithRetryAsync(
@@ -1142,7 +1184,6 @@ public static class CopyEngine
                 var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
                     worker.Device,
                     worker.DeviceScheduler.ExplorationQueueDepth,
-                    current.Entry.Size,
                     data.Length);
                 var started = Stopwatch.GetTimestamp();
                 var operations = 0;
