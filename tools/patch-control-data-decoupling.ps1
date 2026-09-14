@@ -22,71 +22,19 @@ Replace-Exact $copy @'
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 '@ 'clasificar mensajes de control'
 
-Replace-Exact $copy @'
-    private static async Task DeliverAsync(
-        IReadOnlyList<DestinationWorker> recipients,
-        FanoutMessage message,
-        bool countsData,
-        CopyJob job)
-    {
-        if (recipients.Count == 0)
-            return;
+Replace-Exact $copy '        bool countsData,`n        CopyJob job)' '        CopyJob job)' 'eliminar countsData de DeliverAsync'
+Replace-Exact $copy '        if (countsData && message is DataMessage dataMessage)' '        if (message is DataMessage dataMessage)' 'tipar data en DeliverAsync'
+Replace-Exact $copy '                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);' '                await DeliverOneAsync(recipients[index], message, job).ConfigureAwait(false);' 'migrar control DeliverOne'
 
-        if (countsData && message is DataMessage dataMessage)
-'@ @'
-    private static async Task DeliverAsync(
-        IReadOnlyList<DestinationWorker> recipients,
-        FanoutMessage message,
-        CopyJob job)
-    {
-        if (recipients.Count == 0)
-            return;
-
-        if (message is DataMessage dataMessage)
-'@ 'eliminar parámetro countsData de DeliverAsync'
-
-Replace-Exact $copy @'
-                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);
-'@ @'
-                await DeliverOneAsync(recipients[index], message, job).ConfigureAwait(false);
-'@ 'migrar llamada control DeliverOne'
-
-Replace-Exact $copy @'
-                        message,
-                        countsData: true,
-                        job,
-                        backlogReserved: true).ConfigureAwait(false);
-'@ @'
-                        message,
-                        job,
-                        backlogReserved: true).ConfigureAwait(false);
-'@ 'migrar llamadas data DeliverOne'
-
-Replace-Exact $copy @'
-                    message,
-                    countsData: true,
-                    job,
-                    backlogReserved: true).ConfigureAwait(false);
-'@ @'
-                    message,
-                    job,
-                    backlogReserved: true).ConfigureAwait(false);
-'@ 'migrar llamada data diferida'
-
-Replace-Exact $copy @'
-    private static async ValueTask DeliverOneAsync(
-        DestinationWorker worker,
-        FanoutMessage message,
-        bool countsData,
-        CopyJob job,
-        bool backlogReserved = false)
-'@ @'
-    private static async ValueTask DeliverOneAsync(
-        DestinationWorker worker,
-        FanoutMessage message,
-        CopyJob job,
-        bool backlogReserved = false)
-'@ 'eliminar parámetro countsData de DeliverOne'
+$text = [IO.File]::ReadAllText($copy)
+$text = $text.Replace("                        countsData: true,`n                        job,", "                        job,")
+$text = $text.Replace("                    countsData: true,`n                    job,", "                    job,")
+$text = $text.Replace("        bool countsData,`n        CopyJob job,`n        bool backlogReserved = false)", "        CopyJob job,`n        bool backlogReserved = false)")
+$text = $text.Replace('DeliverAsync(active, new BeginMessage(entry), countsData: false, job)', 'DeliverAsync(active, new BeginMessage(entry), job)')
+$text = $text.Replace('DeliverAsync(active, new DataMessage(block), countsData: true, job)', 'DeliverAsync(active, new DataMessage(block), job)')
+$text = $text.Replace('DeliverAsync(active, new DataMessage(shared), countsData: true, job)', 'DeliverAsync(active, new DataMessage(shared), job)')
+$text = $text.Replace('DeliverAsync(active, new EndMessage(hash), countsData: false, job)', 'DeliverAsync(active, new EndMessage(hash), job)')
+[IO.File]::WriteAllText($copy, $text, [Text.UTF8Encoding]::new($false))
 
 Replace-Exact $copy @'
             var controlWaitStarted = Stopwatch.GetTimestamp();
@@ -108,14 +56,44 @@ Replace-Exact $copy @'
 '@ 'data no consume control budget'
 
 Replace-Exact $copy @'
+            if (!worker.IsActive)
+            {
+                worker.ControlBudget.Release();
+                controlOwned = false;
+'@ @'
+            if (!worker.IsActive)
+            {
+                if (controlOwned)
+                {
+                    worker.ControlBudget.Release();
+                    controlOwned = false;
+                }
+'@ 'liberar control solo si adquirido al quedar inactivo'
+
+Replace-Exact $copy @'
             worker.DecrementQueueDepth();
+            queueOwned = false;
             worker.ControlBudget.Release();
-            var data = message as DataMessage;
+            controlOwned = false;
 '@ @'
             worker.DecrementQueueDepth();
-            if (message is ControlMessage)
+            queueOwned = false;
+            if (controlOwned)
+            {
                 worker.ControlBudget.Release();
-            var data = message as DataMessage;
+                controlOwned = false;
+            }
+'@ 'liberar control solo si adquirido al rechazar canal'
+
+Replace-Exact $copy @'
+                worker.DecrementQueueDepth();
+                worker.ControlBudget.Release();
+                var data = message as DataMessage;
+'@ @'
+                worker.DecrementQueueDepth();
+                if (message is ControlMessage)
+                    worker.ControlBudget.Release();
+                var data = message as DataMessage;
 '@ 'writer libera solo mensajes de control'
 
 Replace-Exact $copy @'
@@ -128,13 +106,6 @@ Replace-Exact $copy @'
                 worker.ControlBudget.Release();
             if (message is DataMessage data)
 '@ 'drain libera solo mensajes de control'
-
-$text = [IO.File]::ReadAllText($copy)
-$text = $text.Replace('DeliverAsync(active, new BeginMessage(entry), countsData: false, job)', 'DeliverAsync(active, new BeginMessage(entry), job)')
-$text = $text.Replace('DeliverAsync(active, new DataMessage(block), countsData: true, job)', 'DeliverAsync(active, new DataMessage(block), job)')
-$text = $text.Replace('DeliverAsync(active, new DataMessage(shared), countsData: true, job)', 'DeliverAsync(active, new DataMessage(shared), job)')
-$text = $text.Replace('DeliverAsync(active, new EndMessage(hash), countsData: false, job)', 'DeliverAsync(active, new EndMessage(hash), job)')
-[IO.File]::WriteAllText($copy, $text, [Text.UTF8Encoding]::new($false))
 
 $text = [IO.File]::ReadAllText($copy)
 if ($text.Contains('countsData')) { throw 'countsData sigue presente' }
