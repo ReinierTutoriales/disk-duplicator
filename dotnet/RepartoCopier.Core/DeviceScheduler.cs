@@ -55,6 +55,7 @@ internal sealed class DeviceScheduler : IDisposable
     private long _sampleBytes;
     private long _sampleLatencyStopwatchTicks;
     private int _sampleCompletions;
+    private int _samplePeakObservedConcurrency;
     private bool _sampleSawDemand;
     private double _bestThroughputBytesPerSecond;
     private double _bestAverageLatencySeconds = double.PositiveInfinity;
@@ -235,11 +236,18 @@ internal sealed class DeviceScheduler : IDisposable
         _sampleBytes = checked(_sampleBytes + bytes);
         _sampleLatencyStopwatchTicks = checked(_sampleLatencyStopwatchTicks + Math.Max(1, now - startedTimestamp));
         _sampleCompletions++;
+        // One completed operation plus the operations that are still outstanding
+        // describe the concurrency this sample actually exercised. Requiring one
+        // observed wave gives throughput/latency feedback without delaying QD
+        // exploration behind an arbitrary completion-count floor or ceiling.
+        _samplePeakObservedConcurrency = Math.Max(
+            _samplePeakObservedConcurrency,
+            checked(_outstandingIo + 1));
         if (_ioWaiters.Count > 0 || _outstandingIo >= _currentQueueDepth)
             _sampleSawDemand = true;
 
-        var decisionInterval = Math.Max(8, (int)Math.Min(256L, (long)_currentQueueDepth * 2));
-        if (_sampleCompletions < decisionInterval)
+        var observedWaveCompletions = Math.Max(1, _samplePeakObservedConcurrency);
+        if (_sampleCompletions < observedWaveCompletions)
             return;
 
         var elapsedTicks = Math.Max(1, now - _sampleStartedTimestamp);
@@ -337,6 +345,7 @@ internal sealed class DeviceScheduler : IDisposable
         _sampleBytes = 0;
         _sampleLatencyStopwatchTicks = 0;
         _sampleCompletions = 0;
+        _samplePeakObservedConcurrency = 0;
         _sampleSawDemand = false;
     }
 
