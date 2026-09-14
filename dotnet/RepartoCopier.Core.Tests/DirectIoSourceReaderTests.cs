@@ -67,6 +67,18 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
+    public void SourceFastPathExposesOverlappedDirectIoSession()
+    {
+        var method = typeof(DirectIoSourceReader).GetMethod(
+            "TryOpenOverlapped",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+        Assert.IsNotNull(method);
+        var parameters = method.GetParameters();
+        Assert.AreEqual(typeof(DirectIoSourceReader.OverlappedSession).MakeByRefType(), parameters[^1].ParameterType);
+    }
+
+    [TestMethod]
     public void BufferedLeaseKeepsExistingArrayPoolContract()
     {
         using var lease = SourceBufferLease.RentBuffered(1024 * 1024);

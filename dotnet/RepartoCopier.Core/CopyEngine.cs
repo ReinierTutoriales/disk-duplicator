@@ -685,11 +685,11 @@ public static class CopyEngine
         CancellationToken token)
     {
         Exception? completionError = null;
-        DirectIoSourceReader.Session? direct = null;
+        DirectIoSourceReader.OverlappedSession? direct = null;
         FileStream? buffered = null;
         try
         {
-            if (!DirectIoSourceReader.TryOpen(entry.SourcePath, sourceDevice, readBufferSize, out direct))
+            if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
                 buffered = OpenSourceStream(entry.SourcePath);
 
             long totalRead = 0;
@@ -721,7 +721,7 @@ public static class CopyEngine
                     {
                         try
                         {
-                            read = direct.Read(lease, readBufferSize);
+                            read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);
                             job.Telemetry.RecordDirectSourceRead(read);
                         }
                         catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
