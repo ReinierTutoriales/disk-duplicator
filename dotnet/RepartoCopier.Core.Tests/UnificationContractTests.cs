@@ -149,6 +149,23 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void AtomicCommitIsSingleReplacementPrimitive()
+    {
+        var engineMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(engineMethods, "CommitPart");
+
+        var commitMethods = typeof(AtomicFileCommit)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Where(method => !method.IsSpecialName)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(commitMethods, "Commit");
+    }
+
+    [TestMethod]
     public void PayloadMessagesStayOutsideControlBacklogBudgetArchitecture()
     {
         var fanout = typeof(CopyEngine).GetNestedType("FanoutMessage", BindingFlags.NonPublic);
