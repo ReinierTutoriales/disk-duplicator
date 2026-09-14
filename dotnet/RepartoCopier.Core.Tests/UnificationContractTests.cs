@@ -169,11 +169,19 @@ public sealed class UnificationContractTests
 
         var deliveryMethods = typeof(CopyEngine)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-            .Where(method => method.Name is "DeliverAsync" or "DeliverOneAsync")
+            .Where(method => method.Name is "DeliverAsync" or "DeliverDataAsync" or "DeliverControlAsync")
             .ToArray();
-        Assert.IsGreaterThan(0, deliveryMethods.Length);
+        Assert.AreEqual(3, deliveryMethods.Length);
         Assert.IsFalse(deliveryMethods
             .SelectMany(method => method.GetParameters())
             .Any(parameter => string.Equals(parameter.Name, "countsData", StringComparison.Ordinal)));
+
+        var deliverControl = deliveryMethods.Single(method => method.Name == "DeliverControlAsync");
+        Assert.AreEqual("ControlMessage", deliverControl.GetParameters()[1].ParameterType.Name);
+        var engineMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(engineMethods, "DeliverOneAsync");
     }
 }

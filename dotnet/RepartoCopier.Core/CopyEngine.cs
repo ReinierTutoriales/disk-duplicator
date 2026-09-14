@@ -813,21 +813,9 @@ public static class CopyEngine
             return;
         }
 
-        var index = 0;
-        try
-        {
-            for (; index < recipients.Count; index++)
-                await DeliverOneAsync(recipients[index], message, job).ConfigureAwait(false);
-        }
-        catch
-        {
-            if (message is DataMessage data)
-            {
-                for (var remaining = index + 1; remaining < recipients.Count; remaining++)
-                    data.Block.Release();
-            }
-            throw;
-        }
+        var control = (ControlMessage)message;
+        for (var index = 0; index < recipients.Count; index++)
+            await DeliverControlAsync(recipients[index], control, job).ConfigureAwait(false);
     }
 
     private static async Task DeliverDataAsync(
@@ -835,10 +823,13 @@ public static class CopyEngine
         DataMessage message,
         CopyJob job)
     {
-        var index = 0;
+        var index = -1;
         try
         {
-            for (; index < recipients.Count; index++)
+            job.Token.ThrowIfCancellationRequested();
+            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+
+            for (index = 0; index < recipients.Count; index++)
             {
                 var worker = recipients[index];
                 if (!worker.IsActive)
@@ -847,12 +838,52 @@ public static class CopyEngine
                     continue;
                 }
 
-                worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
-                await DeliverOneAsync(
-                    worker,
-                    message,
-                    job,
-                    backlogReserved: true).ConfigureAwait(false);
+                var backlogOwned = false;
+                var queueOwned = false;
+                var blockOwned = true;
+                try
+                {
+                    worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
+                    backlogOwned = true;
+
+                    if (!worker.IsActive)
+                    {
+                        worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
+                        backlogOwned = false;
+                        message.Block.Release();
+                        blockOwned = false;
+                        continue;
+                    }
+
+                    worker.IncrementQueueDepth();
+                    queueOwned = true;
+                    if (worker.Channel.Writer.TryWrite(message))
+                    {
+                        queueOwned = false;
+                        backlogOwned = false;
+                        blockOwned = false;
+                        continue;
+                    }
+
+                    worker.DecrementQueueDepth();
+                    queueOwned = false;
+                    worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
+                    backlogOwned = false;
+                    message.Block.Release();
+                    blockOwned = false;
+                    if (worker.IsActive)
+                        worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+                }
+                catch
+                {
+                    if (queueOwned)
+                        worker.DecrementQueueDepth();
+                    if (backlogOwned)
+                        worker.DeviceScheduler.ReleaseBacklog(message.Block.Length);
+                    if (blockOwned)
+                        message.Block.Release();
+                    throw;
+                }
             }
         }
         catch
@@ -863,19 +894,13 @@ public static class CopyEngine
         }
     }
 
-    private static async ValueTask DeliverOneAsync(
+    private static async ValueTask DeliverControlAsync(
         DestinationWorker worker,
-        FanoutMessage message,
-        CopyJob job,
-        bool backlogReserved = false)
+        ControlMessage message,
+        CopyJob job)
     {
         if (!worker.IsActive)
-        {
-            if (backlogReserved && message is DataMessage inactiveData)
-                worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
-            ReleaseIfData(message);
             return;
-        }
 
         var controlOwned = false;
         var queueOwned = false;
@@ -884,32 +909,21 @@ public static class CopyEngine
             job.Token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
-            if (message is ControlMessage)
-            {
-                var controlWaitStarted = Stopwatch.GetTimestamp();
-                await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
-                var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
-                job.Telemetry.RecordControlBacklogWait(controlWait);
-                job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
-                controlOwned = true;
-            }
+            var controlWaitStarted = Stopwatch.GetTimestamp();
+            await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
+            var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
+            job.Telemetry.RecordControlBacklogWait(controlWait);
+            job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
+            controlOwned = true;
 
             if (!worker.IsActive)
             {
-                if (controlOwned)
-                {
-                    worker.ControlBudget.Release();
-                    controlOwned = false;
-                }
-                if (backlogReserved && message is DataMessage inactiveData)
-                    worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
-                ReleaseIfData(message);
+                worker.ControlBudget.Release();
                 return;
             }
 
             worker.IncrementQueueDepth();
             queueOwned = true;
-
             if (worker.Channel.Writer.TryWrite(message))
             {
                 controlOwned = false;
@@ -919,33 +933,17 @@ public static class CopyEngine
 
             worker.DecrementQueueDepth();
             queueOwned = false;
-            if (controlOwned)
-            {
-                worker.ControlBudget.Release();
-                controlOwned = false;
-            }
-            if (backlogReserved && message is DataMessage rejectedData)
-                worker.DeviceScheduler.ReleaseBacklog(rejectedData.Block.Length);
-            ReleaseIfData(message);
+            worker.ControlBudget.Release();
+            controlOwned = false;
             if (worker.IsActive)
                 worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
         }
-        catch (OperationCanceledException)
-        {
-            if (queueOwned) worker.DecrementQueueDepth();
-            if (controlOwned) worker.ControlBudget.Release();
-            if (backlogReserved && message is DataMessage cancelledData)
-                worker.DeviceScheduler.ReleaseBacklog(cancelledData.Block.Length);
-            ReleaseIfData(message);
-            throw;
-        }
         catch
         {
-            if (queueOwned) worker.DecrementQueueDepth();
-            if (controlOwned) worker.ControlBudget.Release();
-            if (backlogReserved && message is DataMessage failedData)
-                worker.DeviceScheduler.ReleaseBacklog(failedData.Block.Length);
-            ReleaseIfData(message);
+            if (queueOwned)
+                worker.DecrementQueueDepth();
+            if (controlOwned)
+                worker.ControlBudget.Release();
             throw;
         }
     }
