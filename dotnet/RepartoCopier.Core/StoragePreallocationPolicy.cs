@@ -7,9 +7,9 @@ internal static class StoragePreallocationPolicy
     private static readonly ConcurrentDictionary<string, bool> VolumePolicy =
         new(StringComparer.OrdinalIgnoreCase);
 
-    internal static long GetPreallocationSize(string path, long fileSize, long threshold)
+    internal static long GetPreallocationSize(string path, long fileSize)
     {
-        if (fileSize < threshold || fileSize <= 0)
+        if (fileSize <= 0)
             return 0;
 
         var full = Path.GetFullPath(path);
@@ -35,5 +35,4 @@ internal static class StoragePreallocationPolicy
 
         return allowed ? fileSize : 0;
     }
-
 }
