@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -43,52 +42,6 @@ internal static class DirectIoSourceReader
         var logical = checked((int)(device.LogicalSectorBytes ?? 0));
         var physical = checked((int)(device.PhysicalSectorBytes ?? 0));
         return Math.Max(logical, physical);
-    }
-
-    internal static bool TryOpen(
-        string path,
-        StorageDeviceInfo device,
-        int transferSize,
-        out Session? session) =>
-        TryOpenCore(path, device, transferSize, verification: false, out session);
-
-    internal static bool TryOpenForVerification(
-        string path,
-        StorageDeviceInfo device,
-        int transferSize,
-        out Session? session) =>
-        TryOpenCore(path, device, transferSize, verification: true, out session);
-
-    private static bool TryOpenCore(
-        string path,
-        StorageDeviceInfo device,
-        int transferSize,
-        bool verification,
-        out Session? session)
-    {
-        session = null;
-        var eligible = verification
-            ? IsVerificationEligible(device, transferSize)
-            : IsEligible(device, transferSize);
-        if (!eligible)
-            return false;
-
-        var handle = NativeMethods.CreateFileW(
-            path,
-            GenericRead,
-            FileShare.Read,
-            IntPtr.Zero,
-            OpenExisting,
-            FileFlagNoBuffering | FileFlagSequentialScan,
-            IntPtr.Zero);
-        if (handle.IsInvalid)
-        {
-            handle.Dispose();
-            return false;
-        }
-
-        session = new Session(handle, RequiredAlignment(device));
-        return true;
     }
 
     internal static bool TryOpenOverlapped(
@@ -145,41 +98,6 @@ internal static class DirectIoSourceReader
             87;    // ERROR_INVALID_PARAMETER
 
     private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
-
-    internal sealed class Session : IDisposable
-    {
-        private SafeFileHandle? _handle;
-
-        internal Session(SafeFileHandle handle, int alignment)
-        {
-            _handle = handle;
-            Alignment = alignment;
-        }
-
-        internal int Alignment { get; }
-
-        internal int Read(SourceBufferLease buffer, int bytesToRead)
-        {
-            ArgumentNullException.ThrowIfNull(buffer);
-            if (bytesToRead <= 0 || bytesToRead % Alignment != 0)
-                throw new ArgumentOutOfRangeException(nameof(bytesToRead));
-            if (!buffer.IsPinned || buffer.Pointer.ToInt64() % Alignment != 0)
-                throw new InvalidOperationException("El buffer de Direct I/O no está alineado al sector físico.");
-
-            var handle = _handle ?? throw new ObjectDisposedException(nameof(Session));
-            if (!NativeMethods.ReadFile(handle, buffer.Pointer, checked((uint)bytesToRead), out var read, IntPtr.Zero))
-            {
-                var code = Marshal.GetLastWin32Error();
-                throw new DirectIoReadException(code, new Win32Exception(code).Message);
-            }
-            return checked((int)read);
-        }
-
-        public void Dispose()
-        {
-            Interlocked.Exchange(ref _handle, null)?.Dispose();
-        }
-    }
 
     internal sealed class OverlappedSession : IDisposable
     {
@@ -241,15 +159,6 @@ internal static class DirectIoSourceReader
             uint creationDisposition,
             uint flagsAndAttributes,
             IntPtr templateFile);
-
-        [DllImport("kernel32.dll", EntryPoint = "ReadFile", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool ReadFile(
-            SafeFileHandle file,
-            IntPtr buffer,
-            uint bytesToRead,
-            out uint bytesRead,
-            IntPtr overlapped);
     }
 }
 
