@@ -29,25 +29,19 @@ public sealed class FastCrc32Tests
         Assert.AreNotEqual(FastCrc32.Compute(first), FastCrc32.Compute(second));
     }
 
-    [DataTestMethod]
-    [DataRow(1)]
-    [DataRow(7)]
-    [DataRow(8)]
-    [DataRow(9)]
-    [DataRow(15)]
-    [DataRow(16)]
-    [DataRow(17)]
-    [DataRow(31)]
-    [DataRow(32)]
-    [DataRow(33)]
-    [DataRow(4095)]
-    [DataRow(4096)]
-    [DataRow(4097)]
-    public void SlicingBoundariesMatchByteWiseReference(int length)
+    [TestMethod]
+    public void SlicingBoundariesMatchByteWiseReference()
     {
-        var data = new byte[length];
-        new Random(length * 7919).NextBytes(data);
-        Assert.AreEqual(ComputeReference(data), FastCrc32.Compute(data));
+        int[] lengths = [1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 4095, 4096, 4097];
+        foreach (var length in lengths)
+        {
+            var data = new byte[length];
+            new Random(length * 7919).NextBytes(data);
+            Assert.AreEqual(
+                ComputeReference(data),
+                FastCrc32.Compute(data),
+                $"CRC32 divergente en longitud de borde {length}.");
+        }
     }
 
     [TestMethod]
