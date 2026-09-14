@@ -2,81 +2,130 @@
 
 ## Objetivo
 
-Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos físicos independientes sin debilitar integridad, recovery, cancelación, memoria acotada ni seguridad de topología. El rendimiento solo se considera demostrado mediante A/B reproducible en hardware Windows físico.
+Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criterio rector es simple: una lectura física del origen debe alimentar a todos los destinos capaces sin dividir artificialmente el throughput del source entre N ramas. Si el source sostiene ~150 MB/s y varios destinos pueden sostener al menos esa tasa, cada destino debe intentar recibir ~150 MB/s. El rendimiento solo se considera demostrado mediante A/B reproducible en hardware físico.
+
+## Principios obligatorios
+
+- Una optimización no se cierra porque el código nuevo exista: debe sustituir la ruta productiva anterior, migrar consumidores, eliminar código/rutas huérfanas, añadir contrato de arquitectura y pasar Core + WinUI Release.
+- Ningún cap estático destinado solo a "ser prudente". La regulación de rendimiento debe basarse en hardware, throughput, latencia o presión real de recursos.
+- Las invariantes que evitan OOM, corrupción, uso incorrecto de topología o commit no durable se conservan, pero deben desaparecer prácticamente del fast path cuando el riesgo no existe.
+- Después de cada migración se elimina la infraestructura temporal. `main` debe conservar una sola línea productiva limpia.
 
 ## Arquitectura vigente en `main`
 
-- FAN-OUT único: una lectura física del origen alimenta a todos los destinos activos mediante un mismo `SharedBlock` con conteo de referencias.
-- Bloque grande: **32 MiB**.
-- El source pipeline no tiene caps fijos de 8 bloques de prefetch ni 4 bloques de hash. Los canales source/hash son no acotados estructuralmente, pero cada bloque queda gobernado por `PipelineGovernor` + `AdaptiveByteBudget`.
-- `PipelineGovernor` parte de una ventana pequeña y puede crecer multiplicativamente **4 → 8 → 16 → 32 → 64...** mientras memoria y telemetría lo permitan; reduce cuando aparece presión.
-- `AdaptiveByteBudget` no tiene máximo fijo de 4 GiB. Su capacidad segura se recalcula desde memoria física disponible, manteniendo reserva de seguridad y un piso de un bloque para garantizar progreso.
-- BLAKE3 del origen/SkipSame/recovery permanece separado de la verificación post-copia.
-- Lectura principal Direct I/O no está limitada a SSD: un HDD local con identidad física exacta y alineación conocida también puede usar `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED`.
-- Los buffers Direct I/O grandes del origen se sobre-alinean a **64 KiB** para que el mismo payload FAN-OUT pueda ser consumido directamente por destinos con sectores/alineaciones distintas dentro del rango soportado.
-- El lector Direct I/O reconoce EOF exacto aunque el tamaño lógico final no sea múltiplo del sector.
-- Verificación post-copia: CRC32 por bloque generado una sola vez durante FAN-OUT; read-back Direct I/O overlapped cuando es elegible y fallback buffered async cuando no lo es.
-- Verificación no tiene clamp QD2. Todos los destinos comparten un `VerificationReadBudget` por bytes derivado de memoria disponible y la lectura alimenta el mismo scheduler adaptativo físico.
-- `FastCrc32.Compute` usa slicing-by-8 como única implementación de producción.
-- Escritura: **Direct I/O selectivo por archivo** con `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED` cuando topología/alineación lo permiten; buffered es fallback documentado.
-- Direct Write reutiliza el mismo `SharedBlock` alineado para N destinos. No existe staging completo de 32 MiB por destino. Solo un tail final menor que un sector usa scratch alineado pequeño y después se fija EOF exacto.
-- Direct Write tiene fallback sticky por archivo: tras una incompatibilidad admitida no oscila de vuelta a Direct I/O durante reintentos.
-- Escritura Direct o buffered usa `DestinationWriteCoordinator`; cada subescritura adquiere un único lease físico justo antes del I/O.
-- `DeviceScheduler` ya no usa `SemaphoreSlim` con máximo fijo. Mantiene una **ventana QD mutable por dispositivo físico** con waiters propios.
-- USB SSD exacto **QD4**, SATA SSD **QD8** y NVMe **QD16** son únicamente **puntos iniciales**. Bajo demanda sostenida el scheduler explora multiplicativamente **8 → 16 → 32 → 64 → 128...** sin un máximo por clase de hardware.
-- La decisión adaptativa mide throughput agregado y latencia: conserva/expande profundidades competitivas y vuelve al mejor QD observado ante regresión clara.
-- Telemetría por dispositivo expone QD inicial/actual/exploración/mínimo/máximo/mejor, upshifts/downshifts, última razón de decisión, mejor throughput y mejor latencia observada.
-- `StorageWritePolicy` ya no recorta por `StorageIoProfile`; para dispositivos locales con identidad física exacta la profundidad práctica queda limitada por payload/alineación y por la ventana adaptativa, no por QD4/8/16.
-- La granularidad buffered de scheduling es **4 KiB**; Direct I/O eleva automáticamente el slice mínimo a la alineación requerida. Por tanto, el viejo límite indirecto QD32 causado por slices de 1 MiB desapareció.
-- Compartir dispositivo físico entre origen/destino arranca en QD1 para no provocar thrash inmediato, pero **QD1 no es un cap permanente**: la ventana puede explorar QD2+ si la medición lo justifica.
-- El backlog por rama es **contabilidad/telemetría de presión**, no una barrera de admisión. `ReserveBacklog` es síncrono, `BacklogPressure` puede superar 1 y el límite duro del payload sigue siendo RAM global + QD físico adaptativo.
-- `DataMessage` usa un fast path dedicado: una sola comprobación de pausa/cancelación por bloque y enqueue directo por destino. No pasa por `DeliverControlAsync`, no usa two-pass/deferred y no existe `DeliverOneAsync`.
-- `DataMessage` no consume `GlobalControlBacklogBudget`; `BeginMessage` y `EndMessage` sí usan el control budget para proteger árboles con millones de archivos pequeños.
-- El commit de un archivo durable usa una única primitiva `AtomicFileCommit`: si el destino no existe, `File.Move`; si existe, `File.Replace` con backup/restauración defensiva. La vieja secuencia manual destino→backup→destino fue eliminada.
-- `RecoveryCheckpointWriter` ya agrupa manifest/journal hasta 128 archivos o ~1 s; recovery no hace fsync individual por archivo.
-- Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
+- FAN-OUT único: un bloque leído del origen se comparte mediante `SharedBlock` entre todos los destinos activos.
+- Source pipeline con canales estructuralmente no acotados, pero payload gobernado por `PipelineGovernor` + `AdaptiveByteBudget`.
+- `AdaptiveByteBudget` obtiene capacidad desde `GC.GetGCMemoryInfo()` y `MemoryPressureCapacity`; no usa el antiguo máximo fijo de 4 GiB ni un porcentaje fijo de RAM instalada.
+- `PipelineGovernor` puede ampliar/reducir multiplicativamente la ventana de prefetch según starvation, presión de entrega y presión de memoria.
+- Lectura del origen Direct I/O overlapped cuando el volumen local tiene probe/alineación válidos; HDD no está excluido por clase de medio.
+- El payload FAN-OUT se renta alineado para que destinos Direct I/O puedan reutilizar el mismo bloque sin staging completo por rama.
+- Escritura Direct I/O con `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED` cuando es elegible; buffered permanece como fallback de compatibilidad.
+- `DestinationWriteCoordinator` divide cada payload en operaciones de offset explícito y cada sub-I/O adquiere un lease del `DeviceScheduler` físico.
+- **Multi-block in-flight por destino**: el writer ya no espera a completar un `DataMessage` antes de programar el siguiente. Cada bloque reserva un offset monotónico (`ScheduledBytes`) y se mantiene como tarea pendiente independiente.
+- `EndMessage` es barrera de archivo: no se hace flush/finalización/commit hasta drenar todas las escrituras pendientes.
+- `Copied` representa únicamente bytes realmente completados y solo avanza mediante `RecordCompletedWrite`; `FinishFile` exige simultáneamente `ScheduledBytes == Entry.Size` y `Copied == Entry.Size`.
+- Direct I/O fallback durante multi-block no cierra un handle mientras haya operaciones direct pendientes: se solicita fallback, se drena la generación activa, se cambia una sola vez a buffered y se reintentan los bloques afectados por offset explícito.
+- La cantidad de bloques pendientes no usa `MaxBlocksInFlight` fijo: queda limitada por la memoria FAN-OUT adaptativa y el scheduler físico.
+- `DeviceScheduler` usa QD mutable por dispositivo, waiters propios y exploración multiplicativa sin máximo por clase de hardware.
+- USB/SATA/NVMe conservan únicamente profundidades iniciales; no son techos permanentes.
+- Source y destino con el mismo `PhysicalDeviceNumber` comparten scheduler. Si comparten disco, el arranque QD1 es solo punto inicial, no cap permanente.
+- Si `IOCTL_STORAGE_GET_DEVICE_NUMBER` falla, `StorageTopology` intenta `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`; un extent único recupera la identidad física real sin degradar QD ni apagar Direct I/O.
+- Volúmenes multi-disk no se fingen como una sola identidad física.
+- `DataMessage` mantiene un fast path de enqueue por rama; `ReserveBacklog` es contabilidad/telemetría, no admission gate.
+- El control plane (`BeginMessage`/`EndMessage`) usa `AdaptiveControlByteBudget`, derivado de presión real de memoria. El antiguo `GlobalControlBacklogBudget` y su cap fijo permanecen eliminados.
+- `WriteThrough` fue eliminado del hot path. La durabilidad se conserva mediante flush explícito antes de `AtomicFileCommit`.
+- `AtomicFileCommit` es la única primitiva de reemplazo productiva.
+- Verificación post-copia usa CRC32 por bloque y lectura Direct/buffered async con `VerificationReadBudget` dinámico.
+- `FastCrc32.Compute` usa slicing-by-8 IEEE CRC32 como única implementación productiva actual.
+- Estado interno permanece fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
 ## Cerrado e integrado
 
-- Topología física e identidad con política prudente cuando no puede demostrarse el disco real.
-- Buffers de origen alineados y Direct I/O overlapped para SSD y HDD locales elegibles.
-- Fix Direct I/O EOF para tails lógicos no alineados.
-- H-04 cerrado mediante eliminación de reservas por pares: cada operación física adquiere/libera un único lease y la profundidad N surge de operaciones independientes concurrentes.
-- Writer variable-depth integrado en producción.
-- **P1 Direct I/O de escritura cerrado**: ruta real de `CopyEngine`, una estrategia activa por archivo, mismo `SharedBlock` para N destinos, tail-only staging, EOF exacto, fallback cerrado/sticky, telemetría y gate end-to-end. Cierre: Windows .NET CI **#173 / 34846562738** verde.
-- **P1 Verify QD2 cerrado**: eliminado el clamp QD2; budget global de lectura por bytes, drenaje seguro de I/O pendiente y telemetría. Cierre: Windows .NET CI **#181 / 34848005638** verde.
-- **P1 source pipeline fixed ceilings cerrado**: eliminados prefetch=8, hash=4 y máximo FAN-OUT=4 GiB; crecimiento multiplicativo gobernado por memoria/telemetría. Gates prueban >8 bloques y >4 GiB contables. Cierre: Windows .NET CI **#185 / 34850301010** verde.
-- **P1 payload/control backlog desacoplado**: `DataMessage` no consume el budget fijo de control; `Begin/End` sí. Gate de arquitectura bloquea el regreso de `countsData` y de la herencia incorrecta. Cierre: Windows .NET CI **#186 / 34851256674** verde.
-- **P1 QD físico adaptativo cerrado**: eliminados `SemaphoreSlim` fijo, `MaxOutstandingIo` y `RecommendedQueueDepth`; QD4/8/16 son solo arranque, Copy + Verify usan la ventana adaptativa, el gate demuestra crecimiento NVMe **QD16 → QD32** y la telemetría registra decisiones/óptimo observado. Cierre final: Windows .NET CI **#197 / 34856374422** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
-- **P1 FAN-OUT delivery hot path cerrado**: eliminados `TryReserveBacklog`, `ReserveBacklogAsync`, `QueueWaitTime`, `_queueWaitTicks`, `RecordQueueWait`, two-pass `deferred`, `backlogReserved` y `DeliverOneAsync`. `DataMessage` usa ruta propia de una pasada y control usa `DeliverControlAsync`. Cierre: Windows .NET CI **#198 / 34858264132** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
-- **P1 commit atómico cerrado**: `CopyEngine.CommitPart` y el dance manual de dos `File.Move` fueron eliminados; `AtomicFileCommit.Commit` usa `File.Replace` para destinos existentes, conserva recuperación defensiva y tiene tests para destino nuevo/existente. Cierre: Windows .NET CI **#201 / 34859244750** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
-- H-10: lectura Direct I/O del origen con `OVERLAPPED`/async real.
-- H-11/H-12/H-13: rutas antiguas de verificación y APIs obsoletas eliminadas.
-- P0 backlog por dispositivo convertido en soft watermark/telemetría sin gate de productor.
-- P1 CRC32 slicing-by-8 dentro de la única API `FastCrc32.Compute`.
+- Direct I/O source overlapped, incluidos HDD locales elegibles y EOF lógico no alineado.
+- Direct I/O destination con mismo `SharedBlock`, tail-only scratch, EOF exacto y fallback de compatibilidad.
+- QD2 fijo eliminado de copy y verify.
+- Caps fijos de source prefetch/hash y máximo FAN-OUT de 4 GiB eliminados.
+- Backlog duro por dispositivo eliminado; queda contabilidad de presión.
+- QD físico adaptativo integrado; QD4/8/16 son solo puntos de arranque.
+- FAN-OUT delivery hot path separado del control plane.
+- Commit atómico unificado.
+- Memoria FAN-OUT y verification budget adaptados a presión real de memoria.
+- Thresholds fijos de Direct destination, source prefetch, direct verify y preallocation eliminados.
+- `WriteThrough` y su telemetría/política antigua eliminados.
+- Identidad física ampliada mediante `VOLUME_DISK_EXTENTS` cuando el probe primario falla.
+- Control-plane fijo eliminado y reemplazado por `AdaptiveControlByteBudget`.
+- **Multi-block in-flight integrado**: eliminada la ruta secuencial `WriteWithRetryAsync`; los bloques se programan por offset explícito, el commit espera al drenaje total y el fallback Direct se resuelve solo después de drenar I/O pendiente.
+- Infraestructura temporal de migraciones eliminada de `main`; solo queda el workflow permanente `windows-dotnet.yml`.
 
 ## Prioridad actual
 
-### P1 — coordinación profunda cuando origen y destino comparten dispositivo físico
+### P1 — ramp-up de QD más rápido y basado en evidencia
 
-El hard cap QD1 ya fue eliminado: ahora solo es el punto de partida. Falta coordinar explícitamente lectura/escritura cuando comparten el mismo medio, especialmente HDD, para evitar seek thrash y permitir que SSD/NVMe compartidos exploten concurrencia cuando el throughput físico mejore.
+`DeviceScheduler.RecordCompletionLocked` todavía espera una cantidad de completions dependiente del QD antes de reevaluar. No existe hard max, pero una copia corta puede terminar antes de explorar suficiente profundidad. Auditar tiempo-hasta-QD-óptimo y sustituir cualquier lentitud innecesaria por exploración basada en demanda, throughput, latencia y tiempo observado; no por otro número fijo arbitrario.
 
-### P1 — medir y reducir barreras de durabilidad restantes
+### P1 — slow-branch decoupling
 
-`RecoveryCheckpointWriter` ya está batcheado y el reemplazo de namespace ya usa `File.Replace`. La barrera restante relevante es hacer durable el contenido antes del commit (`FlushToDisk` o `WriteThrough`). No eliminar esa garantía por intuición.
+Una rama permanentemente más lenta conserva referencias a `SharedBlock` durante más tiempo. Mientras exista headroom de RAM esto no afecta a las ramas rápidas; bajo presión sostenida puede terminar frenando al productor. Diseñar desacoplamiento por rama que preserve una sola lectura física del source: ventana dinámica por destino, batching/deferred write y, si el benchmark lo justifica, spill/replay para la rama atrasada. No resolverlo limitando todas las ramas a la velocidad del destino lento.
 
-`WriteThroughFileThreshold = 4 MiB` intenta evitar un `FlushFileBuffers` separado cuando el archivo cabe en un writer chunk. Mantenerlo hasta benchmark físico específico de datasets con muchos archivos pequeños; si se cambia, debe ser por una política medida/adaptativa, no por otro umbral arbitrario.
+### P1 — BlockSize / ventana de lectura adaptativos
 
-### P1 — benchmark físico y tuning contra ExtremeCopy
+`BlockSize` continúa fijo en 32 MiB y `ReadBufferSizeFor` usa bandas 64 KiB / 1 MiB / 4 MiB / 32 MiB. Son heurísticas pendientes de demostrar. La siguiente evolución debe explorar tamaño de bloque/ventana según throughput, latencia, QD, número de destinos y presión de memoria. No sustituir 32 MiB por otro número fijo.
 
-Ejecutar A/B reproducible con el mismo origen, destinos, dataset y opciones. Usar la telemetría adaptativa para observar QD elegido, throughput y latencia por dispositivo y ajustar la política donde hardware real muestre oportunidades adicionales.
+### P1 — eliminar QD1 incondicional de network
+
+`StorageWritePolicy` todavía fuerza network a QD1. Direct I/O remoto puede seguir deshabilitado por compatibilidad, pero el buffered explicit-offset path no debe asumir que NAS/SMB solo soporta una operación concurrente. Convertirlo en exploración adaptativa.
+
+### P2 — alineación máxima Direct I/O
+
+El soporte de payload alineado mantiene `MaximumSupportedAlignment = 64 KiB`. Auditar si puede derivarse completamente del dispositivo sin máximo de implementación fijo.
+
+### P2 — CPU por byte
+
+CRC32 ya es slicing-by-8. Solo sustituirlo si profiling demuestra cuello de CPU. No usar SSE4.2 CRC32 directamente para IEEE CRC32 porque esa instrucción calcula CRC32C; cualquier aceleración debe conservar exactamente el polinomio IEEE y superar la implementación actual en benchmark.
 
 ## Benchmark físico contra ExtremeCopy
 
-Usar mismo origen, destinos, dataset y opciones. Registrar tiempo de copia/verificación/total, MB/s origen y cada destino, throughput lógico agregado, CPU/RAM, fases de telemetría, backlog/QD inicial/actual/máximo/mejor, razones de adaptación y fallbacks Direct I/O.
+Usar el mismo origen, destinos, dataset y opciones. Registrar:
 
-La meta mínima es paridad reproducible. **Superar ExtremeCopy requiere evidencia física A/B**; CI y una arquitectura potencialmente superior no constituyen por sí solos una prueba de rendimiento.
+- throughput físico del source;
+- throughput por destino;
+- throughput agregado lógico;
+- QD inicial/actual/máximo/mejor y tiempo hasta el QD útil;
+- source idle / destination idle;
+- CPU y RAM;
+- fan-out wait, buffer wait y hash time;
+- Direct I/O fallbacks;
+- efecto de una rama lenta sobre las rápidas.
+
+Escenario mínimo objetivo:
+
+```text
+SOURCE HDD:      ~150 MB/s
+DEST A capaz:    ~150 MB/s
+DEST B capaz:    ~150 MB/s
+DEST C capaz:    ~150 MB/s
+DEST D capaz:    ~150 MB/s
+Aggregate write: ~600 MB/s
+Physical source: ~150 MB/s
+```
+
+La meta mínima es paridad reproducible. Superar ExtremeCopy requiere evidencia física A/B; CI y arquitectura superior no son por sí solos prueba de rendimiento.
 
 ## Regla permanente de unificación
 
-Una optimización se cierra solo cuando el consumidor real usa la nueva ruta, las rutas equivalentes antiguas fueron migradas/eliminadas, no queda código huérfano, existe gate de arquitectura y suite completa + WinUI Release pasan. Cualquier regresión devuelve el ítem a PARCIAL.
+Una optimización se cierra únicamente cuando:
+
+```text
+[ ] La ruta productiva nueva reemplaza realmente a la anterior
+[ ] Grep completo de símbolos/rutas antiguas en dotnet/
+[ ] Consumidores reales del símbolo nuevo verificados
+[ ] Código/telemetría/parámetros huérfanos eliminados
+[ ] Infraestructura temporal de migración eliminada
+[ ] Test de contrato de arquitectura añadido
+[ ] Suite Core Release verde
+[ ] WinUI Release x64 verde
+[ ] Source gate + publish + artifact verdes
+[ ] El SHA final de main contiene código + tests + documentación limpia
+```
+
+Si alguno falla, el ítem permanece PARCIAL.
