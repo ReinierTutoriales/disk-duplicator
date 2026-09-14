@@ -264,6 +264,10 @@ public sealed class UnificationContractTests
         CollectionAssert.Contains(properties, "Copied");
         CollectionAssert.Contains(properties, "DirectFallbackRequested");
 
+        var copied = currentFile.GetProperty("Copied", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNotNull(copied);
+        Assert.IsFalse(copied.CanWrite, "Completed bytes must only move through RecordCompletedWrite.");
+
         var reserve = currentFile.GetMethod("ReserveWriteOffset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.IsNotNull(reserve);
         var record = currentFile.GetMethod("RecordCompletedWrite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
