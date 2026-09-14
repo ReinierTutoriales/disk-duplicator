@@ -45,22 +45,36 @@ report = replace_exact(
     "remove permanently-zero VerifyCpuWait diagnostic")
 report_path.write_text(report, encoding="utf-8", newline="\n")
 
-# Update the one explicit diagnostic snapshot construction and assert the stale
-# metric cannot silently reappear in the public diagnostics report.
-test_path = Path("dotnet/RepartoCopier.Core.Tests/DiagnosticsReportTests.cs")
-test = test_path.read_text(encoding="utf-8")
-test = replace_exact(
-    test,
+report_test_path = Path("dotnet/RepartoCopier.Core.Tests/DiagnosticsReportTests.cs")
+report_test = report_test_path.read_text(encoding="utf-8")
+report_test = replace_exact(
+    report_test,
     "            4_000_000, TimeSpan.FromMilliseconds(500),\n            TimeSpan.FromMilliseconds(80), 12,\n",
     "            4_000_000, TimeSpan.FromMilliseconds(500),\n            12,\n",
     1,
     "update diagnostic snapshot shape")
-test = replace_exact(
-    test,
+report_test = replace_exact(
+    report_test,
     "        StringAssert.Contains(report, \"VerifyHashRate: 8000000 B/s\");\n",
     "        StringAssert.Contains(report, \"VerifyHashRate: 8000000 B/s\");\n        Assert.IsFalse(report.Contains(\"VerifyCpuWait\", StringComparison.Ordinal));\n",
     1,
     "gate dead VerifyCpuWait removal")
-test_path.write_text(test, encoding="utf-8", newline="\n")
+report_test_path.write_text(report_test, encoding="utf-8", newline="\n")
+
+fanout_test_path = Path("dotnet/RepartoCopier.Core.Tests/FanoutBackpressureTests.cs")
+fanout_test = fanout_test_path.read_text(encoding="utf-8")
+fanout_test = replace_exact(
+    fanout_test,
+    "    public async Task VerificationTelemetrySeparatesGovernorWaitFromHashCompute()\n",
+    "    public async Task VerificationTelemetryReportsReadAndHashWork()\n",
+    1,
+    "rename stale verification telemetry test")
+fanout_test = replace_exact(
+    fanout_test,
+    "        Assert.IsTrue(metrics.VerifyHashTime > TimeSpan.Zero);\n        Assert.IsTrue(metrics.VerifyCpuWaitTime >= TimeSpan.Zero);\n        Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);\n",
+    "        Assert.IsTrue(metrics.VerifyHashTime > TimeSpan.Zero);\n        Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);\n",
+    1,
+    "remove dead VerifyCpuWait assertion")
+fanout_test_path.write_text(fanout_test, encoding="utf-8", newline="\n")
 
 print("H-13 dead verify CPU-wait telemetry removed")
