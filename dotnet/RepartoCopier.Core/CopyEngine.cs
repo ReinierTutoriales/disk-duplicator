@@ -98,6 +98,8 @@ public static class CopyEngine
     private const int SmallBufferSize = 64 * 1024;
     private const int MediumBufferSize = 1024 * 1024;
     private const int LargeBufferSize = 4 * 1024 * 1024;
+    private const int VerificationReadBufferSize = 8 * 1024 * 1024;
+    private const int VerificationDirectIoThreshold = 4 * 1024 * 1024;
     private const int PreallocationThreshold = 4 * 1024 * 1024;
     // Files at or below one writer chunk use Windows write-through instead of
     // paying for a separate FlushFileBuffers call after the write.
@@ -1302,7 +1304,9 @@ public static class CopyEngine
                     resources,
                     job.Telemetry,
                     verification: true,
-                    verificationProgress: progress[slot]).ConfigureAwait(false);
+                    verificationProgress: progress[slot],
+                    directDevice: copy.DestinationDevices[slot],
+                    directScheduler: workers[slot].DeviceScheduler).ConfigureAwait(false);
                 if (!actual.AsSpan().SequenceEqual(expected))
                 {
                     workers[slot].Fail($"BLAKE3 no coincide: {destination}");
@@ -1369,34 +1373,89 @@ public static class CopyEngine
         ResourceGovernor? resources = null,
         CopyTelemetry? telemetry = null,
         bool verification = false,
-        DestinationProgress? verificationProgress = null)
+        DestinationProgress? verificationProgress = null,
+        StorageDeviceInfo? directDevice = null,
+        DeviceScheduler? directScheduler = null)
     {
         using var hasher = Hasher.New();
-        var buffer = ArrayPool<byte>.Shared.Rent(4 * 1024 * 1024);
+        var bufferSize = verification ? VerificationReadBufferSize : 4 * 1024 * 1024;
+        var fileLength = verification ? new FileInfo(path).Length : 0L;
+        SourceBufferLease? buffer = null;
+        DirectIoSourceReader.Session? direct = null;
+        FileStream? buffered = null;
+        long totalRead = 0;
+
         try
         {
-            await using var stream = new FileStream(path, new FileStreamOptions
+            var directOpened = verification &&
+                fileLength >= VerificationDirectIoThreshold &&
+                directDevice is not null &&
+                DirectIoSourceReader.TryOpenForVerification(path, directDevice, bufferSize, out direct);
+
+            if (directOpened)
             {
-                Mode = FileMode.Open,
-                Access = FileAccess.Read,
-                Share = FileShare.Read,
-                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                BufferSize = 1,
-            });
+                buffer = SourceBufferLease.RentAligned(bufferSize, direct!.Alignment);
+            }
+            else
+            {
+                buffer = SourceBufferLease.RentBuffered(bufferSize);
+                buffered = OpenSourceStream(path);
+            }
+
             while (true)
             {
                 var readStarted = Stopwatch.GetTimestamp();
-                var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token).ConfigureAwait(false);
+                int read;
+                try
+                {
+                    if (directScheduler is null)
+                    {
+                        read = direct is not null
+                            ? direct.Read(buffer, bufferSize)
+                            : await buffered!.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        using var ioLease = await directScheduler.AcquireIoAsync(token).ConfigureAwait(false);
+                        read = direct is not null
+                            ? direct.Read(buffer, bufferSize)
+                            : await buffered!.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception ex) when (direct is not null && DirectIoSourceReader.IsFallbackable(ex))
+                {
+                    direct.Dispose();
+                    direct = null;
+                    buffer.Dispose();
+                    buffer = SourceBufferLease.RentBuffered(bufferSize);
+                    buffered = OpenSourceStream(path);
+                    buffered.Position = totalRead;
+
+                    if (directScheduler is null)
+                    {
+                        read = await buffered.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        using var ioLease = await directScheduler.AcquireIoAsync(token).ConfigureAwait(false);
+                        read = await buffered.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
+                    }
+                }
+
                 var readElapsed = Stopwatch.GetElapsedTime(readStarted);
                 if (verification)
                     telemetry?.RecordVerifyRead(read, readElapsed);
-                if (read == 0) break;
+                if (read == 0)
+                    break;
+
+                totalRead += read;
                 if (verification)
                     verificationProgress?.AddVerified(read);
+
                 if (resources is null)
                 {
                     var hashStarted = Stopwatch.GetTimestamp();
-                    hasher.UpdateWithJoin(buffer.AsSpan(0, read));
+                    hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
                     if (verification)
                         telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 }
@@ -1407,7 +1466,7 @@ public static class CopyEngine
                     if (verification)
                         telemetry?.RecordVerifyCpuWait(Stopwatch.GetElapsedTime(cpuWaitStarted));
                     var hashStarted = Stopwatch.GetTimestamp();
-                    hasher.UpdateWithJoin(buffer.AsSpan(0, read));
+                    hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
                     if (verification)
                         telemetry?.RecordVerifyHash(read, Stopwatch.GetElapsedTime(hashStarted));
                 }
@@ -1416,7 +1475,10 @@ public static class CopyEngine
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            direct?.Dispose();
+            if (buffered is not null)
+                await buffered.DisposeAsync().ConfigureAwait(false);
+            buffer?.Dispose();
         }
     }
 

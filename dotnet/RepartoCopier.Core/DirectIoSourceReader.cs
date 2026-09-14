@@ -12,14 +12,20 @@ internal static class DirectIoSourceReader
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
 
-    internal static bool IsEligible(StorageDeviceInfo device, int transferSize)
+    internal static bool IsEligible(StorageDeviceInfo device, int transferSize) =>
+        IsEligibleCore(device, transferSize, solidStateOnly: true);
+
+    internal static bool IsVerificationEligible(StorageDeviceInfo device, int transferSize) =>
+        IsEligibleCore(device, transferSize, solidStateOnly: false);
+
+    private static bool IsEligibleCore(StorageDeviceInfo device, int transferSize, bool solidStateOnly)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (!OperatingSystem.IsWindows() || transferSize <= 0 || device.IsNetwork || !device.ProbeSucceeded)
             return false;
         if (StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact)
             return false;
-        if (device.MediaKind != StorageMediaKind.SolidState)
+        if (solidStateOnly && device.MediaKind != StorageMediaKind.SolidState)
             return false;
         if (!device.HasKnownSectorAlignment)
             return false;
@@ -42,10 +48,28 @@ internal static class DirectIoSourceReader
         string path,
         StorageDeviceInfo device,
         int transferSize,
+        out Session? session) =>
+        TryOpenCore(path, device, transferSize, verification: false, out session);
+
+    internal static bool TryOpenForVerification(
+        string path,
+        StorageDeviceInfo device,
+        int transferSize,
+        out Session? session) =>
+        TryOpenCore(path, device, transferSize, verification: true, out session);
+
+    private static bool TryOpenCore(
+        string path,
+        StorageDeviceInfo device,
+        int transferSize,
+        bool verification,
         out Session? session)
     {
         session = null;
-        if (!IsEligible(device, transferSize))
+        var eligible = verification
+            ? IsVerificationEligible(device, transferSize)
+            : IsEligible(device, transferSize);
+        if (!eligible)
             return false;
 
         var handle = NativeMethods.CreateFileW(

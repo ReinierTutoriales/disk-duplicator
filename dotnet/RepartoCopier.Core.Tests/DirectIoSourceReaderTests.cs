@@ -47,6 +47,26 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
+    public void VerificationEligibilityAllowsExactLocalHddButRejectsUnsafeTopology()
+    {
+        var hdd = Device("SATA", StorageMediaKind.Rotational, 512, 4096);
+        var network = Device("Network", StorageMediaKind.Rotational, 512, 4096) with
+        {
+            IsNetwork = true,
+            PhysicalDeviceNumber = null,
+        };
+        var unknownIdentity = Device("USB", StorageMediaKind.Rotational, 512, 4096) with
+        {
+            PhysicalDeviceNumber = null,
+        };
+
+        Assert.IsTrue(DirectIoSourceReader.IsVerificationEligible(hdd, 8 * 1024 * 1024));
+        Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(network, 8 * 1024 * 1024));
+        Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(unknownIdentity, 8 * 1024 * 1024));
+        Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(hdd, 8 * 1024 * 1024 - 1));
+    }
+
+    [TestMethod]
     public void BufferedLeaseKeepsExistingArrayPoolContract()
     {
         using var lease = SourceBufferLease.RentBuffered(1024 * 1024);
