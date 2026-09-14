@@ -291,7 +291,16 @@ public static class CopyEngine
             Exception? producerError = null;
             try
             {
-                await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job, pipeline, bufferBudget).ConfigureAwait(false);
+                await ProducerLoopAsync(
+                    copy,
+                    workers,
+                    progress,
+                    skipMasks,
+                    expectedHashes,
+                    job,
+                    pipeline,
+                    bufferBudget,
+                    deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -369,7 +378,8 @@ public static class CopyEngine
         Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
         PipelineGovernor pipeline,
-        AdaptiveByteBudget bufferBudget)
+        AdaptiveByteBudget bufferBudget,
+        DeviceScheduler? sharedSourceScheduler)
     {
         var token = job.Token;
         try
@@ -396,8 +406,21 @@ public static class CopyEngine
                 await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
 
                 var sourceResult = entry.Size >= SourcePrefetchThreshold
-                    ? await ReadAndFanOutPrefetchedAsync(entry, copy.SourceDevice, active, bufferBudget, job, pipeline).ConfigureAwait(false)
-                    : await ReadAndFanOutSequentialAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false);
+                    ? await ReadAndFanOutPrefetchedAsync(
+                        entry,
+                        copy.SourceDevice,
+                        active,
+                        bufferBudget,
+                        job,
+                        pipeline,
+                        sharedSourceScheduler).ConfigureAwait(false)
+                    : await ReadAndFanOutSequentialAsync(
+                        entry,
+                        active,
+                        bufferBudget,
+                        job,
+                        pipeline,
+                        sharedSourceScheduler).ConfigureAwait(false);
                 if (sourceResult is null)
                     continue;
 
@@ -428,7 +451,8 @@ public static class CopyEngine
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
-        PipelineGovernor pipeline)
+        PipelineGovernor pipeline,
+        DeviceScheduler? sharedSourceScheduler)
     {
         using var hasher = Hasher.New();
         await using var source = OpenSourceStream(entry.SourcePath);
@@ -450,7 +474,17 @@ public static class CopyEngine
             try
             {
                 var readStarted = Stopwatch.GetTimestamp();
-                read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
+                DeviceScheduler.IoLease? sourceIo = null;
+                try
+                {
+                    if (sharedSourceScheduler is not null)
+                        sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, job.Token).ConfigureAwait(false);
+                    read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    sourceIo?.Dispose();
+                }
                 var readElapsed = Stopwatch.GetElapsedTime(readStarted);
                 pipeline.RecordSourceRead(readElapsed);
                 job.Telemetry.RecordSourceRead(read, readElapsed);
@@ -502,7 +536,8 @@ public static class CopyEngine
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
-        PipelineGovernor pipeline)
+        PipelineGovernor pipeline,
+        DeviceScheduler? sharedSourceScheduler)
     {
         using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
         var sourceQueue = Channel.CreateUnbounded<SourceReadBlock>(new UnboundedChannelOptions
@@ -519,6 +554,7 @@ public static class CopyEngine
             bufferBudget,
             job,
             pipeline,
+            sharedSourceScheduler,
             prefetchCancel.Token);
 
         Exception? deliveryError = null;
@@ -600,6 +636,7 @@ public static class CopyEngine
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
+        DeviceScheduler? sharedSourceScheduler,
         CancellationToken token)
     {
         Exception? completionError = null;
@@ -618,6 +655,7 @@ public static class CopyEngine
             bufferBudget,
             job,
             pipeline,
+            sharedSourceScheduler,
             stageCancel.Token);
 
         try
@@ -675,6 +713,7 @@ public static class CopyEngine
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
+        DeviceScheduler? sharedSourceScheduler,
         CancellationToken token)
     {
         Exception? completionError = null;
@@ -710,29 +749,40 @@ public static class CopyEngine
 
                     var readStarted = Stopwatch.GetTimestamp();
                     int read;
-                    if (direct is not null)
+                    DeviceScheduler.IoLease? sourceIo = null;
+                    try
                     {
-                        try
+                        if (sharedSourceScheduler is not null)
+                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, token).ConfigureAwait(false);
+
+                        if (direct is not null)
                         {
-                            read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);
-                            job.Telemetry.RecordDirectSourceRead(read);
+                            try
+                            {
+                                read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);
+                                job.Telemetry.RecordDirectSourceRead(read);
+                            }
+                            catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                            {
+                                lease.Dispose();
+                                lease = null;
+                                direct.Dispose();
+                                direct = null;
+                                job.Telemetry.RecordDirectSourceFallback();
+                                buffered = OpenSourceStream(entry.SourcePath);
+                                buffered.Position = totalRead;
+                                lease = SourceBufferLease.RentBuffered(readBufferSize);
+                                read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                            }
                         }
-                        catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                        else
                         {
-                            lease.Dispose();
-                            lease = null;
-                            direct.Dispose();
-                            direct = null;
-                            job.Telemetry.RecordDirectSourceFallback();
-                            buffered = OpenSourceStream(entry.SourcePath);
-                            buffered.Position = totalRead;
-                            lease = SourceBufferLease.RentBuffered(readBufferSize);
-                            read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                            read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);
                         }
                     }
-                    else
+                    finally
                     {
-                        read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                        sourceIo?.Dispose();
                     }
 
                     var readElapsed = Stopwatch.GetElapsedTime(readStarted);
