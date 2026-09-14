@@ -1405,7 +1405,7 @@ public static class CopyEngine
         CopyJob job)
     {
         if (current.Failed) return;
-        if (current.Copied != current.Entry.Size)
+        if (current.ScheduledBytes != current.Entry.Size || current.Copied != current.Entry.Size)
         {
             current.Failed = true;
             current.Stream?.Dispose();
