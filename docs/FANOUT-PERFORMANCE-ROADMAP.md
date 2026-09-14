@@ -29,8 +29,9 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - `StorageWritePolicy` ya no recorta por `StorageIoProfile`; para dispositivos locales con identidad física exacta la profundidad práctica queda limitada por payload/alineación y por la ventana adaptativa, no por QD4/8/16.
 - La granularidad buffered de scheduling es **4 KiB**; Direct I/O eleva automáticamente el slice mínimo a la alineación requerida. Por tanto, el viejo límite indirecto QD32 causado por slices de 1 MiB desapareció.
 - Compartir dispositivo físico entre origen/destino arranca en QD1 para no provocar thrash inmediato, pero **QD1 no es un cap permanente**: la ventana puede explorar QD2+ si la medición lo justifica.
-- El backlog por rama es un **soft watermark** y no bloquea al productor mientras exista memoria FAN-OUT global disponible.
-- `DataMessage` no consume `GlobalControlBacklogBudget`; el payload está gobernado por bytes + backlog/QD físico. `BeginMessage` y `EndMessage` sí usan el control budget para proteger árboles con millones de archivos pequeños.
+- El backlog por rama es **contabilidad/telemetría de presión**, no una barrera de admisión. `ReserveBacklog` es síncrono, `BacklogPressure` puede superar 1 y el límite duro del payload sigue siendo RAM global + QD físico adaptativo.
+- `DataMessage` usa un fast path dedicado: una sola comprobación de pausa/cancelación por bloque y enqueue directo por destino. No pasa por `DeliverControlAsync`, no usa two-pass/deferred y no existe `DeliverOneAsync`.
+- `DataMessage` no consume `GlobalControlBacklogBudget`; `BeginMessage` y `EndMessage` sí usan el control budget para proteger árboles con millones de archivos pequeños.
 - Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
 ## Cerrado e integrado
@@ -45,24 +46,23 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - **P1 source pipeline fixed ceilings cerrado**: eliminados prefetch=8, hash=4 y máximo FAN-OUT=4 GiB; crecimiento multiplicativo gobernado por memoria/telemetría. Gates prueban >8 bloques y >4 GiB contables. Cierre: Windows .NET CI **#185 / 34850301010** verde.
 - **P1 payload/control backlog desacoplado**: `DataMessage` no consume el budget fijo de control; `Begin/End` sí. Gate de arquitectura bloquea el regreso de `countsData` y de la herencia incorrecta. Cierre: Windows .NET CI **#186 / 34851256674** verde.
 - **P1 QD físico adaptativo cerrado**: eliminados `SemaphoreSlim` fijo, `MaxOutstandingIo` y `RecommendedQueueDepth`; QD4/8/16 son solo arranque, Copy + Verify usan la ventana adaptativa, el gate demuestra crecimiento NVMe **QD16 → QD32** y la telemetría registra decisiones/óptimo observado. Cierre final: Windows .NET CI **#197 / 34856374422** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
+- **P1 FAN-OUT delivery hot path cerrado**: eliminados `TryReserveBacklog`, `ReserveBacklogAsync`, `QueueWaitTime`, `_queueWaitTicks`, `RecordQueueWait`, two-pass `deferred`, `backlogReserved` y `DeliverOneAsync`. `DataMessage` usa ruta propia de una pasada y control usa `DeliverControlAsync`. Cierre: Windows .NET CI **#198 / 34858264132** verde con Core Release + WinUI Release x64 + source gate + publish + artifact.
 - H-10: lectura Direct I/O del origen con `OVERLAPPED`/async real.
 - H-11/H-12/H-13: rutas antiguas de verificación y APIs obsoletas eliminadas.
-- P0 backlog por dispositivo convertido en soft watermark.
+- P0 backlog por dispositivo convertido en soft watermark/telemetría sin gate de productor.
 - P1 CRC32 slicing-by-8 dentro de la única API `FastCrc32.Compute`.
 
 ## Prioridad actual
-
-### P1 — limpiar telemetría/ordenamiento de backlog ya obsoletos
-
-`ReserveBacklogAsync` ya no espera y `QueueWaitTime` puede estar midiendo solo overhead de admisión. Auditar/eliminar telemetría engañosa y simplificar el two-pass `deferred` si no aporta rendimiento medible. No conservar complejidad histórica sin función productiva.
 
 ### P1 — coordinación profunda cuando origen y destino comparten dispositivo físico
 
 El hard cap QD1 ya fue eliminado: ahora solo es el punto de partida. Falta coordinar explícitamente lectura/escritura cuando comparten el mismo medio, especialmente HDD, para evitar seek thrash y permitir que SSD/NVMe compartidos exploten concurrencia cuando el throughput físico mejore.
 
-### P1 — medir y reducir flush/commit/recovery del hot path
+### P1 — medir y reducir flush/commit del hot path
 
-La telemetría registra flush, commit y recovery. Usarla para decidir agrupación/solapamiento preservando el contrato de durabilidad; no mantener una barrera por archivo solo por tradición si puede demostrarse una estrategia equivalente y más rápida.
+La auditoría confirmó que `RecoveryCheckpointWriter` **ya agrupa** estado: hasta 128 archivos o ~1 s antes de `FlushCheckpoint`, manteniendo el orden de durabilidad manifest → journal. No tratar recovery como fsync por archivo.
+
+El coste serial pendiente está en `FinishFile`: finalización/`FlushToDisk` del archivo, commit/rename y timestamp. Medir y reducir esas barreras donde sea posible sin romper el contrato de durabilidad. Para archivos pequeños también auditar si `WriteThroughFileThreshold = 4 MiB` mejora o empeora throughput real en datasets con muchos archivos.
 
 ### P1 — benchmark físico y tuning contra ExtremeCopy
 
