@@ -86,8 +86,17 @@ internal static class DirectIoSourceReader
             return false;
         }
 
-        session = new OverlappedSession(handle, RequiredAlignment(device));
-        return true;
+        try
+        {
+            var length = RandomAccess.GetLength(handle);
+            session = new OverlappedSession(handle, RequiredAlignment(device), length);
+            return true;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
     }
 
     internal static bool IsFallbackable(Exception error) =>
@@ -102,14 +111,19 @@ internal static class DirectIoSourceReader
     internal sealed class OverlappedSession : IDisposable
     {
         private SafeFileHandle? _handle;
+        private readonly long _length;
 
-        internal OverlappedSession(SafeFileHandle handle, int alignment)
+        internal OverlappedSession(SafeFileHandle handle, int alignment, long length)
         {
+            ArgumentNullException.ThrowIfNull(handle);
+            ArgumentOutOfRangeException.ThrowIfNegative(length);
             _handle = handle;
             Alignment = alignment;
+            _length = length;
         }
 
         internal int Alignment { get; }
+        internal long Length => _length;
 
         internal async Task<int> ReadAsync(
             SourceBufferLease buffer,
@@ -120,7 +134,18 @@ internal static class DirectIoSourceReader
             ArgumentNullException.ThrowIfNull(buffer);
             if (bytesToRead <= 0 || bytesToRead % Alignment != 0)
                 throw new ArgumentOutOfRangeException(nameof(bytesToRead));
-            if (fileOffset < 0 || fileOffset % Alignment != 0)
+            if (fileOffset < 0 || fileOffset > _length)
+                throw new ArgumentOutOfRangeException(nameof(fileOffset));
+
+            // FILE_FLAG_NO_BUFFERING requires sector-aligned offsets, but EOF itself
+            // is a logical byte position and is allowed to be unaligned. A final
+            // direct read can consume an unaligned file tail, leaving totalRead at
+            // an unaligned exact EOF. The next read must terminate here instead of
+            // feeding that EOF position into the alignment guard.
+            if (fileOffset == _length)
+                return 0;
+
+            if (fileOffset % Alignment != 0)
                 throw new ArgumentOutOfRangeException(nameof(fileOffset));
             if (!buffer.IsPinned || buffer.Pointer.ToInt64() % Alignment != 0)
                 throw new InvalidOperationException("El buffer OVERLAPPED no está alineado al sector físico.");
