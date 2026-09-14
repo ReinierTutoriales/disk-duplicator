@@ -25,8 +25,6 @@ internal static class DirectIoSourceReader
         ArgumentNullException.ThrowIfNull(device);
         if (!OperatingSystem.IsWindows() || transferSize <= 0 || device.IsNetwork || !device.ProbeSucceeded)
             return false;
-        if (StorageDeviceIdentity.ConfidenceFor(device) != DeviceIdentityConfidence.Exact)
-            return false;
         if (!device.HasKnownSectorAlignment)
             return false;
 
@@ -133,11 +131,6 @@ internal static class DirectIoSourceReader
             if (fileOffset < 0 || fileOffset > _length)
                 throw new ArgumentOutOfRangeException(nameof(fileOffset));
 
-            // FILE_FLAG_NO_BUFFERING requires sector-aligned offsets, but EOF itself
-            // is a logical byte position and is allowed to be unaligned. A final
-            // direct read can consume an unaligned file tail, leaving totalRead at
-            // an unaligned exact EOF. The next read must terminate here instead of
-            // feeding that EOF position into the alignment guard.
             if (fileOffset == _length)
                 return 0;
 
@@ -187,7 +180,6 @@ internal sealed class SourceBufferLease : IDisposable
 {
     private byte[]? _array;
     private GCHandle _pin;
-    private readonly bool _pinned;
     private readonly int _offset;
     private readonly int _capacity;
 
@@ -197,19 +189,33 @@ internal sealed class SourceBufferLease : IDisposable
         _offset = offset;
         _capacity = capacity;
         _pin = pin;
-        _pinned = pinned;
+        IsPinned = pinned;
     }
 
-    internal bool IsPinned => _pinned && _pin.IsAllocated;
+    internal bool IsPinned { get; }
     internal int Capacity => _capacity;
-
-    internal bool IsAlignedFor(int alignment)
+    internal int Alignment
     {
-        if (alignment <= 0 || (alignment & (alignment - 1)) != 0)
-            throw new ArgumentOutOfRangeException(nameof(alignment));
-        return IsPinned && Pointer.ToInt64() % alignment == 0;
+        get
+        {
+            var pointer = Pointer.ToInt64();
+            if (pointer == 0)
+                return 1;
+            var alignment = 1;
+            while (alignment < DirectIoSourceReader.MaximumSupportedAlignment && pointer % (alignment * 2L) == 0)
+                alignment *= 2;
+            return alignment;
+        }
     }
-
+    internal IntPtr Pointer
+    {
+        get
+        {
+            if (!IsPinned || !_pin.IsAllocated)
+                return IntPtr.Zero;
+            return IntPtr.Add(_pin.AddrOfPinnedObject(), _offset);
+        }
+    }
     internal Memory<byte> Memory
     {
         get
@@ -219,15 +225,8 @@ internal sealed class SourceBufferLease : IDisposable
         }
     }
 
-    internal IntPtr Pointer
-    {
-        get
-        {
-            if (!IsPinned)
-                throw new InvalidOperationException("El buffer no está fijado para Direct I/O.");
-            return IntPtr.Add(_pin.AddrOfPinnedObject(), _offset);
-        }
-    }
+    internal bool IsAlignedFor(int alignment) =>
+        alignment <= 1 || (IsPinned && Pointer.ToInt64() % alignment == 0);
 
     internal static SourceBufferLease RentBuffered(int capacity)
     {
@@ -241,24 +240,19 @@ internal sealed class SourceBufferLease : IDisposable
         if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
         if (alignment <= 0 || (alignment & (alignment - 1)) != 0)
             throw new ArgumentOutOfRangeException(nameof(alignment));
-
         var array = ArrayPool<byte>.Shared.Rent(checked(capacity + alignment));
         var pin = GCHandle.Alloc(array, GCHandleType.Pinned);
-        try
-        {
-            var address = pin.AddrOfPinnedObject().ToInt64();
-            var remainder = address & (alignment - 1L);
-            var offset = remainder == 0 ? 0 : checked((int)(alignment - remainder));
-            if (offset + capacity > array.Length)
-                throw new InvalidOperationException("ArrayPool devolvió un buffer insuficiente para alineación.");
-            return new SourceBufferLease(array, offset, capacity, pin, pinned: true);
-        }
-        catch
+        var baseAddress = pin.AddrOfPinnedObject().ToInt64();
+        var mask = alignment - 1L;
+        var alignedAddress = (baseAddress + mask) & ~mask;
+        var offset = checked((int)(alignedAddress - baseAddress));
+        if (offset + capacity > array.Length)
         {
             pin.Free();
             ArrayPool<byte>.Shared.Return(array);
-            throw;
+            throw new InvalidOperationException("No se pudo obtener un segmento alineado dentro del buffer rentado.");
         }
+        return new SourceBufferLease(array, offset, capacity, pin, pinned: true);
     }
 
     internal static SourceBufferLease OwnPooled(byte[] array, int capacity)
@@ -271,10 +265,8 @@ internal sealed class SourceBufferLease : IDisposable
     public void Dispose()
     {
         var array = Interlocked.Exchange(ref _array, null);
-        if (array is null)
-            return;
-        if (_pin.IsAllocated)
-            _pin.Free();
+        if (array is null) return;
+        if (_pin.IsAllocated) _pin.Free();
         ArrayPool<byte>.Shared.Return(array);
     }
 }
