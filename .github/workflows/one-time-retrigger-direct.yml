@@ -1,0 +1,26 @@
+name: One-time retrigger direct source integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-retrigger-direct.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  retrigger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Retrigger integration from current main
+        run: |
+          printf '\n# retriggered after classic PInvoke fix\n' >> .github/workflows/one-time-direct-source.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/one-time-direct-source.yml
+          git commit -m 'ci: rerun direct-source integration on fixed helper'
+          git push origin HEAD:main
