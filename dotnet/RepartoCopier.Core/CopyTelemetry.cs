@@ -71,8 +71,7 @@ public sealed record CopyDiagnosticsSnapshot(
 internal sealed class CopyTelemetry
 {
     private readonly long _started = Stopwatch.GetTimestamp();
-    private readonly object _rateGate = new();
-    private readonly Queue<WriteRateSample> _writeSamples = new();
+    private readonly SlidingByteRateWindow _writeRate = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
     private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
@@ -119,14 +118,7 @@ internal sealed class CopyTelemetry
         AddBytes(ref _writtenBytes, bytes);
         AddTicks(ref _writeTicks, elapsed);
 
-        if (bytes <= 0) return;
-        var total = Interlocked.Read(ref _writtenBytes);
-        var now = Stopwatch.GetTimestamp();
-        lock (_rateGate)
-        {
-            _writeSamples.Enqueue(new WriteRateSample(now, total));
-            TrimSamplesLocked(now, TimeSpan.FromSeconds(12));
-        }
+        _writeRate.Record(bytes);
     }
 
     internal void RecordWriteOperation() => Interlocked.Increment(ref _writeOperations);
@@ -162,15 +154,7 @@ internal sealed class CopyTelemetry
 
     internal CopyDiagnosticsSnapshot Snapshot()
     {
-        var now = Stopwatch.GetTimestamp();
-        double sustained5;
-        double sustained10;
-        lock (_rateGate)
-        {
-            TrimSamplesLocked(now, TimeSpan.FromSeconds(12));
-            sustained5 = RateFromSamplesLocked(now, TimeSpan.FromSeconds(5));
-            sustained10 = RateFromSamplesLocked(now, TimeSpan.FromSeconds(10));
-        }
+        var sustained = _writeRate.Snapshot();
 
         var devices = _deviceSchedulers?
             .Select(item => item.Snapshot())
@@ -194,8 +178,8 @@ internal sealed class CopyTelemetry
             ToTimeSpan(Interlocked.Read(ref _verifyPhaseTicks)),
             Stopwatch.GetElapsedTime(_started))
         {
-            SustainedWrite5sBytesPerSecond = sustained5,
-            SustainedWrite10sBytesPerSecond = sustained10,
+            SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
+            SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
             DeviceSchedulers = devices,
             PipelineGovernor = pipeline,
             DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),
@@ -209,33 +193,6 @@ internal sealed class CopyTelemetry
             PeakVerificationReadBytes = Interlocked.Read(ref _peakVerificationReadBytes),
         };
     }
-
-    private double RateFromSamplesLocked(long now, TimeSpan window)
-    {
-        var total = Interlocked.Read(ref _writtenBytes);
-        if (total <= 0 || _writeSamples.Count == 0) return 0;
-        var cutoff = now - (long)(window.TotalSeconds * Stopwatch.Frequency);
-        var baseline = _writeSamples.Peek();
-        foreach (var sample in _writeSamples)
-        {
-            baseline = sample;
-            if (sample.Timestamp >= cutoff)
-                break;
-        }
-        var elapsed = Stopwatch.GetElapsedTime(Math.Max(baseline.Timestamp, cutoff), now).TotalSeconds;
-        if (elapsed <= 0) return 0;
-        var bytes = Math.Max(0, total - baseline.TotalWrittenBytes);
-        return bytes / elapsed;
-    }
-
-    private void TrimSamplesLocked(long now, TimeSpan keep)
-    {
-        var cutoff = now - (long)(keep.TotalSeconds * Stopwatch.Frequency);
-        while (_writeSamples.Count > 1 && _writeSamples.Peek().Timestamp < cutoff)
-            _writeSamples.Dequeue();
-    }
-
-    private readonly record struct WriteRateSample(long Timestamp, long TotalWrittenBytes);
 
     private static void AddBytes(ref long target, int bytes) { if (bytes > 0) Interlocked.Add(ref target, bytes); }
     private static void AddTicks(ref long target, TimeSpan elapsed)
