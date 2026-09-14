@@ -15,6 +15,6 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 1
-      - name: Integrate adaptive source pipeline
+      - name: Apply adaptive source safety follow-up
         shell: pwsh
-        run: ./tools/patch-adaptive-source-pipeline.ps1
+        run: ./tools/patch-adaptive-source-followup.ps1
