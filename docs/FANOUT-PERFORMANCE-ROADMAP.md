@@ -12,6 +12,7 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - BLAKE3 del origen/SkipSame/recovery permanece separado de la verificación post-copia.
 - Lectura principal SSD elegible: Direct I/O con buffers alineados y `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED`, usando I/O async real.
 - Verificación post-copia automática: CRC32 por bloque generado una sola vez durante FAN-OUT; read-back Direct I/O overlapped cuando es elegible y fallback buffered async cuando no lo es.
+- `FastCrc32.Compute` usa slicing-by-8 como única implementación de producción; la equivalencia IEEE CRC32 queda cubierta por vector estándar, bordes 7/8/9 y comparación aleatoria contra referencia byte-a-byte en tests.
 - Escritura actual: buffered, offsets explícitos, QD2 selectivo en SSD calificados. **No existe todavía Direct I/O de escritura.**
 - Scheduler por dispositivo físico: QD es un límite duro de I/O físico; el backlog por rama es ahora un **soft watermark** de presión y ya no puede bloquear al productor mientras exista memoria FAN-OUT global disponible.
 - El límite duro de payload en vuelo es `AdaptiveByteBudget`; evita crecimiento ilimitado aunque una rama lenta supere ampliamente su watermark.
@@ -40,6 +41,7 @@ El watermark mide presión/lag de la rama; **no aplica backpressure al productor
 - H-11/H-12/H-13: se eliminaron la verificación antigua escondida en `HashFileAsync`, APIs síncronas obsoletas, ramas nulas/test-only innecesarias y telemetría de verify que ya no tenía productor.
 - Verificación automática CRC32 con `FastVerificationReader` como única ruta post-copia.
 - P0: eliminado el hard gate de backlog por dispositivo. Una rama que supera su watermark entra en overflow sin esperar a que drene; el productor solo puede quedar frenado por el presupuesto global de buffers compartidos, cancelación o control-plane global. Se eliminó la cola `BacklogWaiter` y existe gate que impide reintroducirla.
+- P1 CRC32: reemplazado el loop byte-a-byte por slicing-by-8 dentro de la única API `FastCrc32.Compute`; no existe segunda ruta de checksum de producción.
 
 ## Prioridad actual
 
@@ -52,10 +54,6 @@ Implementar sin sustituir ciegamente la ruta buffered. Requisitos:
 - fallback cerrado solo para errores compatibles;
 - ruta buffered actual permanece como fallback, no como segunda política contradictoria;
 - telemetría que demuestre activación/fallback.
-
-### P1 — acelerar CRC32
-
-`FastCrc32` sigue siendo tabla byte-a-byte. Optimizar únicamente con equivalencia IEEE CRC32 probada (por ejemplo slicing-by-8/16 o una ruta intrínseca validada) y medir CPU vs `VerifyReadTime`.
 
 ### P1 — QD4/QD8 adaptativo
 
