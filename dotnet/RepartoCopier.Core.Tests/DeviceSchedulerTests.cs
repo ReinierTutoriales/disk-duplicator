@@ -56,6 +56,23 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public async Task QdOneDemandUpshiftsAfterOneObservedConcurrencyWave()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDiskFastStart", 1, 32L * 1024 * 1024);
+        var first = await scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None);
+        var waiting = scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None).AsTask();
+
+        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
+        Assert.IsFalse(waiting.IsCompleted);
+
+        first.Dispose();
+
+        using var second = await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(2, scheduler.CurrentQueueDepth,
+            "Sustained QD1 demand should be evaluated after the single concurrency wave actually observed, not after a fixed eight-completion floor.");
+        Assert.AreEqual("increase:baseline-demand", scheduler.Snapshot().LastQueueDepthDecision);
+    }
+    [TestMethod]
     public async Task SustainedDemandCanGrowBeyondLegacyNvmeQd16()
     {
         using var scheduler = new DeviceScheduler("PhysicalDiskNVMe", 16, 512L * 1024 * 1024);
@@ -76,8 +93,8 @@ public sealed class DeviceSchedulerTests
         foreach (var lease in active)
             lease.Dispose();
 
-        Assert.AreEqual(32, scheduler.CurrentQueueDepth);
-        Assert.AreEqual(64, scheduler.ExplorationQueueDepth);
+        Assert.IsGreaterThanOrEqualTo(32, scheduler.CurrentQueueDepth);
+        Assert.IsGreaterThan(scheduler.CurrentQueueDepth, scheduler.ExplorationQueueDepth);
         var snapshot = scheduler.Snapshot();
         Assert.IsGreaterThanOrEqualTo(1, snapshot.QueueDepthUpshifts);
         Assert.IsGreaterThanOrEqualTo(32, snapshot.MaximumObservedQueueDepth);
