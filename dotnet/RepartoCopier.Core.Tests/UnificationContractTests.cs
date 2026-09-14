@@ -231,13 +231,42 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(engineMethods, "DeliverOneAsync");
         CollectionAssert.DoesNotContain(engineMethods, "ReleaseIfData");
-        CollectionAssert.Contains(engineMethods, "ReleaseQueuedMessage");
+        CollectionAssert.Contains(engineMethods, "ReleaseQueuedControl");
+        CollectionAssert.DoesNotContain(engineMethods, "ReleaseQueuedMessage");
 
         var assembly = typeof(CopyEngine).Assembly;
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.GlobalControlBacklogBudget"));
         Assert.IsNull(assembly.GetType("RepartoCopier.Core.ControlBacklogCapacity"));
     }
 
+    [TestMethod]
+    public void DestinationBranchTracksPayloadUntilItsSharedReferenceIsActuallyReleased()
+    {
+        var worker = typeof(CopyEngine).GetNestedType("DestinationWorker", BindingFlags.NonPublic);
+        Assert.IsNotNull(worker);
+
+        var properties = worker
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(properties, "PendingPayloadBytes");
+        CollectionAssert.Contains(properties, "PeakPendingPayloadBytes");
+
+        var methods = worker
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(methods, "ReservePendingPayload");
+        CollectionAssert.Contains(methods, "ReleasePendingPayload");
+
+        var engineMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(engineMethods, "ReleaseBranchBlock");
+        CollectionAssert.Contains(engineMethods, "ReleaseQueuedControl");
+        CollectionAssert.DoesNotContain(engineMethods, "ReleaseQueuedMessage");
+    }
     [TestMethod]
     public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
     {
