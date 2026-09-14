@@ -487,9 +487,7 @@ internal sealed class DeviceSchedulerMap : IDisposable
     }
 
     internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        left.PhysicalDeviceNumber is uint leftNumber &&
-        right.PhysicalDeviceNumber is uint rightNumber &&
-        leftNumber == rightNumber;
+        StorageDeviceIdentity.SamePhysicalDevice(left, right);
 
     public void Dispose()
     {
