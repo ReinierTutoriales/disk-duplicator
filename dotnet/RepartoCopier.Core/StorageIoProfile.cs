@@ -33,9 +33,16 @@ public sealed record StorageIoProfile(
         if (string.Equals(device.BusType, "USB", StringComparison.OrdinalIgnoreCase))
         {
             var looksLikeSsd = device.MediaKind == StorageMediaKind.SolidState && device.TrimEnabled == true;
-            return looksLikeSsd
-                ? new(StorageProfileKind.UsbSsd, 1, 32L * MiB)
-                : new(StorageProfileKind.UsbFlash, 1, 16L * MiB);
+            if (!looksLikeSsd)
+                return new(StorageProfileKind.UsbFlash, 1, 16L * MiB);
+
+            var exactFixedSsd =
+                device.Removable != true &&
+                StorageDeviceIdentity.ConfidenceFor(device) == DeviceIdentityConfidence.Exact;
+            return new(
+                StorageProfileKind.UsbSsd,
+                exactFixedSsd ? 2 : 1,
+                exactFixedSsd ? 64L * MiB : 32L * MiB);
         }
 
         if (device.MediaKind == StorageMediaKind.SolidState &&
