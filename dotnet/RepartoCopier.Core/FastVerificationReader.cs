@@ -244,7 +244,7 @@ internal static class FastVerificationReader
         return remainder == 0 ? value : checked(value + alignment - remainder);
     }
 
-    private sealed record PendingRead(
+    private readonly record struct PendingRead(
         VerificationBlock Expected,
         SourceBufferLease Buffer,
         VerificationReadBudget.Lease Reservation,
