@@ -72,6 +72,49 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public async Task IoPairAcquisitionIsAtomicAndNeverHoldsOneSlotWhileWaiting()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
+        using var single = await scheduler.AcquireIoAsync(CancellationToken.None);
+        Assert.AreEqual(1, scheduler.OutstandingIo);
+
+        var pairTask = scheduler.AcquireIoPairAsync(CancellationToken.None).AsTask();
+        await Task.Delay(50);
+
+        Assert.IsFalse(pairTask.IsCompleted);
+        Assert.AreEqual(
+            1,
+            scheduler.OutstandingIo,
+            "Una reserva QD2 pendiente no puede apropiarse de un solo slot físico mientras espera el segundo.");
+
+        single.Dispose();
+        using var pair = await pairTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+        Assert.AreEqual(2, scheduler.PeakOutstandingIo);
+    }
+
+    [TestMethod]
+    public async Task CancelledAtomicPairNeverLeaksPhysicalIoCapacity()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
+        using var single = await scheduler.AcquireIoAsync(CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+
+        var pairTask = scheduler.AcquireIoPairAsync(cancellation.Token).AsTask();
+        await Task.Delay(50);
+        cancellation.Cancel();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await pairTask);
+        Assert.AreEqual(1, scheduler.OutstandingIo);
+
+        single.Dispose();
+        Assert.AreEqual(0, scheduler.OutstandingIo);
+
+        using var recoveredPair = await scheduler.AcquireIoPairAsync(CancellationToken.None);
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+    }
+
+    [TestMethod]
     public async Task IoPairAcquisitionSerializesCompetingQd2Callers()
     {
         using var scheduler = new DeviceScheduler("PhysicalDisk10", 2, 32L * 1024 * 1024);
