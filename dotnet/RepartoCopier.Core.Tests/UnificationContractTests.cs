@@ -173,23 +173,48 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
-    public void FanoutMessagesHaveNoFixedControlAdmissionGate()
+    public void FanoutControlPlaneUsesAdaptiveByteBudgetWithoutFixedMessageCap()
     {
         var fanout = typeof(CopyEngine).GetNestedType("FanoutMessage", BindingFlags.NonPublic);
         var control = typeof(CopyEngine).GetNestedType("ControlMessage", BindingFlags.NonPublic);
         var begin = typeof(CopyEngine).GetNestedType("BeginMessage", BindingFlags.NonPublic);
         var data = typeof(CopyEngine).GetNestedType("DataMessage", BindingFlags.NonPublic);
         var end = typeof(CopyEngine).GetNestedType("EndMessage", BindingFlags.NonPublic);
+        var delivery = typeof(CopyEngine).GetNestedType("ControlDelivery", BindingFlags.NonPublic);
+        var worker = typeof(CopyEngine).GetNestedType("DestinationWorker", BindingFlags.NonPublic);
 
         Assert.IsNotNull(fanout);
         Assert.IsNotNull(control);
         Assert.IsNotNull(begin);
         Assert.IsNotNull(data);
         Assert.IsNotNull(end);
+        Assert.IsNotNull(delivery);
+        Assert.IsNotNull(worker);
         Assert.AreEqual(fanout, control.BaseType);
         Assert.AreEqual(control, begin.BaseType);
         Assert.AreEqual(fanout, data.BaseType);
         Assert.AreEqual(control, end.BaseType);
+        Assert.AreEqual(fanout, delivery.BaseType);
+
+        var workerControlBudget = worker.GetProperty(
+            "ControlBudget",
+            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.IsNotNull(workerControlBudget);
+        Assert.AreEqual(typeof(AdaptiveControlByteBudget), workerControlBudget.PropertyType);
+
+        var deliveryFields = delivery
+            .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Select(field => field.FieldType)
+            .ToArray();
+        CollectionAssert.Contains(deliveryFields, typeof(AdaptiveControlByteBudget));
+
+        var budgetMethods = typeof(AdaptiveControlByteBudget)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(budgetMethods, "CreateForSystem");
+        CollectionAssert.Contains(budgetMethods, "AcquireAsync");
+        CollectionAssert.Contains(budgetMethods, "Release");
 
         var deliveryMethods = typeof(CopyEngine)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
@@ -205,5 +230,11 @@ public sealed class UnificationContractTests
             .Select(method => method.Name)
             .ToArray();
         CollectionAssert.DoesNotContain(engineMethods, "DeliverOneAsync");
+        CollectionAssert.DoesNotContain(engineMethods, "ReleaseIfData");
+        CollectionAssert.Contains(engineMethods, "ReleaseQueuedMessage");
+
+        var assembly = typeof(CopyEngine).Assembly;
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.GlobalControlBacklogBudget"));
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.ControlBacklogCapacity"));
     }
 }
