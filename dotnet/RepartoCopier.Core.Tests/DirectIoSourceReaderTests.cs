@@ -18,7 +18,7 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
-    public void ExactLocalSsdAndHddWithKnownSectorsAreEligible()
+    public void LocalSsdAndHddWithKnownSectorsAreEligible()
     {
         var ssd = Device("NVMe", StorageMediaKind.SolidState, 512, 4096);
         var hdd = Device("SATA", StorageMediaKind.Rotational, 512, 4096);
@@ -30,26 +30,26 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
-    public void NetworkUnknownIdentityAndMisalignedTransfersFallBack()
+    public void NetworkAndMisalignedTransfersFallBackButUncertainLocalIdentityCanAttemptDirectIo()
     {
         var network = Device("Network", StorageMediaKind.SolidState, 512, 4096) with
         {
             IsNetwork = true,
             PhysicalDeviceNumber = null,
         };
-        var unknownIdentity = Device("USB", StorageMediaKind.SolidState, 512, 4096) with
+        var uncertainLocal = Device("USB", StorageMediaKind.SolidState, 512, 4096) with
         {
             PhysicalDeviceNumber = null,
         };
         var ssd = Device("NVMe", StorageMediaKind.SolidState, 512, 4096);
 
         Assert.IsFalse(DirectIoSourceReader.IsEligible(network, 32 * 1024 * 1024));
-        Assert.IsFalse(DirectIoSourceReader.IsEligible(unknownIdentity, 32 * 1024 * 1024));
+        Assert.IsTrue(DirectIoSourceReader.IsEligible(uncertainLocal, 32 * 1024 * 1024));
         Assert.IsFalse(DirectIoSourceReader.IsEligible(ssd, 32 * 1024 * 1024 - 1));
     }
 
     [TestMethod]
-    public void VerificationEligibilityAllowsExactLocalHddButRejectsUnsafeTopology()
+    public void VerificationEligibilityAllowsAlignedLocalDevicesWithoutIdentityGate()
     {
         var hdd = Device("SATA", StorageMediaKind.Rotational, 512, 4096);
         var network = Device("Network", StorageMediaKind.Rotational, 512, 4096) with
@@ -57,14 +57,14 @@ public sealed class DirectIoSourceReaderTests
             IsNetwork = true,
             PhysicalDeviceNumber = null,
         };
-        var unknownIdentity = Device("USB", StorageMediaKind.Rotational, 512, 4096) with
+        var uncertainLocal = Device("USB", StorageMediaKind.Rotational, 512, 4096) with
         {
             PhysicalDeviceNumber = null,
         };
 
         Assert.IsTrue(DirectIoSourceReader.IsVerificationEligible(hdd, 8 * 1024 * 1024));
         Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(network, 8 * 1024 * 1024));
-        Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(unknownIdentity, 8 * 1024 * 1024));
+        Assert.IsTrue(DirectIoSourceReader.IsVerificationEligible(uncertainLocal, 8 * 1024 * 1024));
         Assert.IsFalse(DirectIoSourceReader.IsVerificationEligible(hdd, 8 * 1024 * 1024 - 1));
     }
 
