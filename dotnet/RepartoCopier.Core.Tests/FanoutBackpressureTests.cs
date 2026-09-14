@@ -50,7 +50,7 @@ public sealed class FanoutBackpressureTests
     }
 
     [TestMethod]
-    public async Task VerificationTelemetrySeparatesGovernorWaitFromHashCompute()
+    public async Task VerificationTelemetryReportsReadAndHashWork()
     {
         using var temp = new TempDirectory("verify-telemetry");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
@@ -71,7 +71,6 @@ public sealed class FanoutBackpressureTests
         Assert.IsTrue(metrics.VerifyReadBytes >= (long)payload.Length * destinations.Length);
         Assert.IsTrue(metrics.VerifyHashBytes >= (long)payload.Length * destinations.Length);
         Assert.IsTrue(metrics.VerifyHashTime > TimeSpan.Zero);
-        Assert.IsTrue(metrics.VerifyCpuWaitTime >= TimeSpan.Zero);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
     }
 

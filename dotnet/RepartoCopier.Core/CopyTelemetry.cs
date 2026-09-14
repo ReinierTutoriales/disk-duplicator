@@ -52,7 +52,6 @@ public sealed record CopyDiagnosticsSnapshot(
     TimeSpan VerifyReadTime,
     long VerifyHashBytes,
     TimeSpan VerifyHashTime,
-    TimeSpan VerifyCpuWaitTime,
     int PeakControlBacklogMessages,
     long PeakBufferedBytes,
     long MaximumObservedBufferTargetBytes,
@@ -107,7 +106,7 @@ internal sealed class CopyTelemetry
     private int _writeThroughRecoveryEvents, _bufferedRecoveryEvents;
     private long _writeThroughRecoveryTicks, _bufferedRecoveryTicks;
     private long _verifyReadBytes, _verifyReadTicks;
-    private long _verifyHashBytes, _verifyHashTicks, _verifyCpuWaitTicks;
+    private long _verifyHashBytes, _verifyHashTicks;
     private int _peakControlBacklogMessages;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
@@ -200,7 +199,6 @@ internal sealed class CopyTelemetry
 
     internal void RecordVerifyRead(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyReadBytes, bytes); AddTicks(ref _verifyReadTicks, elapsed); }
     internal void RecordVerifyHash(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyHashBytes, bytes); AddTicks(ref _verifyHashTicks, elapsed); }
-    internal void RecordVerifyCpuWait(TimeSpan elapsed) => AddTicks(ref _verifyCpuWaitTicks, elapsed);
     internal void RecordCopyPhase(TimeSpan elapsed) => AddTicks(ref _copyPhaseTicks, elapsed);
     internal void RecordVerifyPhase(TimeSpan elapsed) => AddTicks(ref _verifyPhaseTicks, elapsed);
 
@@ -259,7 +257,6 @@ internal sealed class CopyTelemetry
             Volatile.Read(ref _recoveryEvents), ToTimeSpan(Interlocked.Read(ref _recoveryTicks)),
             Interlocked.Read(ref _verifyReadBytes), ToTimeSpan(Interlocked.Read(ref _verifyReadTicks)),
             Interlocked.Read(ref _verifyHashBytes), ToTimeSpan(Interlocked.Read(ref _verifyHashTicks)),
-            ToTimeSpan(Interlocked.Read(ref _verifyCpuWaitTicks)),
             Volatile.Read(ref _peakControlBacklogMessages),
             Interlocked.Read(ref _peakBufferedBytes), Interlocked.Read(ref _maxObservedBufferTargetBytes),
             ToTimeSpan(Interlocked.Read(ref _copyPhaseTicks)),

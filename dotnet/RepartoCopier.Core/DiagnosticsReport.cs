@@ -54,7 +54,6 @@ public static class DiagnosticsReport
         AppendWritePolicy(sb, "BufferedPolicy", metrics.BufferedPolicy);
         AppendRate(sb, "VerifyRead", metrics.VerifyReadBytes, metrics.VerifyReadTime, metrics.VerifyReadBytesPerSecond);
         AppendRate(sb, "VerifyHash", metrics.VerifyHashBytes, metrics.VerifyHashTime, metrics.VerifyHashBytesPerSecond);
-        AppendDuration(sb, "VerifyCpuWait", metrics.VerifyCpuWaitTime);
         sb.Append("PeakControlBacklogMessages: ").AppendLine(metrics.PeakControlBacklogMessages.ToString(CultureInfo.InvariantCulture));
         sb.Append("PeakBufferedBytes: ").AppendLine(metrics.PeakBufferedBytes.ToString(CultureInfo.InvariantCulture));
         sb.Append("MaximumObservedBufferTargetBytes: ").AppendLine(metrics.MaximumObservedBufferTargetBytes.ToString(CultureInfo.InvariantCulture));

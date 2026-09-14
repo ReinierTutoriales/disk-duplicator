@@ -27,7 +27,7 @@ public sealed class DiagnosticsReportTests
             4, TimeSpan.FromMilliseconds(70),
             4_000_000, TimeSpan.FromSeconds(1),
             4_000_000, TimeSpan.FromMilliseconds(500),
-            TimeSpan.FromMilliseconds(80), 12,
+            12,
             256L * 1024 * 1024, 512L * 1024 * 1024,
             TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4));
 
@@ -45,6 +45,7 @@ public sealed class DiagnosticsReportTests
         StringAssert.Contains(report, "DurableFlush: 50 ms");
         StringAssert.Contains(report, "VerifyReadRate: 4000000 B/s");
         StringAssert.Contains(report, "VerifyHashRate: 8000000 B/s");
+        Assert.IsFalse(report.Contains("VerifyCpuWait", StringComparison.Ordinal));
         StringAssert.Contains(report, "PeakBufferedBytes: 268435456");
         StringAssert.Contains(report, "MaximumObservedBufferTargetBytes: 536870912");
         StringAssert.Contains(report, "phase=Done");
