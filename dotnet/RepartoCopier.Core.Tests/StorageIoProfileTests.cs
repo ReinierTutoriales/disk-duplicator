@@ -43,15 +43,40 @@ public sealed class StorageIoProfileTests
     }
 
     [TestMethod]
-    public void UsbSsdStartsAtQueueDepthOneWithBoundedBacklog()
+    public void ExactFixedUsbSsdUsesQueueDepthTwoAndLargerBacklog()
     {
         var device = Device("USB", StorageMediaKind.SolidState, false, true, trim: true, removable: false);
 
         var profile = StorageIoProfile.For(device);
 
         Assert.AreEqual(StorageProfileKind.UsbSsd, profile.Kind);
-        Assert.AreEqual(1, profile.RecommendedQueueDepth);
-        Assert.AreEqual(32L * 1024 * 1024, profile.DeviceBacklogTargetBytes);
+        Assert.AreEqual(2, profile.RecommendedQueueDepth);
+        Assert.AreEqual(64L * 1024 * 1024, profile.DeviceBacklogTargetBytes);
+    }
+
+    [TestMethod]
+    public void RemovableOrUncertainUsbSsdStaysQueueDepthOne()
+    {
+        var removable = Device("USB", StorageMediaKind.SolidState, false, true, trim: true, removable: true);
+        var uncertain = Device(
+            "USB",
+            StorageMediaKind.SolidState,
+            false,
+            true,
+            trim: true,
+            removable: false,
+            physicalDisk: null);
+
+        var removableProfile = StorageIoProfile.For(removable);
+        var uncertainProfile = StorageIoProfile.For(uncertain);
+
+        Assert.AreEqual(StorageProfileKind.UsbSsd, removableProfile.Kind);
+        Assert.AreEqual(1, removableProfile.RecommendedQueueDepth);
+        Assert.AreEqual(32L * 1024 * 1024, removableProfile.DeviceBacklogTargetBytes);
+
+        Assert.AreEqual(StorageProfileKind.UsbSsd, uncertainProfile.Kind);
+        Assert.AreEqual(1, uncertainProfile.RecommendedQueueDepth);
+        Assert.AreEqual(32L * 1024 * 1024, uncertainProfile.DeviceBacklogTargetBytes);
     }
 
     [TestMethod]
@@ -90,11 +115,12 @@ public sealed class StorageIoProfileTests
         bool preallocation,
         bool? trim = null,
         bool? removable = false,
-        uint? alignmentOffset = null) =>
+        uint? alignmentOffset = null,
+        uint? physicalDisk = 1) =>
         new(
             @"C:\dest",
             @"C:\",
-            isNetwork ? null : 1,
+            isNetwork ? null : physicalDisk,
             isNetwork ? null : 1,
             bus,
             media,
