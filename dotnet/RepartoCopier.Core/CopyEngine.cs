@@ -393,7 +393,7 @@ public static class CopyEngine
                 }
                 if (active.Count == 0) continue;
 
-                await DeliverAsync(active, new BeginMessage(entry), countsData: false, job).ConfigureAwait(false);
+                await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
 
                 var sourceResult = entry.Size >= SourcePrefetchThreshold
                     ? await ReadAndFanOutPrefetchedAsync(entry, copy.SourceDevice, active, bufferBudget, job, pipeline).ConfigureAwait(false)
@@ -407,7 +407,7 @@ public static class CopyEngine
                     throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
                 expectedHashes[key] = hash;
                 active.RemoveAll(worker => !worker.IsActive);
-                await DeliverAsync(active, new EndMessage(hash), countsData: false, job).ConfigureAwait(false);
+                await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
             }
 
             if (copy.SourceScan is not null)
@@ -483,7 +483,7 @@ public static class CopyEngine
 
             var block = new SharedBlock(rented, read, readBufferSize, active.Count, bufferBudget);
             var deliveryStarted = Stopwatch.GetTimestamp();
-            await DeliverAsync(active, new DataMessage(block), countsData: true, job).ConfigureAwait(false);
+            await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
             var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
             pipeline.RecordDeliveryWait(deliveryElapsed);
             job.Telemetry.RecordFanoutWait(deliveryElapsed);
@@ -545,7 +545,7 @@ public static class CopyEngine
 
                 var shared = sourceBlock.TransferToShared(active.Count);
                 var deliveryStarted = Stopwatch.GetTimestamp();
-                await DeliverAsync(active, new DataMessage(shared), countsData: true, job).ConfigureAwait(false);
+                await DeliverAsync(active, new DataMessage(shared), job).ConfigureAwait(false);
                 var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
                 pipeline.RecordDeliveryWait(deliveryElapsed);
                 job.Telemetry.RecordFanoutWait(deliveryElapsed);
@@ -802,13 +802,12 @@ public static class CopyEngine
     private static async Task DeliverAsync(
         IReadOnlyList<DestinationWorker> recipients,
         FanoutMessage message,
-        bool countsData,
         CopyJob job)
     {
         if (recipients.Count == 0)
             return;
 
-        if (countsData && message is DataMessage dataMessage)
+        if (message is DataMessage dataMessage)
         {
             await DeliverDataAsync(recipients, dataMessage, job).ConfigureAwait(false);
             return;
@@ -818,7 +817,7 @@ public static class CopyEngine
         try
         {
             for (; index < recipients.Count; index++)
-                await DeliverOneAsync(recipients[index], message, countsData, job).ConfigureAwait(false);
+                await DeliverOneAsync(recipients[index], message, job).ConfigureAwait(false);
         }
         catch
         {
@@ -854,7 +853,6 @@ public static class CopyEngine
                     await DeliverOneAsync(
                         worker,
                         message,
-                        countsData: true,
                         job,
                         backlogReserved: true).ConfigureAwait(false);
                     continue;
@@ -888,7 +886,6 @@ public static class CopyEngine
                 await DeliverOneAsync(
                     worker,
                     message,
-                    countsData: true,
                     job,
                     backlogReserved: true).ConfigureAwait(false);
             }
@@ -906,7 +903,6 @@ public static class CopyEngine
     private static async ValueTask DeliverOneAsync(
         DestinationWorker worker,
         FanoutMessage message,
-        bool countsData,
         CopyJob job,
         bool backlogReserved = false)
     {
@@ -925,17 +921,23 @@ public static class CopyEngine
             job.Token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
-            var controlWaitStarted = Stopwatch.GetTimestamp();
-            await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
-            var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
-            job.Telemetry.RecordControlBacklogWait(controlWait);
-            job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
-            controlOwned = true;
+            if (message is ControlMessage)
+            {
+                var controlWaitStarted = Stopwatch.GetTimestamp();
+                await worker.ControlBudget.AcquireAsync(job.Token).ConfigureAwait(false);
+                var controlWait = Stopwatch.GetElapsedTime(controlWaitStarted);
+                job.Telemetry.RecordControlBacklogWait(controlWait);
+                job.Telemetry.ObserveControlBacklog(worker.ControlBudget.Used);
+                controlOwned = true;
+            }
 
             if (!worker.IsActive)
             {
-                worker.ControlBudget.Release();
-                controlOwned = false;
+                if (controlOwned)
+                {
+                    worker.ControlBudget.Release();
+                    controlOwned = false;
+                }
                 if (backlogReserved && message is DataMessage inactiveData)
                     worker.DeviceScheduler.ReleaseBacklog(inactiveData.Block.Length);
                 ReleaseIfData(message);
@@ -954,8 +956,11 @@ public static class CopyEngine
 
             worker.DecrementQueueDepth();
             queueOwned = false;
-            worker.ControlBudget.Release();
-            controlOwned = false;
+            if (controlOwned)
+            {
+                worker.ControlBudget.Release();
+                controlOwned = false;
+            }
             if (backlogReserved && message is DataMessage rejectedData)
                 worker.DeviceScheduler.ReleaseBacklog(rejectedData.Block.Length);
             ReleaseIfData(message);
@@ -995,7 +1000,8 @@ public static class CopyEngine
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
                 worker.DecrementQueueDepth();
-                worker.ControlBudget.Release();
+                if (message is ControlMessage)
+                    worker.ControlBudget.Release();
                 var data = message as DataMessage;
                 if (data is not null)
                     worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
@@ -1551,7 +1557,8 @@ public static class CopyEngine
         while (worker.Channel.Reader.TryRead(out var message))
         {
             worker.DecrementQueueDepth();
-            worker.ControlBudget.Release();
+            if (message is ControlMessage)
+                worker.ControlBudget.Release();
             if (message is DataMessage data)
                 worker.DeviceScheduler.ReleaseBacklog(data.Block.Length);
             ReleaseIfData(message);
@@ -1626,9 +1633,10 @@ public static class CopyEngine
     }
 
     private abstract record FanoutMessage;
-    private sealed record BeginMessage(FileEntry Entry) : FanoutMessage;
+    private abstract record ControlMessage : FanoutMessage;
+    private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
-    private sealed record EndMessage(byte[] Hash) : FanoutMessage;
+    private sealed record EndMessage(byte[] Hash) : ControlMessage;
 
     internal sealed class SharedBlock
     {
