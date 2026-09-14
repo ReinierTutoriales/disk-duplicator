@@ -42,12 +42,7 @@ jobs:
           $acquirePattern = '(?m)^        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);\r?\n        await governor\.AcquirePrefetchSlotAsync\(CancellationToken\.None\);$'
           $acquireMatches = [regex]::Matches($core, $acquirePattern)
           if ($acquireMatches.Count -ne 2) { throw "Expected 2 two-slot setup blocks, found $($acquireMatches.Count)." }
-          $fourAcquires = @(
-            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
-            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
-            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);',
-            '        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);'
-          ) -join [Environment]::NewLine
+          $fourAcquires = @('        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);','        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);') -join [Environment]::NewLine
           $core = [regex]::Replace($core, $acquirePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourAcquires })
 
           $assertOld = 'Assert.AreEqual(2, governor.InFlight);'
@@ -57,37 +52,26 @@ jobs:
           $releasePattern = '(?m)^        governor\.ReleasePrefetchSlot\(\);\r?\n        governor\.ReleasePrefetchSlot\(\);\r?\n        Assert\.AreEqual\(0, governor\.InFlight\);$'
           $releaseMatches = [regex]::Matches($core, $releasePattern)
           if ($releaseMatches.Count -ne 2) { throw "Expected 2 two-release teardown blocks, found $($releaseMatches.Count)." }
-          $fourReleases = @(
-            '        governor.ReleasePrefetchSlot();',
-            '        governor.ReleasePrefetchSlot();',
-            '        governor.ReleasePrefetchSlot();',
-            '        governor.ReleasePrefetchSlot();',
-            '        Assert.AreEqual(0, governor.InFlight);'
-          ) -join [Environment]::NewLine
+          $fourReleases = @('        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        governor.ReleasePrefetchSlot();','        Assert.AreEqual(0, governor.InFlight);') -join [Environment]::NewLine
           $core = [regex]::Replace($core, $releasePattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $fourReleases })
           [System.IO.File]::WriteAllText($corePath, $core, [System.Text.UTF8Encoding]::new($false))
 
           $fastPath = 'dotnet/RepartoCopier.Core.Tests/ProductionFastPathTests.cs'
           $fast = [System.IO.File]::ReadAllText($fastPath)
-          $oldComment = @'
-        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two
-        // destinations the optimized writer must issue exactly four WriteAsync calls.
-        Assert.AreEqual(4L, metrics.WriteOperations);
-'@
-          $newComment = @'
-        // 20 MiB + 733 bytes now fits in one 32 MiB source block. With two
-        // destinations the writer must issue exactly two block writes on QD1 storage.
-        Assert.AreEqual(2L, metrics.WriteOperations);
-'@
-          if (([regex]::Matches($fast, [regex]::Escape($oldComment))).Count -ne 1) { throw 'Expected one 16 MiB write-operation assertion block.' }
-          $fast = $fast.Replace($oldComment, $newComment)
+          $old1 = '        // 20 MiB + 733 bytes uses two source blocks (16 MiB + tail). With two'
+          $old2 = '        // destinations the optimized writer must issue exactly four WriteAsync calls.'
+          $old3 = '        Assert.AreEqual(4L, metrics.WriteOperations);'
+          foreach ($old in @($old1,$old2,$old3)) {
+            if (([regex]::Matches($fast, [regex]::Escape($old))).Count -ne 1) { throw "Expected one fast-path match for [$old]." }
+          }
+          $fast = $fast.Replace($old1, '        // 20 MiB + 733 bytes now fits in one 32 MiB source block. With two')
+          $fast = $fast.Replace($old2, '        // destinations the writer must issue exactly two block writes on QD1 storage.')
+          $fast = $fast.Replace($old3, '        Assert.AreEqual(2L, metrics.WriteOperations);')
           [System.IO.File]::WriteAllText($fastPath, $fast, [System.Text.UTF8Encoding]::new($false))
 
           $expected = @($enginePath, $corePath, $fastPath) | Sort-Object
           $changed = @(git diff --name-only | Sort-Object)
-          if (($changed -join '|') -ne ($expected -join '|')) {
-            throw "Unexpected changed files: $($changed -join ', ')"
-          }
+          if (($changed -join '|') -ne ($expected -join '|')) { throw "Unexpected changed files: $($changed -join ', ')" }
           git diff --check
           git diff -- $enginePath $corePath $fastPath
 
