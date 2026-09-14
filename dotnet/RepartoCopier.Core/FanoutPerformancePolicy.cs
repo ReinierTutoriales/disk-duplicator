@@ -8,11 +8,12 @@ namespace RepartoCopier.Core;
 /// to classify how far a branch has fallen behind; they are not producer gates.
 /// A slow branch may therefore exceed its target while global shared-buffer
 /// memory remains available. AdaptiveByteBudget is the hard payload-memory
-/// ceiling; DeviceScheduler queue depth remains the hard physical-I/O limit.
+/// authority; DeviceScheduler adapts physical-I/O concurrency independently for
+/// each physical destination.
 ///
-/// Queue-depth ceilings are intentionally hardware-class aware rather than
-/// capped globally at QD2. The write policy further bounds useful depth by the
-/// current payload size, so these are capabilities, not forced concurrency.
+/// Queue-depth values here are starting points only. QD1/QD4/QD8/QD16 do not
+/// cap later exploration: sustained demand can move the scheduler beyond them
+/// when measured aggregate throughput/latency justify it.
 /// </summary>
 internal static class FanoutPerformancePolicy
 {
