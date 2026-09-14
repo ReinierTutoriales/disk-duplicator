@@ -3,6 +3,8 @@ $ErrorActionPreference = 'Stop'
 function Replace-Exact([string]$Path, [string]$Old, [string]$New, [string]$Label) {
     $text = [IO.File]::ReadAllText($Path)
     if (-not $text.Contains($Old)) { throw "${Label}: exact pattern not found" }
+    $count = ([regex]::Matches($text, [regex]::Escape($Old))).Count
+    if ($count -ne 1) { throw "${Label}: expected one occurrence, found $count" }
     $text = $text.Replace($Old, $New)
     [IO.File]::WriteAllText($Path, $text, [Text.UTF8Encoding]::new($false))
 }
@@ -37,16 +39,16 @@ internal sealed class DeviceSchedulerMap : IDisposable
 '@ 'map shared-source property'
 
 Replace-Exact $scheduler @'
+        var groups = destinationArray.GroupBy(item => item.PhysicalDeviceId, StringComparer.OrdinalIgnoreCase);
         var schedulers = new Dictionary<string, DeviceScheduler>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var group in groups)
-        {
 '@ @'
+        var groups = destinationArray.GroupBy(item => item.PhysicalDeviceId, StringComparer.OrdinalIgnoreCase);
         var schedulers = new Dictionary<string, DeviceScheduler>(StringComparer.OrdinalIgnoreCase);
         DeviceScheduler? sharedSourceScheduler = null;
 
         foreach (var group in groups)
-        {
 '@ 'map shared-source local'
 
 Replace-Exact $scheduler @'
@@ -93,10 +95,22 @@ Replace-Exact $engine @'
 '@ 'production producer source scheduler wiring'
 
 Replace-Exact $engine @'
+    private static async Task ProducerLoopAsync(
+        PreparedCopy copy,
+        DestinationWorker[] workers,
+        DestinationProgress[] progress,
+        bool[][] skipMasks,
+        Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
         PipelineGovernor pipeline,
         AdaptiveByteBudget bufferBudget)
 '@ @'
+    private static async Task ProducerLoopAsync(
+        PreparedCopy copy,
+        DestinationWorker[] workers,
+        DestinationProgress[] progress,
+        bool[][] skipMasks,
+        Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
         PipelineGovernor pipeline,
         AdaptiveByteBudget bufferBudget,
@@ -127,27 +141,21 @@ Replace-Exact $engine @'
 '@ 'fanout source scheduler propagation'
 
 Replace-Exact $engine @'
+    private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
+        FileEntry entry,
+        List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline)
-    {
 '@ @'
+    private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
+        FileEntry entry,
+        List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler)
-    {
 '@ 'sequential signature source scheduler'
-
-Replace-Exact $engine @'
-        while (true)
-        {
-            job.Token.ThrowIfCancellationRequested();
-'@ @'
-        while (totalRead < entry.Size)
-        {
-            job.Token.ThrowIfCancellationRequested();
-'@ 'sequential avoid redundant EOF read'
 
 Replace-Exact $engine @'
             int read;
@@ -160,14 +168,13 @@ Replace-Exact $engine @'
             int read;
             try
             {
-                var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
                 var readStarted = Stopwatch.GetTimestamp();
                 DeviceScheduler.IoLease? sourceIo = null;
                 try
                 {
                     if (sharedSourceScheduler is not null)
-                        sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
-                    read = await source.ReadAsync(rented.AsMemory(0, remaining), job.Token).ConfigureAwait(false);
+                        sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, job.Token).ConfigureAwait(false);
+                    read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), job.Token).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -177,34 +184,22 @@ Replace-Exact $engine @'
 '@ 'sequential coordinate physical source read'
 
 Replace-Exact $engine @'
-            if (read == 0)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release(readBufferSize);
-                break;
-            }
-'@ @'
-            if (read == 0)
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-                bufferBudget.Release(readBufferSize);
-                throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
-            }
-'@ 'sequential early EOF fail'
-
-Replace-Exact $engine @'
+    private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline)
-    {
-        using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
 '@ @'
+    private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler)
-    {
-        using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
 '@ 'prefetched signature source scheduler'
 
 Replace-Exact $engine @'
@@ -218,21 +213,29 @@ Replace-Exact $engine @'
             pipeline,
             sharedSourceScheduler,
             prefetchCancel.Token);
-'@ 'prefetch propagation source scheduler'
+'@ 'prefetch source scheduler propagation'
 
 Replace-Exact $engine @'
+    private static async Task<SourceReadResult> PrefetchSourceAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        int readBufferSize,
+        ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         CancellationToken token)
-    {
 '@ @'
+    private static async Task<SourceReadResult> PrefetchSourceAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        int readBufferSize,
+        ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler,
         CancellationToken token)
-    {
 '@ 'prefetch stage signature source scheduler'
 
 Replace-Exact $engine @'
@@ -246,42 +249,30 @@ Replace-Exact $engine @'
             pipeline,
             sharedSourceScheduler,
             stageCancel.Token);
-'@ 'read-ahead propagation source scheduler'
+'@ 'read-ahead source scheduler propagation'
 
-# Replace only the ReadSourceAheadAsync signature occurrence that remains.
-$text = [IO.File]::ReadAllText($engine)
-$oldSig = @'
+Replace-Exact $engine @'
+    private static async Task<long> ReadSourceAheadAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        int readBufferSize,
+        ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         CancellationToken token)
-    {
-        Exception? completionError = null;
-        DirectIoSourceReader.OverlappedSession? direct = null;
-'@
-$newSig = @'
+'@ @'
+    private static async Task<long> ReadSourceAheadAsync(
+        FileEntry entry,
+        StorageDeviceInfo sourceDevice,
+        int readBufferSize,
+        ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler,
         CancellationToken token)
-    {
-        Exception? completionError = null;
-        DirectIoSourceReader.OverlappedSession? direct = null;
-'@
-if (-not $text.Contains($oldSig)) { throw 'read-ahead signature source scheduler: exact pattern not found' }
-$text = $text.Replace($oldSig, $newSig)
-[IO.File]::WriteAllText($engine, $text, [Text.UTF8Encoding]::new($false))
-
-Replace-Exact $engine @'
-            long totalRead = 0;
-            while (true)
-            {
-'@ @'
-            long totalRead = 0;
-            while (totalRead < entry.Size)
-            {
-'@ 'read-ahead avoid redundant EOF read'
+'@ 'read-ahead signature source scheduler'
 
 Replace-Exact $engine @'
                     var readStarted = Stopwatch.GetTimestamp();
@@ -313,14 +304,13 @@ Replace-Exact $engine @'
 
                     var readElapsed = Stopwatch.GetElapsedTime(readStarted);
 '@ @'
-                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
                     var readStarted = Stopwatch.GetTimestamp();
                     int read;
                     DeviceScheduler.IoLease? sourceIo = null;
                     try
                     {
                         if (sharedSourceScheduler is not null)
-                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, token).ConfigureAwait(false);
+                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, token).ConfigureAwait(false);
 
                         if (direct is not null)
                         {
@@ -339,12 +329,12 @@ Replace-Exact $engine @'
                                 buffered = OpenSourceStream(entry.SourcePath);
                                 buffered.Position = totalRead;
                                 lease = SourceBufferLease.RentBuffered(readBufferSize);
-                                read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
+                                read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);
                             }
                         }
                         else
                         {
-                            read = await buffered!.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
+                            read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);
                         }
                     }
                     finally
@@ -355,36 +345,11 @@ Replace-Exact $engine @'
                     var readElapsed = Stopwatch.GetElapsedTime(readStarted);
 '@ 'read-ahead coordinate physical source read'
 
-Replace-Exact $engine @'
-                    if (read == 0)
-                    {
-                        lease.Dispose();
-                        lease = null;
-                        bufferBudget.Release(readBufferSize);
-                        budgetOwned = false;
-                        pipeline.ReleasePrefetchSlot();
-                        slotOwned = false;
-                        break;
-                    }
-'@ @'
-                    if (read == 0)
-                    {
-                        lease.Dispose();
-                        lease = null;
-                        bufferBudget.Release(readBufferSize);
-                        budgetOwned = false;
-                        pipeline.ReleasePrefetchSlot();
-                        slotOwned = false;
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
-                    }
-'@ 'read-ahead early EOF fail'
-
-# Permanent sanity audit for the migrated production surface.
 $text = [IO.File]::ReadAllText($engine)
 if (-not $text.Contains('deviceSchedulers.SharedSourceScheduler')) { throw 'Production source scheduler wiring missing.' }
-if (-not $text.Contains('sharedSourceScheduler.AcquireIoAsync')) { throw 'Source reads do not consume the shared physical scheduler.' }
-
-[IO.File]::WriteAllText($engine, $text, [Text.UTF8Encoding]::new($false))
+if (([regex]::Matches($text, [regex]::Escape('sharedSourceScheduler.AcquireIoAsync'))).Count -ne 2) {
+    throw 'Expected exactly two physical source-read scheduler consumers.'
+}
 
 git config user.name 'RepartoCopier CI Migration'
 git config user.email '86568548+ReinierTutoriales@users.noreply.github.com'
