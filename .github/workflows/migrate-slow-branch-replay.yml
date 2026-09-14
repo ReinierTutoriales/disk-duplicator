@@ -29,18 +29,26 @@ jobs:
       - name: Apply slow branch replay
         shell: pwsh
         run: ./tools/patch-slow-branch-replay.ps1
-      - name: Normalize generated multiline replacements
+      - name: Normalize generated output
         shell: pwsh
         run: |
           $literal = [string][char]96 + 'r' + [char]96 + 'n'
           $newline = "`r`n"
-          foreach ($path in @(
+          $paths = @(
+            'docs/FANOUT-PERFORMANCE-ROADMAP.md',
+            'dotnet/RepartoCopier.Core.Tests/UnificationContractTests.cs',
+            'dotnet/RepartoCopier.Core.Tests/BranchReplayStoreTests.cs',
+            'dotnet/RepartoCopier.Core/BranchReplayStore.cs',
             'dotnet/RepartoCopier.Core/CopyEngine.cs',
             'dotnet/RepartoCopier.Core/CopyTelemetry.cs'
-          )) {
+          )
+          foreach ($path in $paths) {
             $content = Get-Content -LiteralPath $path -Raw
-            $content = $content.Replace($literal, $newline)
-            Set-Content -LiteralPath $path -Value $content -Encoding utf8
+            if ($path.EndsWith('CopyEngine.cs') -or $path.EndsWith('CopyTelemetry.cs')) {
+              $content = $content.Replace($literal, $newline)
+            }
+            $content = [regex]::Replace($content, '(\r?\n)+\z', '') + $newline
+            [System.IO.File]::WriteAllText((Resolve-Path $path), $content, [System.Text.UTF8Encoding]::new($false))
           }
           git diff --check
       - name: Core tests
