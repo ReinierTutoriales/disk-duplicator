@@ -535,9 +535,9 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
-    public async Task WriteThroughSmallFilePathPreservesExactDataAndVerification()
+    public async Task SmallAndMediumFilesPreserveExactDataWithUnifiedDurabilityPath()
     {
-        using var temp = new TempDirectory("writethrough-small-files");
+        using var temp = new TempDirectory("unified-small-files");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
         var small = new byte[4096];
         var medium = new byte[1024 * 1024];
@@ -567,8 +567,10 @@ public sealed class CoreParityTests
             CollectionAssert.AreEqual(boundary, await File.ReadAllBytesAsync(Path.Combine(copied, "boundary.bin")));
             CollectionAssert.AreEqual(large, await File.ReadAllBytesAsync(Path.Combine(copied, "large.bin")));
         }
-        // Only the >4 MiB file should require an explicit FlushFileBuffers per destination.
-        Assert.AreEqual(destinations.Length, job.DiagnosticsSnapshot().DurableFlushes);
+        var diagnostics = job.DiagnosticsSnapshot();
+        Assert.IsGreaterThanOrEqualTo(destinations.Length * 4, diagnostics.DurableFlushes);
+        Assert.AreEqual(destinations.Length * 4, diagnostics.Commits);
+        Assert.AreEqual(destinations.Length * 4, diagnostics.RecoveryEvents);
     }
 
     [TestMethod]
