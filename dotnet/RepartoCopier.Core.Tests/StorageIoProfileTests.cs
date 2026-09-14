@@ -26,7 +26,7 @@ public sealed class StorageIoProfileTests
     }
 
     [TestMethod]
-    public void NetworkRemainsConservativeWhileLocalMechanicalBranchesGetEightBlockRunAhead()
+    public void NetworkFlashAndHddRemainQueueDepthOne()
     {
         var network = Device("Network", StorageMediaKind.Unknown, isNetwork: true, preallocation: false);
         var usbFlash = Device("USB", StorageMediaKind.SolidState, isNetwork: false, preallocation: false, trim: false, removable: true);
@@ -49,7 +49,7 @@ public sealed class StorageIoProfileTests
     }
 
     [TestMethod]
-    public void ExactUsbSsdUsesQueueDepthTwoAndSixteenBlockRunAheadEvenWhenRemovable()
+    public void ExactUsbSsdExposesQueueDepthFourEvenWhenRemovable()
     {
         var fixedDevice = Device("USB", StorageMediaKind.SolidState, false, true, trim: true, removable: false);
         var removableDevice = Device("USB", StorageMediaKind.SolidState, false, true, trim: true, removable: true);
@@ -58,13 +58,13 @@ public sealed class StorageIoProfileTests
         {
             var profile = StorageIoProfile.For(device);
             Assert.AreEqual(StorageProfileKind.UsbSsd, profile.Kind);
-            Assert.AreEqual(2, profile.RecommendedQueueDepth);
+            Assert.AreEqual(4, profile.RecommendedQueueDepth);
             Assert.AreEqual(256L * 1024 * 1024, profile.DeviceBacklogTargetBytes);
         }
     }
 
     [TestMethod]
-    public void UncertainUsbSsdKeepsQueueDepthOneButGetsEightBlockRunAhead()
+    public void UncertainUsbSsdKeepsQueueDepthOne()
     {
         var uncertain = Device(
             "USB",
@@ -83,17 +83,17 @@ public sealed class StorageIoProfileTests
     }
 
     [TestMethod]
-    public void SataAndNvmeKeepQd2WithAggressiveIndependentBranchRunAhead()
+    public void SataAndNvmeExposeHigherPhysicalQueueDepthCapabilities()
     {
         var sata = StorageIoProfile.For(Device("SATA", StorageMediaKind.SolidState, false, true, trim: true));
         var nvme = StorageIoProfile.For(Device("NVMe", StorageMediaKind.SolidState, false, true, trim: true, alignmentOffset: 0));
 
         Assert.AreEqual(StorageProfileKind.SataSsd, sata.Kind);
-        Assert.AreEqual(2, sata.RecommendedQueueDepth);
+        Assert.AreEqual(8, sata.RecommendedQueueDepth);
         Assert.AreEqual(256L * 1024 * 1024, sata.DeviceBacklogTargetBytes);
 
         Assert.AreEqual(StorageProfileKind.Nvme, nvme.Kind);
-        Assert.AreEqual(2, nvme.RecommendedQueueDepth);
+        Assert.AreEqual(16, nvme.RecommendedQueueDepth);
         Assert.AreEqual(512L * 1024 * 1024, nvme.DeviceBacklogTargetBytes);
     }
 
