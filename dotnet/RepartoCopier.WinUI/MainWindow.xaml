@@ -215,7 +215,6 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
                         <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" />
-                        <CheckBox x:Name="VerifyCheck" Content="Verificar integridad" IsChecked="True" ToolTipService.ToolTip="Comprueba con BLAKE3 los archivos copiados al finalizar" />
                         <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
                     </StackPanel>
                     <Button x:Name="StartButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Height="44" MinWidth="152" CornerRadius="8" Click="Start_Click">
