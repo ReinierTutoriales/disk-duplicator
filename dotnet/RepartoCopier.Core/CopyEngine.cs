@@ -101,7 +101,7 @@ public static class CopyEngine
     // paying for a separate FlushFileBuffers call after the write.
     private const int WriteThroughFileThreshold = 4 * 1024 * 1024;
     private const long InitialBufferBudget = 512L * 1024 * 1024;
-    private const long BufferBudgetGrowthStep = 256L * 1024 * 1024;
+
     // This budget protects Begin/End-heavy trees. Payload data is independently
     // governed by AdaptiveByteBudget and per-device backlog/QD.
     private const int ControlBacklogCapacity = 64 * 1024;
@@ -2235,11 +2235,10 @@ public static class CopyEngine
             if (_usedBytes + bytes > safeCapacity || _targetBytes >= safeCapacity)
                 return false;
 
-            var requestedTarget = Math.Max(
-                _targetBytes > long.MaxValue - BufferBudgetGrowthStep
-                    ? long.MaxValue
-                    : _targetBytes + BufferBudgetGrowthStep,
-                _usedBytes + bytes);
+            var doubled = _targetBytes >= long.MaxValue / 2
+                ? long.MaxValue
+                : _targetBytes * 2;
+            var requestedTarget = Math.Max(doubled, _usedBytes + bytes);
             var next = Math.Min(requestedTarget, safeCapacity);
             if (next <= _targetBytes)
                 return false;
@@ -2253,18 +2252,8 @@ public static class CopyEngine
             return Math.Max(_usedBytes, capacity);
         }
 
-        private static long GetSystemSafeCapacity(long usedBytes)
-        {
-            var memory = GetMemoryStatus();
-            var available = checked((long)Math.Min(memory.ullAvailPhys, (ulong)long.MaxValue));
-            var total = checked((long)Math.Min(memory.ullTotalPhys, (ulong)long.MaxValue));
-            var reserve = Math.Max(2L * 1024 * 1024 * 1024, total / 4);
-            var additional = Math.Max(0L, available - reserve);
-            var safe = additional >= long.MaxValue - usedBytes ? long.MaxValue : usedBytes + additional;
-            // Even under memory pressure the engine must be able to make forward progress
-            // with one source block; this is a floor, never an upper throughput ceiling.
-            return Math.Max((long)BlockSize, safe);
-        }
+        private static long GetSystemSafeCapacity(long usedBytes) =>
+            MemoryPressureCapacity.GetSafeTotalBytes(usedBytes, BlockSize);
 
         private List<Waiter>? PumpWaitersLocked()
         {
@@ -2294,17 +2283,6 @@ public static class CopyEngine
                 waiter.Completion.TrySetResult();
         }
 
-        private static MemoryStatusEx GetMemoryStatus()
-        {
-            var status = new MemoryStatusEx
-            {
-                dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>(),
-            };
-            if (!GlobalMemoryStatusEx(ref status))
-                throw new IOException($"No se pudo consultar la memoria física de Windows: {Marshal.GetLastWin32Error()}.");
-            return status;
-        }
-
         private sealed class Waiter(int bytes)
         {
             public int Bytes { get; } = bytes;
@@ -2312,24 +2290,6 @@ public static class CopyEngine
             public bool Cancelled { get; set; }
             public bool Granted { get; set; }
         }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        private struct MemoryStatusEx
-        {
-            public uint dwLength;
-            public uint dwMemoryLoad;
-            public ulong ullTotalPhys;
-            public ulong ullAvailPhys;
-            public ulong ullTotalPageFile;
-            public ulong ullAvailPageFile;
-            public ulong ullTotalVirtual;
-            public ulong ullAvailVirtual;
-            public ulong ullAvailExtendedVirtual;
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx lpBuffer);
     }
 
     private sealed class DestinationWorker
