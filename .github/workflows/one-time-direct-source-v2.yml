@@ -1,0 +1,295 @@
+name: One-time direct source integration v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-direct-source-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Apply direct-source integration exactly
+        shell: pwsh
+        run: |
+          $nl = [Environment]::NewLine
+          function Replace-Once([string]$Text, [string]$Old, [string]$New, [string]$Label) {
+            $count = ([regex]::Matches($Text, [regex]::Escape($Old))).Count
+            if ($count -ne 1) { throw "Expected one match for $Label, found $count." }
+            return $Text.Replace($Old, $New)
+          }
+          function Replace-Between([string]$Text, [string]$Start, [string]$End, [string]$Replacement, [string]$Label) {
+            $startIndex = $Text.IndexOf($Start, [StringComparison]::Ordinal)
+            if ($startIndex -lt 0) { throw "Start marker not found for $Label." }
+            if ($Text.IndexOf($Start, $startIndex + $Start.Length, [StringComparison]::Ordinal) -ge 0) { throw "Start marker not unique for $Label." }
+            $endIndex = $Text.IndexOf($End, $startIndex, [StringComparison]::Ordinal)
+            if ($endIndex -lt 0) { throw "End marker not found for $Label." }
+            return $Text.Substring(0, $startIndex) + $Replacement + $nl + $nl + $Text.Substring($endIndex)
+          }
+
+          $enginePath = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $engine = [System.IO.File]::ReadAllText($enginePath)
+          $engine = Replace-Once $engine '? await ReadAndFanOutPrefetchedAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false)' '? await ReadAndFanOutPrefetchedAsync(entry, copy.SourceDevice, active, bufferBudget, job, pipeline).ConfigureAwait(false)' 'producer call'
+
+          $old = @('    private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(','        FileEntry entry,','        List<DestinationWorker> active,') -join $nl
+          $new = @('    private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(','        FileEntry entry,','        StorageDeviceInfo sourceDevice,','        List<DestinationWorker> active,') -join $nl
+          $engine = Replace-Once $engine $old $new 'prefetched signature'
+
+          $old = @('        var readTask = PrefetchSourceAsync(','            entry,','            ReadBufferSizeFor(entry.Size),') -join $nl
+          $new = @('        var readTask = PrefetchSourceAsync(','            entry,','            sourceDevice,','            ReadBufferSizeFor(entry.Size),') -join $nl
+          $engine = Replace-Once $engine $old $new 'prefetch call'
+
+          $old = @('    private static async Task<SourceReadResult> PrefetchSourceAsync(','        FileEntry entry,','        int readBufferSize,') -join $nl
+          $new = @('    private static async Task<SourceReadResult> PrefetchSourceAsync(','        FileEntry entry,','        StorageDeviceInfo sourceDevice,','        int readBufferSize,') -join $nl
+          $engine = Replace-Once $engine $old $new 'prefetch signature'
+
+          $old = @('        var readTask = ReadSourceAheadAsync(','            entry,','            readBufferSize,') -join $nl
+          $new = @('        var readTask = ReadSourceAheadAsync(','            entry,','            sourceDevice,','            readBufferSize,') -join $nl
+          $engine = Replace-Once $engine $old $new 'read-ahead call'
+
+          $readAhead = @(
+            '    private static async Task<long> ReadSourceAheadAsync(',
+            '        FileEntry entry,',
+            '        StorageDeviceInfo sourceDevice,',
+            '        int readBufferSize,',
+            '        ChannelWriter<SourceReadBlock> output,',
+            '        AdaptiveByteBudget bufferBudget,',
+            '        CopyJob job,',
+            '        PipelineGovernor pipeline,',
+            '        CancellationToken token)',
+            '    {',
+            '        Exception? completionError = null;',
+            '        DirectIoSourceReader.Session? direct = null;',
+            '        FileStream? buffered = null;',
+            '        try',
+            '        {',
+            '            if (!DirectIoSourceReader.TryOpen(entry.SourcePath, sourceDevice, readBufferSize, out direct))',
+            '                buffered = OpenSourceStream(entry.SourcePath);',
+            '',
+            '            long totalRead = 0;',
+            '            while (true)',
+            '            {',
+            '                token.ThrowIfCancellationRequested();',
+            '                await job.WaitIfPausedAsync(token).ConfigureAwait(false);',
+            '                await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);',
+            '                var slotOwned = true;',
+            '                var budgetOwned = false;',
+            '                SourceBufferLease? lease = null;',
+            '                try',
+            '                {',
+            '                    var budgetStarted = Stopwatch.GetTimestamp();',
+            '                    await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);',
+            '                    budgetOwned = true;',
+            '                    var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);',
+            '                    pipeline.RecordBudgetWait(budgetElapsed);',
+            '                    job.Telemetry.RecordBufferWait(budgetElapsed);',
+            '                    job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);',
+            '',
+            '                    lease = direct is null',
+            '                        ? SourceBufferLease.RentBuffered(readBufferSize)',
+            '                        : SourceBufferLease.RentAligned(readBufferSize, direct.Alignment);',
+            '',
+            '                    var readStarted = Stopwatch.GetTimestamp();',
+            '                    int read;',
+            '                    if (direct is not null)',
+            '                    {',
+            '                        try',
+            '                        {',
+            '                            read = direct.Read(lease, readBufferSize);',
+            '                            job.Telemetry.RecordDirectSourceRead(read);',
+            '                        }',
+            '                        catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))',
+            '                        {',
+            '                            lease.Dispose();',
+            '                            lease = null;',
+            '                            direct.Dispose();',
+            '                            direct = null;',
+            '                            job.Telemetry.RecordDirectSourceFallback();',
+            '                            buffered = OpenSourceStream(entry.SourcePath);',
+            '                            buffered.Position = totalRead;',
+            '                            lease = SourceBufferLease.RentBuffered(readBufferSize);',
+            '                            read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);',
+            '                        }',
+            '                    }',
+            '                    else',
+            '                    {',
+            '                        read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);',
+            '                    }',
+            '',
+            '                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);',
+            '                    pipeline.RecordSourceRead(readElapsed);',
+            '                    job.Telemetry.RecordSourceRead(read, readElapsed);',
+            '                    if (read == 0)',
+            '                    {',
+            '                        lease.Dispose();',
+            '                        lease = null;',
+            '                        bufferBudget.Release(readBufferSize);',
+            '                        budgetOwned = false;',
+            '                        pipeline.ReleasePrefetchSlot();',
+            '                        slotOwned = false;',
+            '                        break;',
+            '                    }',
+            '',
+            '                    totalRead += read;',
+            '                    var block = new SourceReadBlock(lease, read, readBufferSize, bufferBudget);',
+            '                    lease = null;',
+            '                    budgetOwned = false;',
+            '                    await output.WriteAsync(block, token).ConfigureAwait(false);',
+            '                    slotOwned = false;',
+            '                }',
+            '                catch',
+            '                {',
+            '                    lease?.Dispose();',
+            '                    if (budgetOwned)',
+            '                        bufferBudget.Release(readBufferSize);',
+            '                    if (slotOwned)',
+            '                        pipeline.ReleasePrefetchSlot();',
+            '                    throw;',
+            '                }',
+            '            }',
+            '            return totalRead;',
+            '        }',
+            '        catch (Exception ex)',
+            '        {',
+            '            completionError = ex;',
+            '            throw;',
+            '        }',
+            '        finally',
+            '        {',
+            '            direct?.Dispose();',
+            '            if (buffered is not null)',
+            '                await buffered.DisposeAsync().ConfigureAwait(false);',
+            '            output.TryComplete(completionError);',
+            '        }',
+            '    }'
+          ) -join $nl
+          $engine = Replace-Between $engine '    private static async Task<long> ReadSourceAheadAsync(' '    private static FileStream OpenSourceStream' $readAhead 'read-ahead method'
+
+          $sourceBlock = @(
+            '    private sealed class SourceReadBlock',
+            '    {',
+            '        private SourceBufferLease? _buffer;',
+            '        private readonly int _reservedBytes;',
+            '        private readonly AdaptiveByteBudget _budget;',
+            '',
+            '        public SourceReadBlock(SourceBufferLease buffer, int length, int reservedBytes, AdaptiveByteBudget budget)',
+            '        {',
+            '            _buffer = buffer;',
+            '            Length = length;',
+            '            _reservedBytes = reservedBytes;',
+            '            _budget = budget;',
+            '        }',
+            '',
+            '        public int Length { get; }',
+            '        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SourceReadBlock))).Memory[..Length];',
+            '',
+            '        public SharedBlock TransferToShared(int references)',
+            '        {',
+            '            if (references <= 0)',
+            '                throw new ArgumentOutOfRangeException(nameof(references));',
+            '            var buffer = Interlocked.Exchange(ref _buffer, null)',
+            '                ?? throw new ObjectDisposedException(nameof(SourceReadBlock));',
+            '            return new SharedBlock(buffer, Length, _reservedBytes, references, _budget);',
+            '        }',
+            '',
+            '        public void Release()',
+            '        {',
+            '            var buffer = Interlocked.Exchange(ref _buffer, null);',
+            '            if (buffer is null)',
+            '                return;',
+            '            buffer.Dispose();',
+            '            _budget.Release(_reservedBytes);',
+            '        }',
+            '    }'
+          ) -join $nl
+          $engine = Replace-Between $engine '    private sealed class SourceReadBlock' '    private abstract record FanoutMessage;' $sourceBlock 'source block'
+
+          $sharedBlock = @(
+            '    internal sealed class SharedBlock',
+            '    {',
+            '        private SourceBufferLease? _buffer;',
+            '        private int _references;',
+            '        private readonly int _reservedBytes;',
+            '        private readonly AdaptiveByteBudget _budget;',
+            '',
+            '        public SharedBlock(byte[] buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)',
+            '            : this(SourceBufferLease.OwnPooled(buffer, reservedBytes), length, reservedBytes, references, budget)',
+            '        {',
+            '        }',
+            '',
+            '        internal SharedBlock(SourceBufferLease buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)',
+            '        {',
+            '            _buffer = buffer;',
+            '            Length = length;',
+            '            _reservedBytes = reservedBytes;',
+            '            _references = references;',
+            '            _budget = budget;',
+            '        }',
+            '',
+            '        public int Length { get; }',
+            '        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];',
+            '',
+            '        public void Release()',
+            '        {',
+            '            var remaining = Interlocked.Decrement(ref _references);',
+            '            if (remaining > 0)',
+            '                return;',
+            '            if (remaining < 0)',
+            '                throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");',
+            '            var buffer = Interlocked.Exchange(ref _buffer, null)',
+            '                ?? throw new InvalidOperationException("SharedBlock perdió su buffer antes de la última liberación.");',
+            '            buffer.Dispose();',
+            '            _budget.Release(_reservedBytes);',
+            '        }',
+            '    }'
+          ) -join $nl
+          $engine = Replace-Between $engine '    internal sealed class SharedBlock' '    internal sealed class PipelineGovernor' $sharedBlock 'shared block'
+          [System.IO.File]::WriteAllText($enginePath, $engine, [System.Text.UTF8Encoding]::new($false))
+
+          $telemetryPath = 'dotnet/RepartoCopier.Core/CopyTelemetry.cs'
+          $telemetry = [System.IO.File]::ReadAllText($telemetryPath)
+          $telemetry = Replace-Once $telemetry '    public WritePolicyDiagnosticsSnapshot BufferedPolicy { get; init; } = EmptyWritePolicy;' ('    public WritePolicyDiagnosticsSnapshot BufferedPolicy { get; init; } = EmptyWritePolicy;' + $nl + '    public long DirectSourceReadBytes { get; init; }' + $nl + '    public long DirectSourceReadOperations { get; init; }' + $nl + '    public int DirectSourceFallbacks { get; init; }') 'diagnostic properties'
+          $telemetry = Replace-Once $telemetry '    private long _sourceReadBytes, _sourceReadTicks;' ('    private long _sourceReadBytes, _sourceReadTicks;' + $nl + '    private long _directSourceReadBytes, _directSourceReadOperations;' + $nl + '    private int _directSourceFallbacks;') 'telemetry fields'
+          $telemetry = Replace-Once $telemetry '    internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }' ('    internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }' + $nl + '    internal void RecordDirectSourceRead(int bytes) { AddBytes(ref _directSourceReadBytes, bytes); Interlocked.Increment(ref _directSourceReadOperations); }' + $nl + '    internal void RecordDirectSourceFallback() => Interlocked.Increment(ref _directSourceFallbacks);') 'telemetry methods'
+          $telemetry = Replace-Once $telemetry '            BufferedPolicy = buffered,' ('            BufferedPolicy = buffered,' + $nl + '            DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),' + $nl + '            DirectSourceReadOperations = Interlocked.Read(ref _directSourceReadOperations),' + $nl + '            DirectSourceFallbacks = Volatile.Read(ref _directSourceFallbacks),') 'snapshot telemetry'
+          [System.IO.File]::WriteAllText($telemetryPath, $telemetry, [System.Text.UTF8Encoding]::new($false))
+
+          $expected = @($enginePath, $telemetryPath) | Sort-Object
+          $changed = @(git diff --name-only | Sort-Object)
+          if (($changed -join '|') -ne ($expected -join '|')) { throw "Unexpected changed files: $($changed -join ', ')" }
+          git diff --check
+          git diff -- $enginePath $telemetryPath
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Commit direct-source integration
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dotnet/RepartoCopier.Core/CopyEngine.cs dotnet/RepartoCopier.Core/CopyTelemetry.cs
+          git commit -m 'perf(core): use aligned unbuffered reads for fast local SSD sources'
+          git push origin HEAD:main
