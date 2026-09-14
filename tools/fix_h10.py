@@ -88,22 +88,27 @@ reader_path.write_text(reader, encoding="utf-8", newline="\n")
 
 engine_path = Path("dotnet/RepartoCopier.Core/CopyEngine.cs")
 engine = engine_path.read_text(encoding="utf-8")
+old_open = '''        Exception? completionError = null;
+        DirectIoSourceReader.Session? direct = null;
+        FileStream? buffered = null;
+        try
+        {
+            if (!DirectIoSourceReader.TryOpen(entry.SourcePath, sourceDevice, readBufferSize, out direct))
+                buffered = OpenSourceStream(entry.SourcePath);
+'''
+new_open = '''        Exception? completionError = null;
+        DirectIoSourceReader.OverlappedSession? direct = null;
+        FileStream? buffered = null;
+        try
+        {
+            if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
+                buffered = OpenSourceStream(entry.SourcePath);
+'''
+engine = replace_exact(engine, old_open, new_open, 1, "source overlapped open")
 engine = replace_exact(
     engine,
-    "        DirectIoSourceReader.Session? direct = null;\n",
-    "        DirectIoSourceReader.OverlappedSession? direct = null;\n",
-    1,
-    "source direct session type")
-engine = replace_exact(
-    engine,
-    "            if (!DirectIoSourceReader.TryOpen(entry.SourcePath, sourceDevice, readBufferSize, out direct))\n",
-    "            if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))\n",
-    1,
-    "source overlapped open")
-engine = replace_exact(
-    engine,
-    "                            read = direct.Read(lease, readBufferSize);\n",
-    "                            read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);\n",
+    "                            read = direct.Read(lease, readBufferSize);\n                            job.Telemetry.RecordDirectSourceRead(read);\n",
+    "                            read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);\n                            job.Telemetry.RecordDirectSourceRead(read);\n",
     1,
     "source async direct read")
 engine_path.write_text(engine, encoding="utf-8", newline="\n")
