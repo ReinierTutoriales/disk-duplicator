@@ -4,9 +4,9 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Issues one destination payload as independent explicit-offset writes.
-/// Every physical sub-write acquires exactly one scheduler slot immediately
-/// before I/O and releases it immediately after completion. No batch reserves
-/// idle slots while waiting for the rest of a QD group.
+/// Every physical sub-write acquires exactly one adaptive scheduler lease
+/// immediately before I/O and releases it immediately after completion.
+/// Requested depth is an exploration width, not a hardware-class cap.
 /// </summary>
 internal static class DestinationWriteCoordinator
 {
@@ -35,7 +35,6 @@ internal static class DestinationWriteCoordinator
         var minimumAlignedSlice = AlignUp(minimumSliceBytes, requiredAlignment);
         var maximumUsefulDepth = Math.Max(1, data.Length / minimumAlignedSlice);
         var depth = Math.Min(requestedDepth, maximumUsefulDepth);
-        depth = Math.Min(depth, scheduler.MaxOutstandingIo);
         if (depth <= 1)
         {
             await WriteSliceAsync(handle, data, baseOffset, scheduler, token).ConfigureAwait(false);
@@ -71,7 +70,7 @@ internal static class DestinationWriteCoordinator
         DeviceScheduler scheduler,
         CancellationToken token)
     {
-        using var io = await scheduler.AcquireIoAsync(token).ConfigureAwait(false);
+        using var io = await scheduler.AcquireIoAsync(data.Length, token).ConfigureAwait(false);
         await ExplicitOffsetWriter.WriteOneAsync(handle, data, offset, token).ConfigureAwait(false);
     }
 
