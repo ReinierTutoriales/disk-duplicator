@@ -58,16 +58,43 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
-    public void Qd2SchedulerCannotReintroducePartialSemaphoreAcquisition()
+    public void FixedQd2WriterArchitectureStaysRemoved()
     {
-        var fields = typeof(DeviceScheduler)
-            .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(field => field.Name)
+        var schedulerMethods = typeof(DeviceScheduler)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
             .ToArray();
+        CollectionAssert.DoesNotContain(schedulerMethods, "AcquireIoPairAsync");
+        CollectionAssert.DoesNotContain(schedulerMethods, "AcquireIoSlotsAsync");
 
-        CollectionAssert.DoesNotContain(fields, "_pairGate");
-        CollectionAssert.DoesNotContain(fields, "_ioSlots");
-        CollectionAssert.Contains(fields, "_ioWaiters");
-        CollectionAssert.Contains(fields, "_availableIo");
+        var schedulerNested = typeof(DeviceScheduler)
+            .GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(type => type.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(schedulerNested, "IoPairLease");
+
+        var writerMethods = typeof(ExplicitOffsetWriter)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(writerMethods, "WriteTwoAsync");
+
+        var engineMethods = typeof(CopyEngine)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(engineMethods, "WriteQueueDepthTwoAsync");
+
+        var policyMethods = typeof(StorageWritePolicy)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(policyMethods, "BufferedLargeWriteQueueDepth");
+        CollectionAssert.Contains(policyMethods, "LargeWriteQueueDepth");
+
+        var coordinator = typeof(DestinationWriteCoordinator).GetMethod(
+            "WriteAsync",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.IsNotNull(coordinator);
     }
 }
