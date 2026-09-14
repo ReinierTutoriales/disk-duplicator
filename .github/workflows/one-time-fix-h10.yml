@@ -23,7 +23,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Apply H-10 fix
+      - name: Apply corrected H-10 fix
         run: python tools/fix_h10.py
 
       - name: Restore core tests
