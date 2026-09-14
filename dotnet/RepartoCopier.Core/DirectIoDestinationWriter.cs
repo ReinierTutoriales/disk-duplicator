@@ -82,8 +82,6 @@ internal static class DirectIoDestinationWriter
             long fileOffset,
             long logicalFileLength,
             bool payloadIsAligned,
-            int requestedDepth,
-            int minimumSliceBytes,
             DeviceScheduler scheduler,
             CancellationToken token)
         {
@@ -107,8 +105,6 @@ internal static class DirectIoDestinationWriter
                         handle,
                         data[..alignedLength],
                         fileOffset,
-                        requestedDepth,
-                        minimumSliceBytes,
                         scheduler,
                         token,
                         Alignment).ConfigureAwait(false);
@@ -127,8 +123,6 @@ internal static class DirectIoDestinationWriter
                         handle,
                         tail.Memory,
                         checked(fileOffset + alignedLength),
-                        1,
-                        minimumSliceBytes,
                         scheduler,
                         token,
                         Alignment).ConfigureAwait(false);
@@ -192,3 +186,4 @@ internal static class DirectIoDestinationWriter
             IntPtr templateFile);
     }
 }
+

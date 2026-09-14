@@ -45,11 +45,11 @@ public sealed class ProductionFastPathTests
     }
 
     [TestMethod]
-    public async Task LargeSharedBlocksPreserveLogicalFanOutWhileAllowingVariablePhysicalWriteDepth()
+    public async Task LargeSharedBlocksRemainSinglePhysicalWritesPerDestination()
     {
         using var temp = new TempDirectory();
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
-        var payload = new byte[20 * 1024 * 1024 + 733];
+        var payload = new byte[20 * 1024 * 1024];
         new Random(20260913).NextBytes(payload);
         await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), payload);
 
@@ -64,7 +64,7 @@ public sealed class ProductionFastPathTests
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
         Assert.AreEqual(payload.LongLength * destinations.Length, metrics.WrittenBytes);
-        Assert.IsGreaterThanOrEqualTo((long)destinations.Length, metrics.WriteOperations);
+        Assert.AreEqual((long)destinations.Length, metrics.WriteOperations, "Un bloque FAN-OUT alineado menor de 32 MiB debe permanecer como una sola escritura física por destino.");
 
         var expected = SHA256.HashData(payload);
         foreach (var destination in destinations)
@@ -119,3 +119,4 @@ public sealed class ProductionFastPathTests
         }
     }
 }
+

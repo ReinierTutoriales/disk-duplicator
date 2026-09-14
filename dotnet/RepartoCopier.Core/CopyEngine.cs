@@ -1195,10 +1195,6 @@ public static class CopyEngine
                     return PendingWriteResult.NeedsBufferedRetry(block, offset, alignmentError);
                 }
 
-                var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
-                    worker.Device,
-                    worker.DeviceScheduler.ExplorationQueueDepth,
-                    data.Length);
                 var started = Stopwatch.GetTimestamp();
                 int operations;
                 try
@@ -1208,8 +1204,6 @@ public static class CopyEngine
                         offset,
                         current.Entry.Size,
                         payloadIsAligned: true,
-                        queueDepth,
-                        StorageWritePolicy.MinimumParallelSliceBytes,
                         worker.DeviceScheduler,
                         job.Token).ConfigureAwait(false);
                 }
@@ -1243,17 +1237,11 @@ public static class CopyEngine
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 var stream = current.Stream ?? throw new IOException($"No existe handle buffered para {current.Entry.RelativePath}.");
-                var queueDepth = StorageWritePolicy.LargeWriteQueueDepth(
-                    worker.Device,
-                    worker.DeviceScheduler.ExplorationQueueDepth,
-                    data.Length);
                 var started = Stopwatch.GetTimestamp();
                 var operations = await DestinationWriteCoordinator.WriteAsync(
                     stream.SafeFileHandle,
                     data,
                     offset,
-                    queueDepth,
-                    StorageWritePolicy.MinimumParallelSliceBytes,
                     worker.DeviceScheduler,
                     job.Token).ConfigureAwait(false);
 
@@ -2623,3 +2611,4 @@ public static class CopyEngine
         public void ClearDirectFallbackRequest() => Interlocked.Exchange(ref _directFallbackRequested, 0);
     }
 }
+
