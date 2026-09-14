@@ -1,13 +1,29 @@
 using System.Buffers.Binary;
+using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
 namespace RepartoCopier.Core;
 
 internal static class FastCrc32
 {
-    private const uint Polynomial = 0xEDB88320u;
+    // Reflected CRC-32C/Castagnoli polynomial. The checksum is internal to a
+    // single copy/verify execution; it is not part of recovery or any persisted format.
+    private const uint Polynomial = 0x82F63B78u;
     private static readonly uint[][] Tables = BuildTables();
 
+    internal static bool IsHardwareAccelerated =>
+        Sse42.IsSupported || Crc32.IsSupported;
+
     internal static uint Compute(ReadOnlySpan<byte> data)
+    {
+        if (Sse42.IsSupported)
+            return ComputeSse42(data);
+        if (Crc32.IsSupported)
+            return ComputeArm(data);
+        return ComputeSoftware(data);
+    }
+
+    internal static uint ComputeSoftware(ReadOnlySpan<byte> data)
     {
         var crc = 0xFFFFFFFFu;
         var offset = 0;
@@ -29,6 +45,77 @@ internal static class FastCrc32
 
         for (; offset < data.Length; offset++)
             crc = Tables[0][(byte)(crc ^ data[offset])] ^ (crc >> 8);
+
+        return ~crc;
+    }
+
+    internal static uint ComputeHardware(ReadOnlySpan<byte> data)
+    {
+        if (Sse42.IsSupported)
+            return ComputeSse42(data);
+        if (Crc32.IsSupported)
+            return ComputeArm(data);
+        throw new PlatformNotSupportedException("CRC32C hardware acceleration is not available on this CPU.");
+    }
+
+    private static uint ComputeSse42(ReadOnlySpan<byte> data)
+    {
+        var crc = 0xFFFFFFFFu;
+        var offset = 0;
+
+        if (Sse42.X64.IsSupported)
+        {
+            ulong crc64 = crc;
+            while (offset + sizeof(ulong) <= data.Length)
+            {
+                crc64 = Sse42.X64.Crc32(
+                    crc64,
+                    BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(offset, sizeof(ulong))));
+                offset += sizeof(ulong);
+            }
+            crc = (uint)crc64;
+        }
+
+        while (offset + sizeof(uint) <= data.Length)
+        {
+            crc = Sse42.Crc32(
+                crc,
+                BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset, sizeof(uint))));
+            offset += sizeof(uint);
+        }
+
+        while (offset < data.Length)
+            crc = Sse42.Crc32(crc, data[offset++]);
+
+        return ~crc;
+    }
+
+    private static uint ComputeArm(ReadOnlySpan<byte> data)
+    {
+        var crc = 0xFFFFFFFFu;
+        var offset = 0;
+
+        if (Crc32.Arm64.IsSupported)
+        {
+            while (offset + sizeof(ulong) <= data.Length)
+            {
+                crc = Crc32.Arm64.ComputeCrc32C(
+                    crc,
+                    BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(offset, sizeof(ulong))));
+                offset += sizeof(ulong);
+            }
+        }
+
+        while (offset + sizeof(uint) <= data.Length)
+        {
+            crc = Crc32.ComputeCrc32C(
+                crc,
+                BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset, sizeof(uint))));
+            offset += sizeof(uint);
+        }
+
+        while (offset < data.Length)
+            crc = Crc32.ComputeCrc32C(crc, data[offset++]);
 
         return ~crc;
     }
