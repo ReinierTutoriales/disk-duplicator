@@ -401,7 +401,7 @@ public static class CopyEngine
                 await DeliverAsync(active, new BeginMessage(entry), countsData: false, job).ConfigureAwait(false);
 
                 var sourceResult = entry.Size >= SourcePrefetchThreshold
-                    ? await ReadAndFanOutPrefetchedAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false)
+                    ? await ReadAndFanOutPrefetchedAsync(entry, copy.SourceDevice, active, bufferBudget, job, pipeline).ConfigureAwait(false)
                     : await ReadAndFanOutSequentialAsync(entry, active, bufferBudget, job, pipeline).ConfigureAwait(false);
                 if (sourceResult is null)
                     continue;
@@ -503,6 +503,7 @@ public static class CopyEngine
 
     private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
         FileEntry entry,
+        StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
@@ -517,6 +518,7 @@ public static class CopyEngine
         });
         var readTask = PrefetchSourceAsync(
             entry,
+            sourceDevice,
             ReadBufferSizeFor(entry.Size),
             sourceQueue.Writer,
             bufferBudget,
@@ -597,6 +599,7 @@ public static class CopyEngine
 
     private static async Task<SourceReadResult> PrefetchSourceAsync(
         FileEntry entry,
+        StorageDeviceInfo sourceDevice,
         int readBufferSize,
         ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
@@ -614,6 +617,7 @@ public static class CopyEngine
         });
         var readTask = ReadSourceAheadAsync(
             entry,
+            sourceDevice,
             readBufferSize,
             hashQueue.Writer,
             bufferBudget,
@@ -670,6 +674,7 @@ public static class CopyEngine
 
     private static async Task<long> ReadSourceAheadAsync(
         FileEntry entry,
+        StorageDeviceInfo sourceDevice,
         int readBufferSize,
         ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
@@ -678,9 +683,13 @@ public static class CopyEngine
         CancellationToken token)
     {
         Exception? completionError = null;
+        DirectIoSourceReader.Session? direct = null;
+        FileStream? buffered = null;
         try
         {
-            await using var source = OpenSourceStream(entry.SourcePath);
+            if (!DirectIoSourceReader.TryOpen(entry.SourcePath, sourceDevice, readBufferSize, out direct))
+                buffered = OpenSourceStream(entry.SourcePath);
+
             long totalRead = 0;
             while (true)
             {
@@ -689,7 +698,7 @@ public static class CopyEngine
                 await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
                 var slotOwned = true;
                 var budgetOwned = false;
-                byte[]? rented = null;
+                SourceBufferLease? lease = null;
                 try
                 {
                     var budgetStarted = Stopwatch.GetTimestamp();
@@ -700,17 +709,44 @@ public static class CopyEngine
                     job.Telemetry.RecordBufferWait(budgetElapsed);
                     job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
 
-                    rented = ArrayPool<byte>.Shared.Rent(readBufferSize);
+                    lease = direct is null
+                        ? SourceBufferLease.RentBuffered(readBufferSize)
+                        : SourceBufferLease.RentAligned(readBufferSize, direct.Alignment);
+
                     var readStarted = Stopwatch.GetTimestamp();
-                    var read = await source.ReadAsync(rented.AsMemory(0, readBufferSize), token).ConfigureAwait(false);
+                    int read;
+                    if (direct is not null)
+                    {
+                        try
+                        {
+                            read = direct.Read(lease, readBufferSize);
+                            job.Telemetry.RecordDirectSourceRead(read);
+                        }
+                        catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                        {
+                            lease.Dispose();
+                            lease = null;
+                            direct.Dispose();
+                            direct = null;
+                            job.Telemetry.RecordDirectSourceFallback();
+                            buffered = OpenSourceStream(entry.SourcePath);
+                            buffered.Position = totalRead;
+                            lease = SourceBufferLease.RentBuffered(readBufferSize);
+                            read = await buffered.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                        }
+                    }
+                    else
+                    {
+                        read = await buffered!.ReadAsync(lease.Memory, token).ConfigureAwait(false);
+                    }
+
                     var readElapsed = Stopwatch.GetElapsedTime(readStarted);
                     pipeline.RecordSourceRead(readElapsed);
                     job.Telemetry.RecordSourceRead(read, readElapsed);
-
                     if (read == 0)
                     {
-                        ArrayPool<byte>.Shared.Return(rented);
-                        rented = null;
+                        lease.Dispose();
+                        lease = null;
                         bufferBudget.Release(readBufferSize);
                         budgetOwned = false;
                         pipeline.ReleasePrefetchSlot();
@@ -719,16 +755,15 @@ public static class CopyEngine
                     }
 
                     totalRead += read;
-                    var block = new SourceReadBlock(rented, read, readBufferSize, bufferBudget);
-                    rented = null;
+                    var block = new SourceReadBlock(lease, read, readBufferSize, bufferBudget);
+                    lease = null;
                     budgetOwned = false;
                     await output.WriteAsync(block, token).ConfigureAwait(false);
                     slotOwned = false;
                 }
                 catch
                 {
-                    if (rented is not null)
-                        ArrayPool<byte>.Shared.Return(rented);
+                    lease?.Dispose();
                     if (budgetOwned)
                         bufferBudget.Release(readBufferSize);
                     if (slotOwned)
@@ -745,6 +780,9 @@ public static class CopyEngine
         }
         finally
         {
+            direct?.Dispose();
+            if (buffered is not null)
+                await buffered.DisposeAsync().ConfigureAwait(false);
             output.TryComplete(completionError);
         }
     }
@@ -1542,11 +1580,11 @@ public static class CopyEngine
 
     private sealed class SourceReadBlock
     {
-        private byte[]? _buffer;
+        private SourceBufferLease? _buffer;
         private readonly int _reservedBytes;
         private readonly AdaptiveByteBudget _budget;
 
-        public SourceReadBlock(byte[] buffer, int length, int reservedBytes, AdaptiveByteBudget budget)
+        public SourceReadBlock(SourceBufferLease buffer, int length, int reservedBytes, AdaptiveByteBudget budget)
         {
             _buffer = buffer;
             Length = length;
@@ -1555,7 +1593,7 @@ public static class CopyEngine
         }
 
         public int Length { get; }
-        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SourceReadBlock))).AsMemory(0, Length);
+        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SourceReadBlock))).Memory[..Length];
 
         public SharedBlock TransferToShared(int references)
         {
@@ -1571,7 +1609,7 @@ public static class CopyEngine
             var buffer = Interlocked.Exchange(ref _buffer, null);
             if (buffer is null)
                 return;
-            ArrayPool<byte>.Shared.Return(buffer);
+            buffer.Dispose();
             _budget.Release(_reservedBytes);
         }
     }
@@ -1583,12 +1621,17 @@ public static class CopyEngine
 
     internal sealed class SharedBlock
     {
-        private byte[]? _buffer;
+        private SourceBufferLease? _buffer;
         private int _references;
         private readonly int _reservedBytes;
         private readonly AdaptiveByteBudget _budget;
 
         public SharedBlock(byte[] buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
+            : this(SourceBufferLease.OwnPooled(buffer, reservedBytes), length, reservedBytes, references, budget)
+        {
+        }
+
+        internal SharedBlock(SourceBufferLease buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
         {
             _buffer = buffer;
             Length = length;
@@ -1598,7 +1641,7 @@ public static class CopyEngine
         }
 
         public int Length { get; }
-        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).AsMemory(0, Length);
+        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
 
         public void Release()
         {
@@ -1607,10 +1650,9 @@ public static class CopyEngine
                 return;
             if (remaining < 0)
                 throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
-
             var buffer = Interlocked.Exchange(ref _buffer, null)
                 ?? throw new InvalidOperationException("SharedBlock perdió su buffer antes de la última liberación.");
-            ArrayPool<byte>.Shared.Return(buffer);
+            buffer.Dispose();
             _budget.Release(_reservedBytes);
         }
     }

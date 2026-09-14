@@ -73,6 +73,9 @@ public sealed record CopyDiagnosticsSnapshot(
     public PipelineGovernorSnapshot? PipelineGovernor { get; init; }
     public WritePolicyDiagnosticsSnapshot WriteThroughPolicy { get; init; } = EmptyWritePolicy;
     public WritePolicyDiagnosticsSnapshot BufferedPolicy { get; init; } = EmptyWritePolicy;
+    public long DirectSourceReadBytes { get; init; }
+    public long DirectSourceReadOperations { get; init; }
+    public int DirectSourceFallbacks { get; init; }
 
     private static WritePolicyDiagnosticsSnapshot EmptyWritePolicy =>
         new(0, 0, TimeSpan.Zero, 0, TimeSpan.Zero, 0, TimeSpan.Zero);
@@ -89,6 +92,8 @@ internal sealed class CopyTelemetry
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
     private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
+    private long _directSourceReadBytes, _directSourceReadOperations;
+    private int _directSourceFallbacks;
     private long _sourceHashBytes, _sourceHashTicks;
     private long _bufferWaitTicks, _fanoutWaitTicks, _queueWaitTicks, _controlBacklogWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
@@ -117,6 +122,8 @@ internal sealed class CopyTelemetry
     }
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
+    internal void RecordDirectSourceRead(int bytes) { AddBytes(ref _directSourceReadBytes, bytes); Interlocked.Increment(ref _directSourceReadOperations); }
+    internal void RecordDirectSourceFallback() => Interlocked.Increment(ref _directSourceFallbacks);
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
     internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
@@ -265,6 +272,9 @@ internal sealed class CopyTelemetry
             PipelineGovernor = pipeline,
             WriteThroughPolicy = writeThrough,
             BufferedPolicy = buffered,
+            DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),
+            DirectSourceReadOperations = Interlocked.Read(ref _directSourceReadOperations),
+            DirectSourceFallbacks = Volatile.Read(ref _directSourceFallbacks),
         };
     }
 
