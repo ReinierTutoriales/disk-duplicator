@@ -17,4 +17,4 @@ jobs:
           fetch-depth: 1
       - name: Specialize FAN-OUT data delivery
         shell: pwsh
-        run: ./tools/patch-fanout-data-fastpath.ps1
+        run: ./tools/patch-fanout-data-fastpath-v2.ps1
