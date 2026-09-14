@@ -20,6 +20,25 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Static unification scan
         run: python tools/audit_unification.py
+      - name: Trace suspicious symbols exactly
+        shell: pwsh
+        run: |
+          $symbols = @(
+            'StorageDeviceProfile',
+            'SessionStore',
+            'WithDefaultExtension',
+            'NoteQueuedBytes',
+            'NoteDequeuedBytes',
+            'AppendDurable',
+            'ClearCacheForTests',
+            'DiagnosticsSnapshot'
+          )
+          foreach ($symbol in $symbols) {
+            Write-Host "=== $symbol ==="
+            Get-ChildItem dotnet -Recurse -Filter *.cs | Select-String -Pattern "\b$symbol\b" | ForEach-Object {
+              Write-Host ("{0}:{1}: {2}" -f $_.Path.Substring($pwd.Path.Length + 1), $_.LineNumber, $_.Line.Trim())
+            }
+          }
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
       - name: Test core Release
