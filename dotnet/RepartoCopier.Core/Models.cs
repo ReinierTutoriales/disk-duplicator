@@ -37,6 +37,9 @@ public sealed record DestinationSnapshot(
     int QueueDepth,
     ulong Retries)
 {
+    public double SustainedWrite5sBytesPerSecond { get; init; }
+    public double SustainedWrite10sBytesPerSecond { get; init; }
+
     public DestinationSnapshot(
         string label,
         ulong written,
@@ -87,6 +90,7 @@ internal sealed class DestinationProgress
     private long _writeLastEventTick = Stopwatch.GetTimestamp();
     private ulong _writeSampleBytes;
     private double _writeEwma;
+    private readonly SlidingByteRateWindow _sustainedWriteRate = new();
     private ulong _verifiedBytes;
     private ulong _verifyBytesTotal;
     private ulong _verifyFilesDone;
@@ -142,7 +146,9 @@ internal sealed class DestinationProgress
         lock (_gate)
         {
             Written += (ulong)bytes;
-            RecordWriteSampleLocked((ulong)bytes, Stopwatch.GetTimestamp());
+            var now = Stopwatch.GetTimestamp();
+            RecordWriteSampleLocked((ulong)bytes, now);
+            _sustainedWriteRate.Record(bytes, now);
         }
     }
 
@@ -207,6 +213,7 @@ internal sealed class DestinationProgress
         lock (_gate)
         {
             var displayedBps = DisplayedWriteBpsLocked(nowTick);
+            var sustained = _sustainedWriteRate.Snapshot(nowTick);
             return new DestinationSnapshot(
                 Label,
                 Written,
@@ -225,9 +232,19 @@ internal sealed class DestinationProgress
                 Error,
                 LastFile,
                 QueueDepth,
-                Retries);
+                Retries)
+            {
+                SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
+                SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
+            };
         }
     }
+
+    internal SlidingByteRateSnapshot SustainedWriteRateSnapshot() =>
+        _sustainedWriteRate.Snapshot();
+
+    internal SlidingByteRateSnapshot SustainedWriteRateSnapshot(long nowTick) =>
+        _sustainedWriteRate.Snapshot(nowTick);
 
     private void RecordWriteSampleLocked(ulong bytes, long nowTick)
     {
