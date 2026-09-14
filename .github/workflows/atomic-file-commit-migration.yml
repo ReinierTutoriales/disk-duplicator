@@ -1,0 +1,20 @@
+name: Atomic file commit migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/atomic-file-commit-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Migrate file commit path
+        shell: pwsh
+        run: ./tools/patch-atomic-file-commit.ps1
