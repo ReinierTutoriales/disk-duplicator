@@ -15,6 +15,6 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 1
-      - name: Coordinate shared source and destination I/O
+      - name: Coordinate shared source and destination physical I/O
         shell: pwsh
         run: ./tools/patch-shared-physical-io.ps1
