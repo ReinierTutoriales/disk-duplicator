@@ -11,6 +11,7 @@ internal static class DirectIoSourceReader
     private const uint OpenExisting = 3;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
+    private const uint FileFlagOverlapped = 0x40000000;
 
     internal static bool IsEligible(StorageDeviceInfo device, int transferSize) =>
         IsEligibleCore(device, transferSize, solidStateOnly: true);
@@ -90,6 +91,34 @@ internal static class DirectIoSourceReader
         return true;
     }
 
+    internal static bool TryOpenOverlappedForVerification(
+        string path,
+        StorageDeviceInfo device,
+        int transferSize,
+        out OverlappedSession? session)
+    {
+        session = null;
+        if (!IsVerificationEligible(device, transferSize))
+            return false;
+
+        var handle = NativeMethods.CreateFileW(
+            path,
+            GenericRead,
+            FileShare.Read,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            handle.Dispose();
+            return false;
+        }
+
+        session = new OverlappedSession(handle, RequiredAlignment(device));
+        return true;
+    }
+
     internal static bool IsFallbackable(Exception error) =>
         error is DirectIoReadException direct && direct.NativeErrorCode is
             1 or   // ERROR_INVALID_FUNCTION
@@ -132,6 +161,47 @@ internal static class DirectIoSourceReader
         {
             Interlocked.Exchange(ref _handle, null)?.Dispose();
         }
+    }
+
+    internal sealed class OverlappedSession : IDisposable
+    {
+        private SafeFileHandle? _handle;
+
+        internal OverlappedSession(SafeFileHandle handle, int alignment)
+        {
+            _handle = handle;
+            Alignment = alignment;
+        }
+
+        internal int Alignment { get; }
+
+        internal async Task<int> ReadAsync(
+            SourceBufferLease buffer,
+            int bytesToRead,
+            long fileOffset,
+            CancellationToken token)
+        {
+            ArgumentNullException.ThrowIfNull(buffer);
+            if (bytesToRead <= 0 || bytesToRead % Alignment != 0)
+                throw new ArgumentOutOfRangeException(nameof(bytesToRead));
+            if (fileOffset < 0 || fileOffset % Alignment != 0)
+                throw new ArgumentOutOfRangeException(nameof(fileOffset));
+            if (!buffer.IsPinned || buffer.Pointer.ToInt64() % Alignment != 0)
+                throw new InvalidOperationException("El buffer OVERLAPPED no está alineado al sector físico.");
+
+            var handle = _handle ?? throw new ObjectDisposedException(nameof(OverlappedSession));
+            try
+            {
+                return await RandomAccess.ReadAsync(handle, buffer.Memory[..bytesToRead], fileOffset, token).ConfigureAwait(false);
+            }
+            catch (IOException ex)
+            {
+                var code = ex.HResult & 0xFFFF;
+                throw new DirectIoReadException(code, ex.Message);
+            }
+        }
+
+        public void Dispose() => Interlocked.Exchange(ref _handle, null)?.Dispose();
     }
 
     internal sealed class DirectIoReadException : IOException

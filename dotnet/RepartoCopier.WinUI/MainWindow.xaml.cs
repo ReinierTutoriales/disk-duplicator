@@ -141,7 +141,7 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
-                Verify: VerifyCheck.IsChecked == true,
+                Verify: true,
                 SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
@@ -158,7 +158,7 @@ public sealed partial class MainWindow : Window
             FilesMetricText.Text = "0/0";
             OverallProgressBar.Value = 0;
             OverallPercentText.Text = "0%";
-            OverallDetailText.Text = options.Verify ? "Preparando copia con verificación de integridad..." : "Preparando...";
+            OverallDetailText.Text = "Preparando copia con verificación rápida...";
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
@@ -347,7 +347,6 @@ public sealed partial class MainWindow : Window
             foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
             DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             SkipSameCheck.IsChecked = profile.SkipExisting;
-            VerifyCheck.IsChecked = true;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
             StatusText.Text = "Configuración cargada";
@@ -614,7 +613,6 @@ public sealed partial class MainWindow : Window
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
-        VerifyCheck.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
     }
 

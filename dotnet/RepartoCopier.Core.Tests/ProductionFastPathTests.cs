@@ -69,7 +69,7 @@ public sealed class ProductionFastPathTests
     }
 
     [TestMethod]
-    public async Task ExplicitDiagnosticVerificationRemainsAvailable()
+    public async Task ExplicitFastVerificationCoversEveryDestinationByte()
     {
         using var temp = new TempDirectory();
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;

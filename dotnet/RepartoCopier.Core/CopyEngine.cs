@@ -332,7 +332,7 @@ public static class CopyEngine
                 var verifyPhaseStarted = Stopwatch.GetTimestamp();
                 try
                 {
-                    await VerifyDestinationsAsync(copy, workers, progress, expectedHashes, job, resources).ConfigureAwait(false);
+                    await VerifyDestinationsAsync(copy, workers, progress, job).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -1025,6 +1025,7 @@ public static class CopyEngine
                                 if (!current.Failed)
                                 {
                                     await WriteWithRetryAsync(worker, current, chunkData.Block.Memory, job).ConfigureAwait(false);
+                                    current.VerificationBlocks.Add(new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));
                                     current.Copied += chunkData.Block.Length;
                                     worker.Progress.AddWritten(chunkData.Block.Length);
                                 }
@@ -1251,6 +1252,8 @@ public static class CopyEngine
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
         job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted), current.WriteThrough);
+        worker.VerificationPlans[PathKey(current.Entry.RelativePath)] =
+            new VerificationPlan(current.Entry.Size, current.VerificationBlocks.ToArray());
         worker.Progress.MarkDone();
     }
 
@@ -1258,9 +1261,7 @@ public static class CopyEngine
         PreparedCopy copy,
         DestinationWorker[] workers,
         DestinationProgress[] progress,
-        IReadOnlyDictionary<string, byte[]> expectedHashes,
-        CopyJob job,
-        ResourceGovernor resources)
+        CopyJob job)
     {
         var activeSlots = Enumerable.Range(0, workers.Length)
             .Where(slot => workers[slot].IsActive)
@@ -1268,7 +1269,7 @@ public static class CopyEngine
         var tasks = activeSlots.Select(async slot =>
         {
             var verifyEntries = copy.Files
-                .Where(entry => expectedHashes.ContainsKey(PathKey(entry.RelativePath)))
+                .Where(entry => workers[slot].VerificationPlans.ContainsKey(PathKey(entry.RelativePath)))
                 .ToArray();
             var verifyBytes = verifyEntries.Aggregate<FileEntry, ulong>(
                 0,
@@ -1282,7 +1283,8 @@ public static class CopyEngine
             {
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-                if (!expectedHashes.TryGetValue(PathKey(entry.RelativePath), out var expected))
+                var key = PathKey(entry.RelativePath);
+                if (!workers[slot].VerificationPlans.TryGetValue(key, out var plan))
                     continue;
                 progress[slot].SetLastFile(entry.RelativePath);
                 var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
@@ -1298,18 +1300,17 @@ public static class CopyEngine
                     workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
                     break;
                 }
-                var actual = await HashFileAsync(
+
+                var valid = await FastVerificationReader.VerifyAsync(
                     destination,
-                    job.Token,
-                    resources,
-                    job.Telemetry,
-                    verification: true,
-                    verificationProgress: progress[slot],
-                    directDevice: copy.DestinationDevices[slot],
-                    directScheduler: workers[slot].DeviceScheduler).ConfigureAwait(false);
-                if (!actual.AsSpan().SequenceEqual(expected))
+                    copy.DestinationDevices[slot],
+                    workers[slot].DeviceScheduler,
+                    plan,
+                    job,
+                    progress[slot]).ConfigureAwait(false);
+                if (!valid)
                 {
-                    workers[slot].Fail($"BLAKE3 no coincide: {destination}");
+                    workers[slot].Fail($"CRC32 no coincide durante verificación: {destination}");
                     break;
                 }
                 progress[slot].MarkVerifyFileDone();
@@ -1697,12 +1698,14 @@ public static class CopyEngine
         {
             _buffer = buffer;
             Length = length;
+            VerificationCrc32 = FastCrc32.Compute(buffer.Memory.Span[..length]);
             _reservedBytes = reservedBytes;
             _references = references;
             _budget = budget;
         }
 
         public int Length { get; }
+        public uint VerificationCrc32 { get; }
         public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
 
         public void Release()
@@ -2296,6 +2299,7 @@ public static class CopyEngine
 
     private sealed class DestinationWorker
     {
+        public Dictionary<string, VerificationPlan> VerificationPlans { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
@@ -2368,6 +2372,7 @@ public static class CopyEngine
         FileStream stream,
         bool writeThrough)
     {
+        public List<VerificationBlock> VerificationBlocks { get; } = [];
         public FileEntry Entry { get; } = entry;
         public string DestinationPath { get; } = destinationPath;
         public string PartPath { get; } = partPath;
