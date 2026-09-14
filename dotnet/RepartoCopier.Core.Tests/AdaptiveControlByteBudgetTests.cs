@@ -10,6 +10,7 @@ public sealed class AdaptiveControlByteBudgetTests
     public async Task LargeControlBacklogDoesNotThrottleWhileByteHeadroomExists()
     {
         var bytes = AdaptiveControlByteBudget.EstimatedDeliveryBytes;
+        Assert.IsGreaterThan(0, bytes);
         var capacity = checked(50_000L * bytes + bytes);
         var budget = new AdaptiveControlByteBudget(_ => capacity);
 
