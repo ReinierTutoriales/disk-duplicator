@@ -118,10 +118,10 @@ internal static class DirectIoSourceReader
         internal int NativeErrorCode { get; }
     }
 
-    private static partial class NativeMethods
+    private static class NativeMethods
     {
-        [LibraryImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
-        internal static partial SafeFileHandle CreateFileW(
+        [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
+        internal static extern SafeFileHandle CreateFileW(
             string fileName,
             uint desiredAccess,
             FileShare shareMode,
@@ -130,9 +130,9 @@ internal static class DirectIoSourceReader
             uint flagsAndAttributes,
             IntPtr templateFile);
 
-        [LibraryImport("kernel32.dll", EntryPoint = "ReadFile", SetLastError = true)]
+        [DllImport("kernel32.dll", EntryPoint = "ReadFile", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        internal static partial bool ReadFile(
+        internal static extern bool ReadFile(
             SafeFileHandle file,
             IntPtr buffer,
             uint bytesToRead,
