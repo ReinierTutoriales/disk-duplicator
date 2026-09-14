@@ -33,6 +33,19 @@ public sealed class AdaptiveQueueDepthArchitectureTests
     }
 
     [TestMethod]
+    public void QueueDepthFeedbackTracksObservedConcurrencyWave()
+    {
+        var schedulerFields = typeof(DeviceScheduler)
+            .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Select(field => field.Name)
+            .ToArray();
+
+        CollectionAssert.Contains(schedulerFields, "_samplePeakObservedConcurrency");
+        CollectionAssert.Contains(schedulerFields, "_sampleCompletions");
+        CollectionAssert.Contains(schedulerFields, "_sampleSawDemand");
+    }
+
+    [TestMethod]
     public void ExplorationDepthIsNotLegacyHardwareClassCap()
     {
         using var nvme = new DeviceScheduler("NVMe-test", 16, 512L * 1024 * 1024);
