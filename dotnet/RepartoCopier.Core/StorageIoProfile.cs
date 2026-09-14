@@ -13,61 +13,18 @@ public enum StorageProfileKind
     StorageSpaces,
 }
 
+/// <summary>
+/// Physical-device I/O limits consumed by the FAN-OUT scheduler.
+/// Policy lives in <see cref="FanoutPerformancePolicy"/> so topology description
+/// and performance tuning remain separate concerns.
+/// </summary>
 public sealed record StorageIoProfile(
     StorageProfileKind Kind,
     int RecommendedQueueDepth,
     long DeviceBacklogTargetBytes)
 {
-    private const int MiB = 1024 * 1024;
-
-    public static StorageIoProfile For(StorageDeviceInfo device)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-
-        if (device.IsNetwork)
-            return new(StorageProfileKind.Network, 1, 32L * MiB);
-
-        if (device.MediaKind == StorageMediaKind.Rotational)
-            return new(StorageProfileKind.Rotational, 1, 32L * MiB);
-
-        if (string.Equals(device.BusType, "USB", StringComparison.OrdinalIgnoreCase))
-        {
-            var looksLikeSsd = device.MediaKind == StorageMediaKind.SolidState && device.TrimEnabled == true;
-            if (!looksLikeSsd)
-                return new(StorageProfileKind.UsbFlash, 1, 16L * MiB);
-
-            var exactFixedSsd =
-                device.Removable != true &&
-                StorageDeviceIdentity.ConfidenceFor(device) == DeviceIdentityConfidence.Exact;
-            return new(
-                StorageProfileKind.UsbSsd,
-                exactFixedSsd ? 2 : 1,
-                exactFixedSsd ? 64L * MiB : 32L * MiB);
-        }
-
-        if (device.MediaKind == StorageMediaKind.SolidState &&
-            string.Equals(device.BusType, "SATA", StringComparison.OrdinalIgnoreCase))
-        {
-            return new(StorageProfileKind.SataSsd, 2, 64L * MiB);
-        }
-
-        if (device.MediaKind == StorageMediaKind.SolidState &&
-            string.Equals(device.BusType, "NVMe", StringComparison.OrdinalIgnoreCase))
-        {
-            return new(StorageProfileKind.Nvme, 2, 128L * MiB);
-        }
-
-        if (string.Equals(device.BusType, "StorageSpaces", StringComparison.OrdinalIgnoreCase))
-            return new(StorageProfileKind.StorageSpaces, 1, 64L * MiB);
-
-        if (string.Equals(device.BusType, "Virtual", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(device.BusType, "FileBackedVirtual", StringComparison.OrdinalIgnoreCase))
-        {
-            return new(StorageProfileKind.Virtual, 1, 32L * MiB);
-        }
-
-        return new(StorageProfileKind.Conservative, 1, 32L * MiB);
-    }
+    public static StorageIoProfile For(StorageDeviceInfo device) =>
+        FanoutPerformancePolicy.For(device);
 }
 
 public sealed record StorageDeviceProfile(
