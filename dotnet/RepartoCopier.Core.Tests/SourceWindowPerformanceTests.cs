@@ -21,9 +21,12 @@ public sealed class SourceWindowPerformanceTests
     }
 
     [TestMethod]
-    public void PipelineGovernorStartsAtFourAndCanGrowToEight()
+    public void PipelineGovernorUsesMemoryCapacityAndCanScalePastEight()
     {
-        var governor = new CopyEngine.PipelineGovernor();
+        const int blockSize = 32 * 1024 * 1024;
+        const long eightGiB = 8L * 1024 * 1024 * 1024;
+        var budget = new CopyEngine.AdaptiveByteBudget(512L * 1024 * 1024, eightGiB);
+        var governor = new CopyEngine.PipelineGovernor(budget, blockSize);
         Assert.AreEqual(4, governor.Snapshot().CurrentPrefetchLimit);
 
         for (var decision = 0; decision < 4; decision++)
@@ -33,8 +36,8 @@ public sealed class SourceWindowPerformanceTests
         }
 
         var snapshot = governor.Snapshot();
-        Assert.AreEqual(8, snapshot.CurrentPrefetchLimit);
-        Assert.AreEqual(8, snapshot.MaximumObservedPrefetchLimit);
+        Assert.AreEqual(64, snapshot.CurrentPrefetchLimit);
+        Assert.AreEqual(64, snapshot.MaximumObservedPrefetchLimit);
         Assert.AreEqual(4, snapshot.Upshifts);
     }
 }
