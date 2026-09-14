@@ -94,6 +94,27 @@ public sealed class StorageTopologyTests
     }
 
     [TestMethod]
+    public void SingleDiskExtentFallbackRecoversPhysicalIdentityWithoutAThrottlePolicy()
+    {
+        var descriptor = new byte[32];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(descriptor.AsSpan(0, 4), 1);
+        var offset = IntPtr.Size == 8 ? 8 : 4;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(descriptor.AsSpan(offset, 4), 27);
+
+        Assert.IsTrue(StorageTopology.TryParseSingleDiskExtent(descriptor, IntPtr.Size, out var disk));
+        Assert.AreEqual((uint)27, disk);
+    }
+
+    [TestMethod]
+    public void MultiDiskExtentDoesNotPretendToHaveOnePhysicalIdentity()
+    {
+        var descriptor = new byte[64];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(descriptor.AsSpan(0, 4), 2);
+
+        Assert.IsFalse(StorageTopology.TryParseSingleDiskExtent(descriptor, IntPtr.Size, out _));
+    }
+
+    [TestMethod]
     public void InspectDestinationsReturnsOneEntryPerDestination()
     {
         var root = Path.GetPathRoot(Path.GetTempPath());

@@ -217,12 +217,25 @@ public static class StorageTopology
             volumeWarnings.Add(volumeError);
         }
 
-        if (!TryGetDeviceNumber(handle, out var physicalDevice, out var partition, out var deviceNumberError))
+        uint physicalDevice;
+        uint? partition;
+        if (TryGetDeviceNumber(handle, out var probedPhysicalDevice, out var probedPartition, out var deviceNumberError))
+        {
+            physicalDevice = probedPhysicalDevice;
+            partition = probedPartition;
+        }
+        else if (TryGetSingleDiskExtent(handle, out var extentPhysicalDevice, out var extentError))
+        {
+            physicalDevice = extentPhysicalDevice;
+            partition = null;
+            volumeWarnings.Add("Identidad física recuperada mediante VOLUME_DISK_EXTENTS tras fallar STORAGE_DEVICE_NUMBER.");
+        }
+        else
         {
             return Unknown(
                 full,
                 volumeRoot,
-                deviceNumberError,
+                deviceNumberError + " " + extentError,
                 fileSystem,
                 driveType,
                 false,
@@ -372,6 +385,66 @@ public static class StorageTopology
             availableFreeSpace,
             totalSpace);
 
+    internal static bool TryParseSingleDiskExtent(ReadOnlySpan<byte> descriptor, int pointerSize, out uint physicalDevice)
+    {
+        physicalDevice = 0;
+        if (pointerSize is not (4 or 8))
+            throw new ArgumentOutOfRangeException(nameof(pointerSize));
+        if (descriptor.Length < 4)
+            return false;
+
+        var extentCount = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[..4]);
+        if (extentCount != 1)
+            return false;
+
+        var firstExtentOffset = pointerSize == 8 ? 8 : 4;
+        if (descriptor.Length < firstExtentOffset + sizeof(uint))
+            return false;
+
+        physicalDevice = BinaryPrimitives.ReadUInt32LittleEndian(
+            descriptor.Slice(firstExtentOffset, sizeof(uint)));
+        return true;
+    }
+
+    private static bool TryGetSingleDiskExtent(
+        SafeFileHandle handle,
+        out uint physicalDevice,
+        out string error)
+    {
+        var output = new byte[4096];
+        if (!NativeMethods.DeviceIoControl(
+                handle,
+                NativeMethods.IoctlVolumeGetVolumeDiskExtents,
+                null,
+                0,
+                output,
+                (uint)output.Length,
+                out var returned,
+                IntPtr.Zero))
+        {
+            physicalDevice = 0;
+            error = "No se pudieron consultar los extents físicos del volumen: " +
+                    new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            return false;
+        }
+
+        var length = checked((int)Math.Min(returned, (uint)output.Length));
+        var descriptor = output.AsSpan(0, length);
+        if (!TryParseSingleDiskExtent(descriptor, IntPtr.Size, out physicalDevice))
+        {
+            var extentCount = descriptor.Length >= 4
+                ? BinaryPrimitives.ReadUInt32LittleEndian(descriptor[..4])
+                : 0;
+            error = extentCount > 1
+                ? $"El volumen abarca {extentCount} discos físicos y no admite una identidad única."
+                : "El descriptor de extents físicos no contiene una identidad única válida.";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
     private static bool TryGetDeviceNumber(
         SafeFileHandle handle,
         out uint physicalDevice,
@@ -512,6 +585,7 @@ public static class StorageTopology
         internal const uint OpenExisting = 3;
         internal const uint IoctlStorageGetDeviceNumber = 0x002D1080;
         internal const uint IoctlStorageQueryProperty = 0x002D1400;
+        internal const uint IoctlVolumeGetVolumeDiskExtents = 0x00560000;
 
 #pragma warning disable SYSLIB1054 // SafeHandle + small marshalled buffers keep this interop auditable.
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]

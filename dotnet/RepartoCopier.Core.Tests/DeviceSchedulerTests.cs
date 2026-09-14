@@ -24,6 +24,22 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
+    public void PhysicalCollisionSharesOnlyTheCollidingDiskAndLeavesOtherHardwareIndependent()
+    {
+        var source = Device(@"C:\source", 1, "NVMe", StorageMediaKind.SolidState, trim: true);
+        var first = Device(@"E:\copy", 4, "SATA", StorageMediaKind.SolidState, trim: true);
+        var second = Device(@"F:\copy", 4, "USB", StorageMediaKind.SolidState, trim: true);
+        var independent = Device(@"G:\copy", 9, "NVMe", StorageMediaKind.SolidState, trim: true);
+
+        using var map = DeviceSchedulerMap.Create(source, [first, second, independent]);
+
+        Assert.HasCount(2, map.Schedulers);
+        Assert.AreSame(map.For(first), map.For(second));
+        Assert.AreNotSame(map.For(first), map.For(independent));
+        Assert.AreEqual(16, map.For(independent).InitialQueueDepth);
+    }
+
+    [TestMethod]
     public void SourceAndDestinationOnSameDiskStartAtOneButAreNotCappedThere()
     {
         var source = Device(@"C:\source", 4, "NVMe", StorageMediaKind.SolidState, trim: true);
