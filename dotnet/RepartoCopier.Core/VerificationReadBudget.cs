@@ -70,7 +70,7 @@ internal sealed class VerificationReadBudget
             await waiter.Ready.Task.WaitAsync(token).ConfigureAwait(false);
             return new Lease(this, waiter.Bytes);
         }
-        catch
+        catch (Exception ex)
         {
             List<Waiter>? ready;
             lock (_gate)
@@ -87,6 +87,9 @@ internal sealed class VerificationReadBudget
                 ready = PumpLocked();
             }
             Complete(ready);
+
+            if (ex is OperationCanceledException)
+                throw new OperationCanceledException(token);
             throw;
         }
     }
