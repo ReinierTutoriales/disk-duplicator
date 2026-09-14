@@ -7,13 +7,12 @@ namespace RepartoCopier.Core.Tests;
 public sealed class FanoutBackpressureTests
 {
     [TestMethod]
-    public async Task EmptyAndTinyFilesUseBoundedControlPlaneWithoutLosingOrder()
+    public async Task EmptyAndTinyFilesPreserveControlOrderingWithoutFixedBacklogGate()
     {
         using var temp = new TempDirectory("control-plane");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
-        // This is a correctness/backlog test, not a small-file throughput benchmark.
-        // Keep it large enough to exercise many Begin/Data/End messages but short
-        // enough to be stable on variable-speed hosted Windows runners.
+        // Exercise many Begin/Data/End transitions without relying on the removed
+        // fixed control-message backlog budget. Ordering and exact output are the contract.
         const int files = 96;
         for (var index = 0; index < files; index++)
         {
@@ -32,7 +31,6 @@ public sealed class FanoutBackpressureTests
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(120));
 
         AssertHealthy(job);
-        Assert.IsTrue(job.DiagnosticsSnapshot().PeakControlBacklogMessages > 0);
         Assert.IsTrue(job.DiagnosticsSnapshot().CopyPhaseElapsed > TimeSpan.Zero);
         foreach (var destination in destinations)
         {
