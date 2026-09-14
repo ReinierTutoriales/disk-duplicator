@@ -73,7 +73,8 @@ public sealed class ProductionFastPathTests
     {
         using var temp = new TempDirectory();
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
-        await File.WriteAllBytesAsync(Path.Combine(source, "verify.bin"), new byte[6 * 1024 * 1024 + 17]);
+        const int payloadSize = 6 * 1024 * 1024 + 17;
+        await File.WriteAllBytesAsync(Path.Combine(source, "verify.bin"), new byte[payloadSize]);
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
         var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
 
@@ -81,9 +82,10 @@ public sealed class ProductionFastPathTests
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
-        Assert.IsTrue(job.DiagnosticsSnapshot().VerifyReadBytes > 0);
-        Assert.IsTrue(job.DiagnosticsSnapshot().VerifyHashBytes > 0);
-        Assert.IsTrue(job.DiagnosticsSnapshot().VerifyPhaseElapsed > TimeSpan.Zero);
+        var metrics = job.DiagnosticsSnapshot();
+        Assert.AreEqual((long)payloadSize, metrics.VerifyReadBytes);
+        Assert.AreEqual((long)payloadSize, metrics.VerifyHashBytes);
+        Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
     }
 
     private sealed class TempDirectory : IDisposable
