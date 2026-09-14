@@ -44,7 +44,7 @@ public sealed class AdaptiveSourcePipelineTests
         }
 
         var snapshot = governor.Snapshot();
-        Assert.IsGreaterThan(8, snapshot.PrefetchLimit);
+        Assert.IsGreaterThan(8, snapshot.CurrentPrefetchLimit);
         Assert.IsGreaterThan(8, snapshot.MaximumObservedPrefetchLimit);
         Assert.IsGreaterThanOrEqualTo(2, snapshot.Upshifts);
     }
