@@ -35,8 +35,10 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - El control plane (`BeginMessage`/`EndMessage`) usa `AdaptiveControlByteBudget`, derivado de presión real de memoria. El antiguo `GlobalControlBacklogBudget` y su cap fijo permanecen eliminados.
 - `WriteThrough` fue eliminado del hot path. La durabilidad se conserva mediante flush explícito antes de `AtomicFileCommit`.
 - `AtomicFileCommit` es la única primitiva de reemplazo productiva.
-- Verificación post-copia usa CRC32 por bloque y lectura Direct/buffered async con `VerificationReadBudget` dinámico.
-- `FastCrc32.Compute` usa slicing-by-8 IEEE CRC32 como única implementación productiva actual.
+- Verificación post-copia usa CRC32C/Castagnoli por bloque y lectura Direct/buffered async con `VerificationReadBudget` dinámico.
+- `FastCrc32.Compute` usa CRC32C hardware mediante SSE4.2 en x86/x64 o instrucciones CRC de ARM cuando están disponibles; el fallback usa slicing-by-8 Castagnoli y debe ser bit-idéntico al hardware.
+- `PendingRead` en verificación es un `readonly record struct`, evitando una asignación de objeto por descriptor de lectura pendiente sin cambiar QD ni presupuesto de memoria.
+- Los CRC32C de `VerificationBlock` son internos a la ejecución de copy/verify; recovery continúa usando el hash BLAKE3 persistente y no depende del checksum de bloque.
 - Estado interno permanece fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
 ## Cerrado e integrado
@@ -55,6 +57,8 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - Identidad física ampliada mediante `VOLUME_DISK_EXTENTS` cuando el probe primario falla.
 - Control-plane fijo eliminado y reemplazado por `AdaptiveControlByteBudget`.
 - **Multi-block in-flight integrado**: eliminada la ruta secuencial `WriteWithRetryAsync`; los bloques se programan por offset explícito, el commit espera al drenaje total y el fallback Direct se resuelve solo después de drenar I/O pendiente.
+- CRC32 IEEE interno de verificación sustituido por CRC32C/Castagnoli coherente en hardware y software, con vector estándar y contrato hardware/software.
+- Descriptor `PendingRead` de verificación convertido a valor readonly para eliminar la asignación de heap por entrada pendiente.
 - Infraestructura temporal de migraciones eliminada de `main`; solo queda el workflow permanente `windows-dotnet.yml`.
 
 ## Prioridad actual
@@ -79,9 +83,9 @@ Una rama permanentemente más lenta conserva referencias a `SharedBlock` durante
 
 El soporte de payload alineado mantiene `MaximumSupportedAlignment = 64 KiB`. Auditar si puede derivarse completamente del dispositivo sin máximo de implementación fijo.
 
-### P2 — CPU por byte
+### P2 — CPU por byte / verificación
 
-CRC32 ya es slicing-by-8. Solo sustituirlo si profiling demuestra cuello de CPU. No usar SSE4.2 CRC32 directamente para IEEE CRC32 porque esa instrucción calcula CRC32C; cualquier aceleración debe conservar exactamente el polinomio IEEE y superar la implementación actual en benchmark.
+CRC32C interno ya dispone de ruta hardware y fallback software Castagnoli bit-idéntico. El siguiente paso no es cambiar otra vez de algoritmo: medir GiB/s de lectura, tiempo de checksum y CPU en hardware real para comprobar cuánto aporta la aceleración y si la verificación está limitada por I/O o CPU.
 
 ## Benchmark físico contra ExtremeCopy
 
