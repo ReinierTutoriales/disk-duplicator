@@ -7,7 +7,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class StorageWritePolicyTests
 {
     [TestMethod]
-    public void ExactLocalDevicesCanExploreFarBeyondLegacyProfileDepths()
+    public void LocalDevicesCanExploreFarBeyondLegacyProfileDepths()
     {
         var sata = Device("SATA", StorageMediaKind.SolidState, trim: true);
         var nvme = Device("NVMe", StorageMediaKind.SolidState, trim: true);
@@ -45,7 +45,7 @@ public sealed class StorageWritePolicyTests
     }
 
     [TestMethod]
-    public void UnknownIdentityAndNetworkRemainNonSpeculative()
+    public void UncertainLocalIdentityDoesNotForceQdOneButNetworkStillUsesBufferedSerialPolicy()
     {
         var uncertain = Device("USB", StorageMediaKind.SolidState, trim: true) with
         {
@@ -57,7 +57,7 @@ public sealed class StorageWritePolicyTests
             PhysicalDeviceNumber = null,
         };
 
-        Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(uncertain, 128, 32 * 1024 * 1024));
+        Assert.AreEqual(128, StorageWritePolicy.LargeWriteQueueDepth(uncertain, 128, 32 * 1024 * 1024));
         Assert.AreEqual(1, StorageWritePolicy.LargeWriteQueueDepth(network, 128, 32 * 1024 * 1024));
     }
 
