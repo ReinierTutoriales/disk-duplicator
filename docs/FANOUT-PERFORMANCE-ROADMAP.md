@@ -14,7 +14,8 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - Verificación post-copia automática: CRC32 por bloque generado una sola vez durante FAN-OUT; read-back Direct I/O overlapped cuando es elegible y fallback buffered async cuando no lo es.
 - `FastCrc32.Compute` usa slicing-by-8 como única implementación de producción; la equivalencia IEEE CRC32 queda cubierta por vector estándar, bordes 7/8/9 y comparación aleatoria contra referencia byte-a-byte en tests.
 - Escritura actual: buffered, offsets explícitos, QD2 selectivo en SSD calificados. **No existe todavía Direct I/O de escritura.**
-- Scheduler por dispositivo físico: QD es un límite duro de I/O físico; el backlog por rama es ahora un **soft watermark** de presión y ya no puede bloquear al productor mientras exista memoria FAN-OUT global disponible.
+- Scheduler por dispositivo físico: QD es un límite duro de I/O físico; una reserva QD2 se concede de forma atómica y nunca retiene un solo slot mientras espera el segundo.
+- El backlog por rama es un **soft watermark** de presión y ya no puede bloquear al productor mientras exista memoria FAN-OUT global disponible.
 - El límite duro de payload en vuelo es `AdaptiveByteBudget`; evita crecimiento ilimitado aunque una rama lenta supere ampliamente su watermark.
 - Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
@@ -36,6 +37,7 @@ El watermark mide presión/lag de la rama; **no aplica backpressure al productor
 
 - Topología física e identidad con política conservadora cuando no puede demostrarse el disco real.
 - QD2 selectivo desde archivos de 8 MiB en SSD elegibles.
+- H-04: la adquisición QD2 es atómica dentro de `DeviceScheduler`; se eliminó el patrón `_pairGate` + dos `AcquireIoAsync` secuenciales y existe gate que impide reintroducir `_pairGate`/`_ioSlots`.
 - Buffers de origen alineados y Direct I/O.
 - H-10: la lectura Direct I/O del origen usa `OVERLAPPED`/async real; se eliminó la sesión síncrona.
 - H-11/H-12/H-13: se eliminaron la verificación antigua escondida en `HashFileAsync`, APIs síncronas obsoletas, ramas nulas/test-only innecesarias y telemetría de verify que ya no tenía productor.
