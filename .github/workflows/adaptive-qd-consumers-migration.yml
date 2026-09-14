@@ -1,0 +1,20 @@
+name: Adaptive QD consumer migration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/adaptive-qd-consumers-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - name: Migrate and audit adaptive QD consumers
+        shell: pwsh
+        run: ./tools/patch-adaptive-qd-consumers.ps1
