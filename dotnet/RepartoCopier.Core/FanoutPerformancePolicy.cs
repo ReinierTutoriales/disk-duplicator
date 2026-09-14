@@ -10,20 +10,20 @@ namespace RepartoCopier.Core;
 /// memory remains available. AdaptiveByteBudget is the hard payload-memory
 /// ceiling; DeviceScheduler queue depth remains the hard physical-I/O limit.
 ///
-/// Targets remain expressed as multiples of the 32 MiB large-file block so
-/// diagnostics have a useful per-device pressure scale without multiplying
-/// payload memory by destination count.
+/// Queue-depth ceilings are intentionally hardware-class aware rather than
+/// capped globally at QD2. The write policy further bounds useful depth by the
+/// current payload size, so these are capabilities, not forced concurrency.
 /// </summary>
 internal static class FanoutPerformancePolicy
 {
     private const int MiB = 1024 * 1024;
 
-    private const long ConservativeBacklog = 64L * MiB;  // 2 x 32 MiB soft watermark
-    private const long RotationalBacklog = 128L * MiB;   // 4 x 32 MiB soft watermark
-    private const long UsbFlashBacklog = 128L * MiB;     // 4 x 32 MiB soft watermark
-    private const long UsbSsdBacklog = 256L * MiB;       // 8 x 32 MiB soft watermark
-    private const long SataSsdBacklog = 256L * MiB;      // 8 x 32 MiB soft watermark
-    private const long NvmeBacklog = 512L * MiB;         // 16 x 32 MiB soft watermark
+    private const long ConservativeBacklog = 64L * MiB;
+    private const long RotationalBacklog = 128L * MiB;
+    private const long UsbFlashBacklog = 128L * MiB;
+    private const long UsbSsdBacklog = 256L * MiB;
+    private const long SataSsdBacklog = 256L * MiB;
+    private const long NvmeBacklog = 512L * MiB;
     private const long NetworkBacklog = 32L * MiB;
 
     internal static StorageIoProfile For(StorageDeviceInfo device)
@@ -45,29 +45,25 @@ internal static class FanoutPerformancePolicy
             if (!looksLikeSsd)
                 return new(StorageProfileKind.UsbFlash, 1, UsbFlashBacklog);
 
-            // External SSD/UASP enclosures commonly report the media as removable.
-            // Removable is therefore not a useful reason to disable overlapped QD2.
-            // Exact physical identity is retained as the safety gate so partitions
-            // that actually share one device still share a single scheduler.
             var exactPhysicalIdentity =
                 StorageDeviceIdentity.ConfidenceFor(device) == DeviceIdentityConfidence.Exact;
 
             return new(
                 StorageProfileKind.UsbSsd,
-                exactPhysicalIdentity ? 2 : 1,
+                exactPhysicalIdentity ? 4 : 1,
                 exactPhysicalIdentity ? UsbSsdBacklog : RotationalBacklog);
         }
 
         if (device.MediaKind == StorageMediaKind.SolidState &&
             string.Equals(device.BusType, "SATA", StringComparison.OrdinalIgnoreCase))
         {
-            return new(StorageProfileKind.SataSsd, 2, SataSsdBacklog);
+            return new(StorageProfileKind.SataSsd, 8, SataSsdBacklog);
         }
 
         if (device.MediaKind == StorageMediaKind.SolidState &&
             string.Equals(device.BusType, "NVMe", StringComparison.OrdinalIgnoreCase))
         {
-            return new(StorageProfileKind.Nvme, 2, NvmeBacklog);
+            return new(StorageProfileKind.Nvme, 16, NvmeBacklog);
         }
 
         if (string.Equals(device.BusType, "StorageSpaces", StringComparison.OrdinalIgnoreCase))
