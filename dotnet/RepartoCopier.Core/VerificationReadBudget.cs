@@ -1,40 +1,43 @@
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// Global byte budget for post-copy verification reads. The limit is derived from
-/// current process/system memory headroom; it has no fixed GiB ceiling. All
-/// destination verification workers share one instance per copy job.
+/// Global byte budget for post-copy verification reads. System-created budgets
+/// track the runtime/OS high-memory-load headroom dynamically instead of using a
+/// fixed RAM fraction or GiB ceiling. All destination verification workers share
+/// one instance per copy job.
 /// </summary>
 internal sealed class VerificationReadBudget
 {
     private const long MinimumUsefulBudget = 32L * 1024 * 1024;
     private readonly object _gate = new();
     private readonly Queue<Waiter> _waiters = new();
+    private readonly Func<long, long> _capacityProvider;
     private long _usedBytes;
     private long _peakUsedBytes;
 
     internal VerificationReadBudget(long limitBytes)
+        : this(_ => limitBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limitBytes);
-        LimitBytes = limitBytes;
     }
 
-    internal long LimitBytes { get; }
+    private VerificationReadBudget(Func<long, long> capacityProvider) =>
+        _capacityProvider = capacityProvider ?? throw new ArgumentNullException(nameof(capacityProvider));
+
+    internal long LimitBytes
+    {
+        get
+        {
+            lock (_gate)
+                return CurrentLimitLocked();
+        }
+    }
+
     internal long UsedBytes { get { lock (_gate) return _usedBytes; } }
     internal long PeakUsedBytes { get { lock (_gate) return _peakUsedBytes; } }
 
-    internal static VerificationReadBudget CreateForSystem()
-    {
-        var memory = GC.GetGCMemoryInfo();
-        var totalAvailable = Math.Max(MinimumUsefulBudget, memory.TotalAvailableMemoryBytes);
-        var normalTarget = Math.Max(MinimumUsefulBudget, totalAvailable / 8);
-
-        var headroom = memory.HighMemoryLoadThresholdBytes > memory.MemoryLoadBytes
-            ? memory.HighMemoryLoadThresholdBytes - memory.MemoryLoadBytes
-            : MinimumUsefulBudget;
-        var pressureTarget = Math.Max(MinimumUsefulBudget, headroom / 2);
-        return new VerificationReadBudget(Math.Min(normalTarget, pressureTarget));
-    }
+    internal static VerificationReadBudget CreateForSystem() =>
+        new(used => MemoryPressureCapacity.GetSafeTotalBytes(used, MinimumUsefulBudget));
 
     internal ValueTask<Lease> AcquireAsync(int bytes, CancellationToken token)
     {
@@ -54,8 +57,11 @@ internal sealed class VerificationReadBudget
         }
     }
 
+    private long CurrentLimitLocked() =>
+        Math.Max(_usedBytes, _capacityProvider(_usedBytes));
+
     private bool CanGrantLocked(int bytes) =>
-        _usedBytes == 0 || _usedBytes + bytes <= LimitBytes;
+        _usedBytes == 0 || _usedBytes + bytes <= CurrentLimitLocked();
 
     private void GrantLocked(int bytes)
     {
