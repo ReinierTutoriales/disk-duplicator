@@ -18,3 +18,5 @@ jobs:
       - name: Apply exact CopyEngine migration
         shell: pwsh
         run: ./tools/patch-variable-qd.ps1
+
+# One-shot migration trigger; remove this workflow after the patch commit lands.
