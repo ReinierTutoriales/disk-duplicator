@@ -115,7 +115,7 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
-    public async Task BacklogReservationWaitsUntilPhysicalQueueDrains()
+    public async Task SoftBacklogTargetDoesNotBlockOverflowAdmission()
     {
         const int block = 8 * 1024 * 1024;
         using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, block);
@@ -123,21 +123,22 @@ public sealed class DeviceSchedulerTests
         Assert.IsTrue(scheduler.TryReserveBacklog(block));
         Assert.IsFalse(scheduler.TryReserveBacklog(block));
 
-        var waiting = scheduler.ReserveBacklogAsync(block, CancellationToken.None).AsTask();
-        Assert.IsFalse(waiting.IsCompleted);
-        Assert.AreEqual(block, scheduler.QueuedBytes);
+        var overflow = scheduler.ReserveBacklogAsync(block, CancellationToken.None);
+        Assert.IsTrue(overflow.IsCompletedSuccessfully, "Una rama sobre el soft watermark no puede bloquear el productor FAN-OUT.");
+        await overflow;
+
+        var snapshot = scheduler.Snapshot();
+        Assert.AreEqual(2L * block, snapshot.QueuedBytes);
+        Assert.AreEqual(2L * block, snapshot.PeakQueuedBytes);
+        Assert.AreEqual(2.0, snapshot.BacklogPressure, 0.000001);
 
         scheduler.ReleaseBacklog(block);
-        await waiting;
-
-        Assert.AreEqual(block, scheduler.QueuedBytes);
-        Assert.AreEqual(block, scheduler.PeakQueuedBytes);
         scheduler.ReleaseBacklog(block);
         Assert.AreEqual(0, scheduler.QueuedBytes);
     }
 
     [TestMethod]
-    public void EmptyQueueAllowsOneBlockLargerThanConservativeTarget()
+    public void EmptyQueueStillAdmitsOneBlockLargerThanSoftTarget()
     {
         using var scheduler = new DeviceScheduler("PhysicalDisk8", 1, 4L * 1024 * 1024);
 
@@ -148,16 +149,17 @@ public sealed class DeviceSchedulerTests
     }
 
     [TestMethod]
-    public void RealBacklogReservationsTrackCurrentAndPeakBytes()
+    public async Task OverflowAdmissionHonorsCancellationBeforeReservation()
     {
-        using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, 16L * 1024 * 1024);
+        using var scheduler = new DeviceScheduler("PhysicalDisk12", 1, 8L * 1024 * 1024);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
 
-        Assert.IsTrue(scheduler.TryReserveBacklog(8 * 1024 * 1024));
-        Assert.IsTrue(scheduler.TryReserveBacklog(4 * 1024 * 1024));
-        scheduler.ReleaseBacklog(8 * 1024 * 1024);
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () =>
+            await scheduler.ReserveBacklogAsync(8 * 1024 * 1024, cancellation.Token));
 
-        Assert.AreEqual(4L * 1024 * 1024, scheduler.QueuedBytes);
-        Assert.AreEqual(12L * 1024 * 1024, scheduler.PeakQueuedBytes);
+        Assert.AreEqual(0, scheduler.QueuedBytes);
+        Assert.AreEqual(0, scheduler.PeakQueuedBytes);
     }
 
     private static StorageDeviceInfo Device(

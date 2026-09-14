@@ -13,12 +13,13 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 - Lectura principal SSD elegible: Direct I/O con buffers alineados y `NO_BUFFERING | SEQUENTIAL_SCAN | OVERLAPPED`, usando I/O async real.
 - Verificación post-copia automática: CRC32 por bloque generado una sola vez durante FAN-OUT; read-back Direct I/O overlapped cuando es elegible y fallback buffered async cuando no lo es.
 - Escritura actual: buffered, offsets explícitos, QD2 selectivo en SSD calificados. **No existe todavía Direct I/O de escritura.**
-- Scheduler y backlog por dispositivo físico; identidad incierta se trata conservadoramente.
+- Scheduler por dispositivo físico: QD es un límite duro de I/O físico; el backlog por rama es ahora un **soft watermark** de presión y ya no puede bloquear al productor mientras exista memoria FAN-OUT global disponible.
+- El límite duro de payload en vuelo es `AdaptiveByteBudget`; evita crecimiento ilimitado aunque una rama lenta supere ampliamente su watermark.
 - Estado interno fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
 
-## Ventanas vigentes por rama
+## Watermarks vigentes por rama
 
-| Rama | Backlog | QD máximo actual |
+| Rama | Soft backlog watermark | QD máximo actual |
 |---|---:|---:|
 | Network | 32 MiB | 1 |
 | Conservador/virtual/storage spaces | 64 MiB | 1 |
@@ -28,7 +29,7 @@ Igualar o superar el comportamiento de ExtremeCopy en FAN-OUT sobre destinos fí
 | SATA SSD | 256 MiB | 2 |
 | NVMe | 512 MiB | 2 |
 
-El backlog absorbe jitter; QD controla I/O físico simultáneo. No deben confundirse ni aumentarse sin evidencia.
+El watermark mide presión/lag de la rama; **no aplica backpressure al productor**. QD controla I/O físico simultáneo. El `AdaptiveByteBudget` global es el backpressure duro de memoria.
 
 ## Cerrado e integrado
 
@@ -38,26 +39,13 @@ El backlog absorbe jitter; QD controla I/O físico simultáneo. No deben confund
 - H-10: la lectura Direct I/O del origen usa `OVERLAPPED`/async real; se eliminó la sesión síncrona.
 - H-11/H-12/H-13: se eliminaron la verificación antigua escondida en `HashFileAsync`, APIs síncronas obsoletas, ramas nulas/test-only innecesarias y telemetría de verify que ya no tenía productor.
 - Verificación automática CRC32 con `FastVerificationReader` como única ruta post-copia.
+- P0: eliminado el hard gate de backlog por dispositivo. Una rama que supera su watermark entra en overflow sin esperar a que drene; el productor solo puede quedar frenado por el presupuesto global de buffers compartidos, cancelación o control-plane global. Se eliminó la cola `BacklogWaiter` y existe gate que impide reintroducirla.
 
 ## Prioridad actual
 
-### P0 — eliminar head-of-line entre ramas diferidas
-
-`DeliverDataAsync` entrega primero a las ramas con crédito inmediato, pero después espera la lista `deferred` secuencialmente. Si A sigue saturada y B ya tiene crédito, B todavía queda detrás de A.
-
-Corrección requerida:
-- reservas de backlog de ramas diferidas independientes;
-- entregar cada referencia del bloque tan pronto como su propia rama tenga crédito;
-- conservar orden dentro de cada destino, conteo de referencias, límites de memoria, cancelación y aislamiento de fallos.
-
-Gates:
-- dos ramas diferidas liberadas en orden inverso;
-- la rama lista primero recibe el bloque primero;
-- cancelación/fallo no fuga backlog ni referencias.
-
 ### P1 — Direct I/O selectivo de escritura
 
-Implementar solo después de cerrar P0 y sin sustituir ciegamente la ruta buffered. Requisitos:
+Implementar sin sustituir ciegamente la ruta buffered. Requisitos:
 - elegibilidad por topología/media/alineación;
 - `NO_BUFFERING | OVERLAPPED` y offsets/buffers alineados;
 - tail correcto;
@@ -69,21 +57,25 @@ Implementar solo después de cerrar P0 y sin sustituir ciegamente la ruta buffer
 
 `FastCrc32` sigue siendo tabla byte-a-byte. Optimizar únicamente con equivalencia IEEE CRC32 probada (por ejemplo slicing-by-8/16 o una ruta intrínseca validada) y medir CPU vs `VerifyReadTime`.
 
-### P1 — QD4 adaptativo
+### P1 — QD4/QD8 adaptativo
 
-No subir QD globalmente. Evaluar QD4 solo en SSD/NVMe/USB-SSD exactos después de P0 y Direct I/O de escritura, con rollback automático/política conservadora si throughput o latencia empeoran.
+No asumir que QD2 es óptimo. Evaluar QD4 en SATA/USB-SSD exactos y QD4/QD8 en NVMe cuando la ruta de escritura soporte más de dos operaciones reales en vuelo. La política debe retroceder automáticamente si throughput o latencia empeoran o si la identidad física es incierta.
 
 ### P1 — mismo dispositivo físico origen/destino
 
-Coordinar prefetch de origen y escritura cuando comparten el mismo disco, especialmente HDD, para evitar seek thrash. Mantener QD1 conservador hasta tener una política compartida medida.
+Coordinar prefetch de origen y escritura cuando comparten el mismo disco, especialmente HDD, para evitar seek thrash. Mantener QD1 en ese caso hasta tener una política compartida medida.
 
-### P2 — BLAKE3 y metadata/durabilidad
+### P1 — medir flush/commit/recovery en el hot path
 
-Optimizar BLAKE3, flush/commit o small-file metadata solo si la telemetría demuestra que dominan. No debilitar recovery para ganar un benchmark.
+`FinishFile` todavía puede pagar `FlushFileBuffers`, commit y checkpoint de recovery por archivo. No eliminar durabilidad a ciegas: instrumentar y, si domina el tiempo, agrupar/solapar trabajo sin dejar una segunda ruta de finalización.
+
+### P2 — BLAKE3 y small-file metadata
+
+Optimizar BLAKE3 o metadata de archivos pequeños solo si la telemetría demuestra que dominan después de cerrar las rutas de escritura más importantes.
 
 ## Benchmark físico contra ExtremeCopy
 
-Solo después de cerrar P0 y las mejoras seleccionadas. Usar mismo origen, destinos, dataset y opciones, con datos suficientemente grandes para superar cachés transitorias. Registrar:
+Después de cada mejora relevante, usar mismo origen, destinos, dataset y opciones, con datos suficientemente grandes para superar cachés transitorias. Registrar:
 
 - tiempo de copia, verificación y total;
 - MB/s del origen y de cada destino;

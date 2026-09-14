@@ -10,6 +10,10 @@ public sealed record DeviceIoSnapshot(
     long PeakQueuedBytes,
     DeviceIdentityConfidence IdentityConfidence = DeviceIdentityConfidence.Unknown)
 {
+    /// <summary>
+    /// Soft FAN-OUT backlog pressure. Values above 1 are intentionally allowed:
+    /// branch backlog is not a producer gate; the global FAN-OUT memory budget is.
+    /// </summary>
     public double BacklogPressure => BacklogTargetBytes <= 0
         ? 0
         : Math.Max(0, (double)QueuedBytes / BacklogTargetBytes);
@@ -17,14 +21,16 @@ public sealed record DeviceIoSnapshot(
 
 /// <summary>
 /// Coordinates physical-I/O pressure for destinations that resolve to the same
-/// device. It deliberately does not synchronize file completion between workers.
+/// device. Physical queue depth is a hard device limit. BacklogTargetBytes is a
+/// soft per-device watermark used to classify queue pressure; it must never make
+/// one slow destination stall the FAN-OUT producer while global shared-buffer
+/// memory remains available.
 /// </summary>
 internal sealed class DeviceScheduler : IDisposable
 {
     private readonly SemaphoreSlim _ioSlots;
     private readonly SemaphoreSlim _pairGate = new(1, 1);
     private readonly object _backlogGate = new();
-    private readonly Queue<BacklogWaiter> _backlogWaiters = new();
     private int _outstandingIo;
     private int _peakOutstandingIo;
     private long _queuedBytes;
@@ -106,10 +112,9 @@ internal sealed class DeviceScheduler : IDisposable
     }
 
     /// <summary>
-    /// Tries to reserve physical-device backlog immediately. FAN-OUT uses this
-    /// first so uncongested devices receive the SharedBlock before the producer
-    /// waits on a slower device. One oversized block is allowed when the queue is
-    /// empty so conservative targets can never deadlock forward progress.
+    /// Reserves backlog immediately while the branch remains at or below its soft
+    /// target. FAN-OUT calls this first so branches under normal pressure are
+    /// admitted before overflowed branches.
     /// </summary>
     public bool TryReserveBacklog(int bytes)
     {
@@ -117,115 +122,49 @@ internal sealed class DeviceScheduler : IDisposable
         lock (_backlogGate)
         {
             ThrowIfDisposed();
-            if (_backlogWaiters.Count != 0 || !CanReserveBacklogLocked(bytes))
+            var queued = Interlocked.Read(ref _queuedBytes);
+            if (queued + bytes > BacklogTargetBytes && queued != 0)
                 return false;
             ReserveBacklogLocked(bytes);
             return true;
         }
     }
 
+    /// <summary>
+    /// Admits a branch above its soft backlog target without waiting for that
+    /// branch to drain. This is intentional: a per-device queue watermark must
+    /// not become global FAN-OUT backpressure. AdaptiveByteBudget remains the hard
+    /// shared-payload memory ceiling and physical I/O is still bounded by
+    /// AcquireIoAsync/AcquireIoPairAsync.
+    /// </summary>
     public ValueTask ReserveBacklogAsync(int bytes, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+        token.ThrowIfCancellationRequested();
         lock (_backlogGate)
         {
             ThrowIfDisposed();
-            if (_backlogWaiters.Count == 0 && CanReserveBacklogLocked(bytes))
-            {
-                ReserveBacklogLocked(bytes);
-                return ValueTask.CompletedTask;
-            }
-
-            var waiter = new BacklogWaiter(bytes);
-            _backlogWaiters.Enqueue(waiter);
-            return new ValueTask(WaitForBacklogAsync(waiter, token));
+            ReserveBacklogLocked(bytes);
         }
+        return ValueTask.CompletedTask;
     }
 
     public void ReleaseBacklog(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-        List<BacklogWaiter>? ready;
         lock (_backlogGate)
         {
             var remaining = Interlocked.Read(ref _queuedBytes) - bytes;
             if (remaining < 0)
                 throw new InvalidOperationException("La cola física intentó liberar más bytes de los reservados.");
             Interlocked.Exchange(ref _queuedBytes, remaining);
-            ready = PumpBacklogWaitersLocked();
         }
-        CompleteBacklogWaiters(ready);
-    }
-
-    private async Task WaitForBacklogAsync(BacklogWaiter waiter, CancellationToken token)
-    {
-        try
-        {
-            await waiter.Completion.Task.WaitAsync(token).ConfigureAwait(false);
-        }
-        catch
-        {
-            List<BacklogWaiter>? ready;
-            lock (_backlogGate)
-            {
-                if (waiter.Granted)
-                {
-                    waiter.Granted = false;
-                    var remaining = Interlocked.Read(ref _queuedBytes) - waiter.Bytes;
-                    if (remaining < 0)
-                        throw new InvalidOperationException("Contabilidad de backlog inválida durante cancelación.");
-                    Interlocked.Exchange(ref _queuedBytes, remaining);
-                }
-                else
-                {
-                    waiter.Cancelled = true;
-                }
-                ready = PumpBacklogWaitersLocked();
-            }
-            CompleteBacklogWaiters(ready);
-            throw;
-        }
-    }
-
-    private bool CanReserveBacklogLocked(int bytes)
-    {
-        var queued = Interlocked.Read(ref _queuedBytes);
-        return queued + bytes <= BacklogTargetBytes || queued == 0;
     }
 
     private void ReserveBacklogLocked(int bytes)
     {
         var queued = Interlocked.Add(ref _queuedBytes, bytes);
         UpdateMax(ref _peakQueuedBytes, queued);
-    }
-
-    private List<BacklogWaiter>? PumpBacklogWaitersLocked()
-    {
-        List<BacklogWaiter>? ready = null;
-        while (_backlogWaiters.Count > 0)
-        {
-            var waiter = _backlogWaiters.Peek();
-            if (waiter.Cancelled)
-            {
-                _backlogWaiters.Dequeue();
-                continue;
-            }
-            if (!CanReserveBacklogLocked(waiter.Bytes))
-                break;
-            _backlogWaiters.Dequeue();
-            ReserveBacklogLocked(waiter.Bytes);
-            waiter.Granted = true;
-            (ready ??= []).Add(waiter);
-        }
-        return ready;
-    }
-
-    private static void CompleteBacklogWaiters(List<BacklogWaiter>? ready)
-    {
-        if (ready is null)
-            return;
-        foreach (var waiter in ready)
-            waiter.Completion.TrySetResult();
     }
 
     private void ReleaseIo()
@@ -248,17 +187,12 @@ internal sealed class DeviceScheduler : IDisposable
 
     public void Dispose()
     {
-        List<BacklogWaiter> pending = [];
         lock (_backlogGate)
         {
             if (_disposed)
                 return;
             _disposed = true;
-            while (_backlogWaiters.Count > 0)
-                pending.Add(_backlogWaiters.Dequeue());
         }
-        foreach (var waiter in pending)
-            waiter.Completion.TrySetException(new ObjectDisposedException(nameof(DeviceScheduler)));
         _pairGate.Dispose();
         _ioSlots.Dispose();
     }
@@ -287,14 +221,6 @@ internal sealed class DeviceScheduler : IDisposable
                 return;
             current = observed;
         }
-    }
-
-    private sealed class BacklogWaiter(int bytes)
-    {
-        public int Bytes { get; } = bytes;
-        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public bool Cancelled { get; set; }
-        public bool Granted { get; set; }
     }
 
     internal sealed class IoLease : IDisposable
