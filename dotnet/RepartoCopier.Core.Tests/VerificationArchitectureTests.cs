@@ -54,4 +54,16 @@ public sealed class VerificationArchitectureTests
         CollectionAssert.DoesNotContain(fields, "MaximumBudget");
         CollectionAssert.DoesNotContain(fields, "MaxBytes");
     }
+
+    [TestMethod]
+    public void PendingVerificationReadIsAValueType()
+    {
+        var pendingRead = typeof(FastVerificationReader).GetNestedType(
+            "PendingRead",
+            BindingFlags.NonPublic);
+
+        Assert.IsNotNull(pendingRead);
+        Assert.IsTrue(pendingRead.IsValueType, "PendingRead debe permanecer como readonly struct para no asignar un objeto por I/O pendiente.");
+        Assert.IsTrue(pendingRead.IsDefined(typeof(System.Runtime.CompilerServices.IsReadOnlyAttribute), inherit: false));
+    }
 }
