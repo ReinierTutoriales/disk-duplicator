@@ -108,6 +108,7 @@ public sealed class DirectIoSourceReaderTests
         Assert.AreEqual(typeof(string), parameters[0].ParameterType);
         Assert.AreEqual(typeof(CancellationToken), parameters[1].ParameterType);
         Assert.AreEqual("ResourceGovernor", parameters[2].ParameterType.Name);
+        Assert.IsFalse(parameters[2].HasDefaultValue);
     }
 
     [TestMethod]

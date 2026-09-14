@@ -66,7 +66,7 @@ internal static class FastVerificationReader
                 var lease = SourceBufferLease.RentAligned(requestSize, session.Alignment);
                 var started = Stopwatch.GetTimestamp();
                 var task = ReadDirectAsync(session, scheduler, lease, requestSize, offset, job.Token);
-                pending.Enqueue(new PendingRead(offset, expected, lease, started, task));
+                pending.Enqueue(new PendingRead(expected, lease, started, task));
                 offset = checked(offset + expected.Length);
             }
 
@@ -162,7 +162,6 @@ internal static class FastVerificationReader
     }
 
     private sealed record PendingRead(
-        long Offset,
         VerificationBlock Expected,
         SourceBufferLease Buffer,
         long Started,

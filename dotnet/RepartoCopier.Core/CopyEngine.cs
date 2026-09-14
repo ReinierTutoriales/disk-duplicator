@@ -1369,7 +1369,7 @@ public static class CopyEngine
     private static async Task<byte[]> HashFileAsync(
         string path,
         CancellationToken token,
-        ResourceGovernor? resources = null)
+        ResourceGovernor resources)
     {
         using var hasher = Hasher.New();
         const int bufferSize = 4 * 1024 * 1024;
@@ -1382,15 +1382,8 @@ public static class CopyEngine
             if (read == 0)
                 break;
 
-            if (resources is null)
-            {
-                hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
-            }
-            else
-            {
-                using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
-                hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
-            }
+            using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
+            hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
         }
 
         return hasher.Finalize().AsSpan().ToArray();
