@@ -24,8 +24,10 @@ jobs:
       - name: Apply branch pending-byte accounting migration
         shell: pwsh
         run: ./tools/patch-branch-pending-bytes.ps1
+      - name: Test dense FAN-OUT tree first
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --filter FullyQualifiedName~FanOutHandlesDenseSmallFileTreeAcrossFourDestinations
       - name: Test core Release
-        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
       - name: Restore WinUI x64
         run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
       - name: Build WinUI Release x64
