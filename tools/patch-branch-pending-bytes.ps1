@@ -11,6 +11,12 @@ function Replace-ExactlyOnce([string]$text, [string]$old, [string]$new, [string]
     return $text.Replace($old, $new)
 }
 
+function Replace-ExactlyN([string]$text, [string]$old, [string]$new, [int]$expected, [string]$label) {
+    $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
+    if ($count -ne $expected) { throw "$label expected exactly $expected matches, found $count." }
+    return $text.Replace($old, $new)
+}
+
 $engine = Replace-ExactlyOnce $engine @'
                 var backlogOwned = false;
                 var queueOwned = false;
@@ -113,7 +119,16 @@ $engine = Replace-ExactlyOnce $engine @'
                 await ReleasePendingWritesAsync(worker, current).ConfigureAwait(false);
 '@ 'pending cleanup worker argument'
 
-$engine = $engine.Replace('                block.Release();`n                return PendingWriteResult.Success();', '                ReleaseBranchBlock(worker, block);`n                return PendingWriteResult.Success();')
+$engine = Replace-ExactlyN $engine @'
+                worker.NoteProgress();
+                block.Release();
+                return PendingWriteResult.Success();
+'@ @'
+                worker.NoteProgress();
+                ReleaseBranchBlock(worker, block);
+                return PendingWriteResult.Success();
+'@ 2 'successful branch release'
+
 $engine = Replace-ExactlyOnce $engine @'
             catch (Exception ex)
             {
@@ -127,6 +142,7 @@ $engine = Replace-ExactlyOnce $engine @'
                 return PendingWriteResult.Failed(ex);
             }
 '@ 'direct failure branch release'
+
 $engine = Replace-ExactlyOnce $engine @'
         block.Release();
         return PendingWriteResult.Failed(
@@ -277,7 +293,12 @@ $engine = Replace-ExactlyOnce $engine @'
         }
 '@ 'worker pending accounting methods'
 
-if ($engine -match 'ReleaseQueuedMessage') { throw 'Obsolete ReleaseQueuedMessage helper remains.' }
+$contract = Replace-ExactlyOnce $contract @'
+        CollectionAssert.Contains(engineMethods, "ReleaseQueuedMessage");
+'@ @'
+        CollectionAssert.Contains(engineMethods, "ReleaseQueuedControl");
+        CollectionAssert.DoesNotContain(engineMethods, "ReleaseQueuedMessage");
+'@ 'control-plane release contract migration'
 
 $anchor = @'
     [TestMethod]
@@ -316,6 +337,11 @@ $test = @'
 '@
 if ($contract -notmatch 'DestinationBranchTracksPayloadUntilItsSharedReferenceIsActuallyReleased') {
     $contract = Replace-ExactlyOnce $contract $anchor ($test + $anchor) 'branch pending contract anchor'
+}
+
+if ($engine -match 'ReleaseQueuedMessage') { throw 'Obsolete ReleaseQueuedMessage helper remains.' }
+if (($engine | Select-String -Pattern 'worker\.NoteProgress\(\);\s+block\.Release\(\);\s+return PendingWriteResult\.Success\(\);' -AllMatches).Matches.Count -ne 0) {
+    throw 'A successful writer path still releases SharedBlock without branch pending-byte accounting.'
 }
 
 Set-Content -Path $enginePath -Value $engine -NoNewline
