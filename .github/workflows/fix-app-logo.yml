@@ -22,14 +22,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing
-          $icoPath = Resolve-Path 'dotnet/RepartoCopier.WinUI/Assets/AppLogo.ico'
+          $icoPath = [string](Resolve-Path 'dotnet/RepartoCopier.WinUI/Assets/AppLogo.ico')
           $pngPath = Join-Path (Split-Path $icoPath) 'AppLogo.png'
 
-          $icon = New-Object System.Drawing.Icon($icoPath, 256, 256)
+          $icon = [System.Drawing.Icon]::new($icoPath, 256, 256)
           try {
             $source = $icon.ToBitmap()
             try {
-              $bitmap = New-Object System.Drawing.Bitmap(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+              $bitmap = [System.Drawing.Bitmap]::new(256, 256, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
               try {
                 $g = [System.Drawing.Graphics]::FromImage($bitmap)
                 try {
@@ -40,11 +40,11 @@ jobs:
                 # Remove only exact opaque black connected to an outer edge.
                 # This preserves any intentional black pixels isolated inside the logo.
                 $queue = [System.Collections.Generic.Queue[System.Drawing.Point]]::new()
-                $seen = New-Object 'bool[,]' 256,256
+                $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
                 function Try-Enqueue([int]$x, [int]$y) {
                   if ($x -lt 0 -or $x -ge 256 -or $y -lt 0 -or $y -ge 256) { return }
-                  if ($seen[$x,$y]) { return }
-                  $seen[$x,$y] = $true
+                  $key = "$x,$y"
+                  if (-not $seen.Add($key)) { return }
                   $c = $bitmap.GetPixel($x,$y)
                   if ($c.A -eq 255 -and $c.R -eq 0 -and $c.G -eq 0 -and $c.B -eq 0) {
                     $queue.Enqueue([System.Drawing.Point]::new($x,$y))
@@ -72,7 +72,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.Drawing
-          $path = Resolve-Path 'dotnet/RepartoCopier.WinUI/Assets/AppLogo.png'
+          $path = [string](Resolve-Path 'dotnet/RepartoCopier.WinUI/Assets/AppLogo.png')
           $bytes = [System.IO.File]::ReadAllBytes($path)
           if ($bytes.Length -lt 1000) { throw 'PNG unexpectedly small.' }
           $signature = [byte[]](137,80,78,71,13,10,26,10)
