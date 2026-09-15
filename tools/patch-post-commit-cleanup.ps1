@@ -264,8 +264,15 @@ Replace-Exact $contract @'
 '@
 
 Replace-Exact $contract @'
+        var record = currentFile.GetMethod("RecordCompletedWrite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNotNull(record);
+    }
 }
 '@ @'
+        var record = currentFile.GetMethod("RecordCompletedWrite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNotNull(record);
+    }
+
     private static bool MethodCalls(MethodInfo caller, MethodInfo target)
     {
         var il = caller.GetMethodBody()?.GetILAsByteArray();
