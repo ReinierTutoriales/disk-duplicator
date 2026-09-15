@@ -394,6 +394,29 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void RecoveryHasConservativeGlobalOrphanPartCleanup()
+    {
+        var cleanup = typeof(RecoveryManager).GetMethod(
+            "CleanupOwnedOrphanParts",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("RecoveryManager.CleanupOwnedOrphanParts no existe.");
+        var prepare = typeof(RecoveryManager).GetMethod(
+            "PrepareAndNormalize",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("RecoveryManager.PrepareAndNormalize no existe.");
+        Assert.IsTrue(MethodCalls(prepare, cleanup), "PrepareAndNormalize debe consumir el cleanup global de .part bajo el lease del destino.");
+
+        var classifier = typeof(RecoveryManager).GetMethod(
+            "IsOwnedTransientPartName",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("RecoveryManager.IsOwnedTransientPartName no existe.");
+        Assert.AreEqual(true, classifier.Invoke(null, [$"{new string('a', 32)}.part"]));
+        Assert.AreEqual(true, classifier.Invoke(null, [$"{new string('b', 24)}.part"]));
+        Assert.AreEqual(false, classifier.Invoke(null, [$"{new string('c', 32)}.bak"]));
+        Assert.AreEqual(false, classifier.Invoke(null, ["foreign.part"]));
+    }
+
+    [TestMethod]
     public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
     {
         var engineMethods = typeof(CopyEngine)
