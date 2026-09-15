@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/patch-retry-replay-gaps.ps1'
+      - 'tools/patch-retry-replay-gaps-v2.ps1'
       - '.github/workflows/migrate-retry-replay-gaps.yml'
 
 permissions:
@@ -35,7 +36,7 @@ jobs:
 
       - name: Apply retry and replay patch
         shell: pwsh
-        run: ./tools/patch-retry-replay-gaps.ps1
+        run: ./tools/patch-retry-replay-gaps-v2.ps1
 
       - name: Core tests Release
         shell: pwsh
@@ -74,7 +75,7 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
-          git rm tools/patch-retry-replay-gaps.ps1
+          git rm tools/patch-retry-replay-gaps.ps1 tools/patch-retry-replay-gaps-v2.ps1
           git add dotnet docs tools
           git diff --cached --check
           git status --short
