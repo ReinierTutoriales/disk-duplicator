@@ -235,6 +235,20 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void VerificationDiagnosticsExposeReadVsCrc32CBottleneck()
+    {
+        var properties = typeof(CopyDiagnosticsSnapshot)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(properties, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CBytes));
+        CollectionAssert.Contains(properties, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CTime));
+        CollectionAssert.Contains(properties, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CBytesPerSecond));
+        CollectionAssert.Contains(properties, nameof(CopyDiagnosticsSnapshot.VerificationBottleneck));
+        Assert.AreEqual(typeof(VerificationBottleneckKind),
+            typeof(CopyDiagnosticsSnapshot).GetProperty(nameof(CopyDiagnosticsSnapshot.VerificationBottleneck))!.PropertyType);
+    }
+    [TestMethod]
     public void DirectIoAlignmentHasNoSixtyFourKiBCap()
     {
         var field = typeof(DirectIoSourceReader).GetField(

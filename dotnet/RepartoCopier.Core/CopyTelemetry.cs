@@ -3,6 +3,13 @@ using System.Threading;
 
 namespace RepartoCopier.Core;
 
+public enum VerificationBottleneckKind
+{
+    None,
+    StorageRead,
+    Crc32C,
+    Balanced,
+}
 public sealed record PipelineGovernorSnapshot(
     int CurrentPrefetchLimit,
     int MinimumObservedPrefetchLimit,
@@ -48,6 +55,14 @@ public sealed record CopyDiagnosticsSnapshot(
     public double WriteBytesPerSecond => Rate(WrittenBytes, WriteTime);
     public double VerifyReadBytesPerSecond => Rate(VerifyReadBytes, VerifyReadTime);
     public double VerifyHashBytesPerSecond => Rate(VerifyHashBytes, VerifyHashTime);
+    public long VerifyCrc32CBytes => VerifyHashBytes;
+    public TimeSpan VerifyCrc32CTime => VerifyHashTime;
+    public double VerifyCrc32CBytesPerSecond => Rate(VerifyCrc32CBytes, VerifyCrc32CTime);
+    public VerificationBottleneckKind VerificationBottleneck => ClassifyVerificationBottleneck(
+        VerifyReadBytesPerSecond,
+        VerifyCrc32CBytesPerSecond,
+        VerifyReadBytes,
+        VerifyCrc32CBytes);
     public double SourceReadWallClockBytesPerSecond => Rate(SourceReadBytes, CopyPhaseElapsed);
     public double FanoutLogicalWriteWallClockBytesPerSecond => Rate(WrittenBytes, CopyPhaseElapsed);
     public double SustainedWrite5sBytesPerSecond { get; init; }
@@ -74,6 +89,23 @@ public sealed record CopyDiagnosticsSnapshot(
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
+
+    private static VerificationBottleneckKind ClassifyVerificationBottleneck(
+        double readBytesPerSecond,
+        double crc32CBytesPerSecond,
+        long readBytes,
+        long crc32CBytes)
+    {
+        if (readBytes <= 0 || crc32CBytes <= 0 || readBytesPerSecond <= 0 || crc32CBytesPerSecond <= 0)
+            return VerificationBottleneckKind.None;
+
+        const double materialDifference = 0.85;
+        if (readBytesPerSecond < crc32CBytesPerSecond * materialDifference)
+            return VerificationBottleneckKind.StorageRead;
+        if (crc32CBytesPerSecond < readBytesPerSecond * materialDifference)
+            return VerificationBottleneckKind.Crc32C;
+        return VerificationBottleneckKind.Balanced;
+    }
 }
 
 internal sealed class CopyTelemetry

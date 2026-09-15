@@ -81,9 +81,9 @@ El `BlockSize` fijo y las bandas de `ReadBufferSizeFor` fueron eliminados. `Adap
 
 El techo artificial de 64 KiB fue eliminado de source, destination y verify. La elegibilidad Direct I/O ahora acepta cualquier alineación de sector conocida >=512 que sea potencia de dos y compatible con el tamaño de transferencia. Los buffers FAN-OUT reciben la alineación máxima real de los dispositivos participantes; replay usa la alineación del destino y verification abre Direct con la alineación requerida por ese dispositivo. Existe contrato sintético de 128 KiB. Pendiente únicamente validación con hardware real que reporte alineaciones superiores a 64 KiB.
 
-### P2 — CPU por byte / verificación
+### VALIDACIÓN FÍSICA — CPU por byte / verificación
 
-CRC32C interno ya dispone de ruta hardware y fallback software Castagnoli bit-idéntico. El siguiente paso no es cambiar otra vez de algoritmo: medir GiB/s de lectura, tiempo de checksum y CPU en hardware real para comprobar cuánto aporta la aceleración y si la verificación está limitada por I/O o CPU.
+CRC32C interno ya dispone de ruta hardware y fallback software Castagnoli bit-idéntico. La telemetría conserva las métricas históricas `VerifyHash*` por compatibilidad y expone aliases explícitos `VerifyCrc32CBytes`, `VerifyCrc32CTime` y `VerifyCrc32CBytesPerSecond`. `VerificationBottleneck` clasifica la tasa de servicio como `StorageRead`, `Crc32C`, `Balanced` (banda del 15%) o `None` sin muestras suficientes. El mensaje de mismatch productivo también identifica CRC32C. Pendiente únicamente validar en hardware real GiB/s, CPU y la clasificación frente al tiempo de pared.
 
 ## Benchmark físico contra ExtremeCopy
 
@@ -95,7 +95,7 @@ Usar el mismo origen, destinos, dataset y opciones. Registrar:
 - QD inicial/actual/máximo/mejor y tiempo hasta el QD útil;
 - source idle / destination idle;
 - CPU y RAM;
-- fan-out wait, buffer wait y hash time;
+- fan-out wait, buffer wait, verify read GiB/s, CRC32C GiB/s y `VerificationBottleneck`;
 - Direct I/O fallbacks;
 - efecto de una rama lenta sobre las rápidas.
 
