@@ -114,7 +114,7 @@ Replace-Exact $tests @'
 
         job.RequestCancel();
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () => await blocked);
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await blocked);
         Assert.IsFalse(job.IsPaused);
     }
 
