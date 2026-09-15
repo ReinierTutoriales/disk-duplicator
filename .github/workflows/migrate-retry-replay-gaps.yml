@@ -4,9 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tools/patch-retry-replay-gaps.ps1'
-      - 'tools/patch-retry-replay-gaps-v2.ps1'
-      - 'tools/patch-retry-replay-gaps-v3.ps1'
+      - 'tools/patch-retry-replay-gaps-v4.ps1'
       - '.github/workflows/migrate-retry-replay-gaps.yml'
 
 permissions:
@@ -37,7 +35,7 @@ jobs:
 
       - name: Apply retry and replay patch
         shell: pwsh
-        run: ./tools/patch-retry-replay-gaps-v3.ps1
+        run: ./tools/patch-retry-replay-gaps-v4.ps1
 
       - name: Core tests Release
         shell: pwsh
@@ -76,9 +74,21 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
-          git rm tools/patch-retry-replay-gaps.ps1 tools/patch-retry-replay-gaps-v2.ps1 tools/patch-retry-replay-gaps-v3.ps1
-          git add dotnet docs tools
+          git rm tools/patch-retry-replay-gaps-v4.ps1
+          git add -A
           git diff --cached --check
+          $required = @(
+            'dotnet/RepartoCopier.Core/TransientIoErrorClassifier.cs',
+            'dotnet/RepartoCopier.Core/BranchReplayPlacement.cs',
+            'dotnet/RepartoCopier.Core/BranchReplayGate.cs',
+            'dotnet/RepartoCopier.Core/BranchReplayStore.cs',
+            'dotnet/RepartoCopier.Core/CopyEngine.cs',
+            'dotnet/RepartoCopier.Core.Tests/RetryAndReplayArchitectureTests.cs'
+          )
+          $staged = @(git diff --cached --name-only)
+          foreach ($path in $required) {
+            if ($staged -notcontains $path) { throw "Required productive change was not staged: $path" }
+          }
           git status --short
           git commit -m "fix: wire transient retries and harden branch replay"
           git pull --rebase origin main
