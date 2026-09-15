@@ -1,0 +1,53 @@
+name: Semantic unification audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/audit-unification.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore solution
+        shell: pwsh
+        run: dotnet restore RepartoCopier.sln
+
+      - name: Build Core with all SDK analyzers
+        shell: pwsh
+        continue-on-error: true
+        run: dotnet build dotnet/RepartoCopier.Core/RepartoCopier.Core.csproj -c Release --no-restore -p:AnalysisMode=All -p:AnalysisLevel=latest-all -p:TreatWarningsAsErrors=false
+
+      - name: Build WinUI with all SDK analyzers
+        shell: pwsh
+        continue-on-error: true
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 -p:AnalysisMode=All -p:AnalysisLevel=latest-all -p:TreatWarningsAsErrors=false
+
+      - name: Verify analyzer formatting
+        shell: pwsh
+        continue-on-error: true
+        run: dotnet format analyzers RepartoCopier.sln --verify-no-changes --severity info --verbosity diagnostic
+
+      - name: Verify style formatting
+        shell: pwsh
+        continue-on-error: true
+        run: dotnet format style RepartoCopier.sln --verify-no-changes --severity info --verbosity diagnostic
+
+      - name: Verify whitespace formatting
+        shell: pwsh
+        continue-on-error: true
+        run: dotnet format whitespace RepartoCopier.sln --verify-no-changes --verbosity diagnostic
+
+      - name: Baseline release tests
+        shell: pwsh
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
