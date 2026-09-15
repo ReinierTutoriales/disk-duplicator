@@ -20,8 +20,9 @@ dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r
 - Solapamientos origen/destinos y destino/destino.
 - Conflictos archivo/carpeta y reparse points.
 - Cálculo de espacio con reserva y granularidad de asignación.
-- Recovery: journal, manifest, backup, corrupción, estado legacy y validación BLAKE3 física.
-- Pausa, continuación, cancelación y fallo aislado por destino.
+- Recovery: journal/manifest, rewrites interrumpidos, backup, corrupción, estado legacy, `.part` huérfanos, lease exclusivo por destino y validación BLAKE3 física.
+- Pausa, continuación, cancelación desde pausa, fallo aislado por destino y recuperación/reintento posterior de la rama fallida.
+- Replay por rama lenta: ubicación física segura, identidad exacta, histéresis y degradación a memoria si el spill no está disponible.
 - Gobernadores adaptativos: RAM por bytes, prefetch, backpressure y trabajo CPU-bound.
 - Telemetría: source read/hash, buffer wait, FAN-OUT/backpressure, write, flush, commit, recovery y verify.
 
@@ -72,3 +73,5 @@ Antes de comparar dos cambios, usar el mismo dataset, origen, destinos, opciones
 ## Pruebas de fallo físico antes de release
 
 Además del benchmark, validar desconexión de un destino, cancelación durante lectura/escritura/commit, pausa/reanudación prolongada, falta de espacio, paths Unicode/UNC y recuperación después de una interrupción. Ninguna mejora de rendimiento puede reducir estas garantías.
+
+Las pruebas automatizadas cubren aislamiento lógico, cancelación, recovery y fallos de commit reproducibles. La desconexión física real de USB/SATA/NVMe y el comportamiento del controlador siguen siendo un gate de hardware: no deben considerarse sustituidos por mocks o CI.
