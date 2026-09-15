@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tools/patch-destination-state-lock.ps1'
+      - 'tools/patch-destination-state-lock-v2.ps1'
       - '.github/workflows/migrate-destination-state-lock.yml'
 
 permissions:
@@ -30,9 +30,9 @@ jobs:
       - name: Restore solution
         shell: pwsh
         run: dotnet restore RepartoCopier.sln
-      - name: Apply destination state lock patch
+      - name: Apply corrected destination state lock patch
         shell: pwsh
-        run: ./tools/patch-destination-state-lock.ps1
+        run: ./tools/patch-destination-state-lock-v2.ps1
       - name: Core tests Release
         shell: pwsh
         run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
@@ -53,7 +53,7 @@ jobs:
       - name: Upload validation build
         uses: actions/upload-artifact@v6
         with:
-          name: RepartoCopier-destination-state-lock-win-x64
+          name: RepartoCopier-destination-state-lock-v2-win-x64
           path: artifact/RepartoCopier/RepartoCopier.WinUI.exe
           if-no-files-found: error
           retention-days: 14
@@ -61,17 +61,15 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
-          git rm tools/patch-destination-state-lock.ps1
+          git rm tools/patch-destination-state-lock-v2.ps1
           git add -A
           git diff --cached --check
           $required = @(
             'dotnet/RepartoCopier.Core/DestinationStateLease.cs',
-            'dotnet/RepartoCopier.Core/CopyEngine.cs',
-            'dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs',
-            'dotnet/RepartoCopier.Core.Tests/UnificationContractTests.cs'
+            'dotnet/RepartoCopier.Core.Tests/CoreParityTests.cs'
           )
           $staged = @(git diff --cached --name-only)
           foreach ($path in $required) { if ($staged -notcontains $path) { throw "Required productive change was not staged: $path" } }
-          git commit -m "fix: lock destination recovery state per operation"
+          git commit -m "fix: preserve state migration while holding destination lock"
           git pull --rebase origin main
           git push origin main
