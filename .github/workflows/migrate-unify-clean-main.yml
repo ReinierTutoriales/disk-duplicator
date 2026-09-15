@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tools/patch-unify-clean-main-v2.ps1'
+      - 'tools/patch-unify-clean-main-v3.ps1'
       - '.github/workflows/migrate-unify-clean-main.yml'
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Apply unification cleanup
         shell: pwsh
-        run: ./tools/patch-unify-clean-main-v2.ps1
+        run: ./tools/patch-unify-clean-main-v3.ps1
 
       - name: Core tests Release
         shell: pwsh
@@ -73,7 +73,7 @@ jobs:
       - name: Commit productive cleanup and remove migration infrastructure
         shell: pwsh
         run: |
-          git rm tools/patch-unify-clean-main.ps1 tools/patch-unify-clean-main-v2.ps1 .github/workflows/migrate-unify-clean-main.yml
+          git rm tools/patch-unify-clean-main.ps1 tools/patch-unify-clean-main-v2.ps1 tools/patch-unify-clean-main-v3.ps1 .github/workflows/migrate-unify-clean-main.yml
           git add -A
           git diff --cached --check
           git status --short
