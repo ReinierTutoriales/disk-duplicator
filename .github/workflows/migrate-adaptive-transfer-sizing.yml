@@ -29,6 +29,17 @@ jobs:
       - name: Apply adaptive transfer sizing
         shell: pwsh
         run: ./tools/patch-adaptive-transfer-sizing.ps1
+      - name: Correct MSTest bound ordering
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core.Tests/SourceWindowPerformanceTests.cs'
+          $content = Get-Content -LiteralPath $path -Raw
+          $content = $content.Replace('Assert.IsGreaterThan(pressured, 0);', 'Assert.IsGreaterThan(0, pressured);')
+          $content = $content.Replace('Assert.IsGreaterThan(pressured, 4095);', 'Assert.IsGreaterThan(4095, pressured);')
+          $content = $content.Replace('Assert.IsGreaterThan(roomy, pressured);', 'Assert.IsGreaterThan(pressured, roomy);')
+          $content = $content.Replace('Assert.IsLessThan(measured, initial);', 'Assert.IsLessThan(initial, measured);')
+          $content = $content.Replace('Assert.IsGreaterThanOrEqualTo(governor.Snapshot().CurrentPrefetchLimit, before);', 'Assert.IsGreaterThanOrEqualTo(before, governor.Snapshot().CurrentPrefetchLimit);')
+          Set-Content -LiteralPath $path -Value $content -Encoding utf8
       - name: Normalize generated output
         shell: pwsh
         run: |
