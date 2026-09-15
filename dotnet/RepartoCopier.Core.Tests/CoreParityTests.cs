@@ -342,6 +342,22 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void DestinationStateLeaseRejectsConcurrentOwnerAndRecoversAfterRelease()
+    {
+        using var temp = new TempDirectory("destination-state-lease");
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+
+        using (var first = DestinationStateLease.Acquire(destination))
+        {
+            var error = Assert.ThrowsExactly<IOException>(() => DestinationStateLease.Acquire(destination));
+            StringAssert.Contains(error.Message, "ya está siendo usado");
+        }
+
+        using var reacquired = DestinationStateLease.Acquire(destination);
+        Assert.AreEqual(Path.GetFullPath(destination), reacquired.DestinationRoot);
+    }
+
+    [TestMethod]
     public async Task PipelineGovernorCancellationDoesNotLeakPrefetchCapacity()
     {
         var pipelineBudget = new CopyEngine.AdaptiveByteBudget(4, 4);

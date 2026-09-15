@@ -373,6 +373,27 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void DestinationStateLeaseIsAcquiredByPreflightAndReleasedByRunLifetime()
+    {
+        var acquire = typeof(DestinationStateLease).GetMethod("Acquire", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("DestinationStateLease.Acquire no existe.");
+        var release = typeof(CopyEngine).GetNestedType("PreparedCopy", BindingFlags.NonPublic)
+            ?.GetMethod("ReleaseStateLeases", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            ?? throw new AssertFailedException("PreparedCopy.ReleaseStateLeases no existe.");
+        var preflight = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("CopyEngine.Preflight no existe.");
+        Assert.IsTrue(MethodCalls(preflight, acquire), "Preflight debe adquirir el lease antes de recovery.");
+
+        var run = typeof(CopyEngine).GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("CopyEngine.RunAsync no existe.");
+        var stateMachine = run.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>()?.StateMachineType
+            ?? throw new AssertFailedException("RunAsync debe conservar su state machine async.");
+        var moveNext = stateMachine.GetMethod("MoveNext", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("No se encontró MoveNext de RunAsync.");
+        Assert.IsTrue(MethodCalls(moveNext, release), "RunAsync debe liberar los leases en su finally productivo.");
+    }
+
+    [TestMethod]
     public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
     {
         var engineMethods = typeof(CopyEngine)
