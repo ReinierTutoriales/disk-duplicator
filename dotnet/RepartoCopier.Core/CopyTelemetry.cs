@@ -68,6 +68,9 @@ public sealed record CopyDiagnosticsSnapshot(
     public long BranchReplayReadBytes { get; init; }
     public TimeSpan BranchReplayReadTime { get; init; }
     public long BranchReplaySegments { get; init; }
+    public int CurrentTransferBytes { get; init; }
+    public int MinimumTransferBytes { get; init; }
+    public int MaximumTransferBytes { get; init; }
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -94,6 +97,7 @@ internal sealed class CopyTelemetry
     private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
     private long _branchReplayWriteBytes, _branchReplayWriteTicks;
     private long _branchReplayReadBytes, _branchReplayReadTicks, _branchReplaySegments;
+    private int _currentTransferBytes, _minimumTransferBytes = int.MaxValue, _maximumTransferBytes;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
 
@@ -152,6 +156,13 @@ internal sealed class CopyTelemetry
     }
     internal void RecordBranchReplayWrite(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayWriteBytes, bytes); AddTicks(ref _branchReplayWriteTicks, elapsed); Interlocked.Increment(ref _branchReplaySegments); }
     internal void RecordBranchReplayRead(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayReadBytes, bytes); AddTicks(ref _branchReplayReadTicks, elapsed); }
+    internal void RecordTransferSize(int bytes)
+    {
+        if (bytes <= 0) return;
+        Volatile.Write(ref _currentTransferBytes, bytes);
+        UpdateMin(ref _minimumTransferBytes, bytes);
+        UpdateMax(ref _maximumTransferBytes, bytes);
+    }
     internal void RecordCopyPhase(TimeSpan elapsed) => AddTicks(ref _copyPhaseTicks, elapsed);
     internal void RecordVerifyPhase(TimeSpan elapsed) => AddTicks(ref _verifyPhaseTicks, elapsed);
 
@@ -205,6 +216,9 @@ internal sealed class CopyTelemetry
             BranchReplayReadBytes = Interlocked.Read(ref _branchReplayReadBytes),
             BranchReplayReadTime = ToTimeSpan(Interlocked.Read(ref _branchReplayReadTicks)),
             BranchReplaySegments = Interlocked.Read(ref _branchReplaySegments),
+            CurrentTransferBytes = Volatile.Read(ref _currentTransferBytes),
+            MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
+            MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
         };
     }
 
@@ -216,6 +230,27 @@ internal sealed class CopyTelemetry
         if (ticks > 0) Interlocked.Add(ref target, ticks);
     }
     private static TimeSpan ToTimeSpan(long ticks) => ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
+    private static void UpdateMin(ref int target, int value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value < current)
+        {
+            var observed = Interlocked.CompareExchange(ref target, value, current);
+            if (observed == current) return;
+            current = observed;
+        }
+    }
+    private static void UpdateMax(ref int target, int value)
+    {
+        var current = Volatile.Read(ref target);
+        while (value > current)
+        {
+            var observed = Interlocked.CompareExchange(ref target, value, current);
+            if (observed == current) return;
+            current = observed;
+        }
+    }
+
     private static void UpdateMax(ref long target, long value)
     {
         var current = Volatile.Read(ref target);

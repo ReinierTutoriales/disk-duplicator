@@ -91,11 +91,6 @@ public sealed class CopyJob : IAsyncDisposable
 
 public static class CopyEngine
 {
-    private const int BlockSize = 32 * 1024 * 1024;
-
-    private const int SmallBufferSize = 64 * 1024;
-    private const int MediumBufferSize = 1024 * 1024;
-    private const int LargeBufferSize = 4 * 1024 * 1024;
 
     private const long InitialBufferBudget = 512L * 1024 * 1024;
 
@@ -253,7 +248,7 @@ public static class CopyEngine
         using var resources = new ResourceGovernor();
         var bufferBudget = AdaptiveByteBudget.CreateForSystem();
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
-        var pipeline = new PipelineGovernor(bufferBudget, BlockSize);
+        var pipeline = new PipelineGovernor(bufferBudget, Math.Max(1, Environment.SystemPageSize));
         job.Telemetry.AttachPipelineGovernor(pipeline.Snapshot);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -401,12 +396,32 @@ public static class CopyEngine
 
                 await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
 
-                var readBufferSize = ReadBufferSizeFor(entry.Size);
+                var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
+                var signals = active
+                    .Select(worker => worker.DeviceScheduler.Snapshot())
+                    .Select(snapshot => new TransferDeviceSignal(
+                        snapshot.CurrentQueueDepth,
+                        snapshot.BestObservedQueueDepth,
+                        snapshot.BestObservedThroughputBytesPerSecond,
+                        snapshot.BestObservedAverageLatencyMilliseconds))
+                    .ToArray();
+                var readBufferSize = AdaptiveTransferSizer.Select(
+                    entry.Size,
+                    active.Count,
+                    transferAlignment,
+                    bufferBudget.TargetBytes,
+                    bufferBudget.UsedBytes,
+                    Math.Max(1, pipeline.Snapshot().CurrentPrefetchLimit),
+                    signals);
+                pipeline.SetBytesPerBlock(readBufferSize);
+                job.Telemetry.RecordTransferSize(readBufferSize);
+
                 var sourceResult = entry.Size > readBufferSize
                     ? await ReadAndFanOutPrefetchedAsync(
                         entry,
                         copy.SourceDevice,
                         active,
+                        readBufferSize,
                         bufferBudget,
                         job,
                         pipeline,
@@ -415,6 +430,7 @@ public static class CopyEngine
                         entry,
                         copy.SourceDevice,
                         active,
+                        readBufferSize,
                         bufferBudget,
                         job,
                         pipeline,
@@ -448,13 +464,13 @@ public static class CopyEngine
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
+        int readBufferSize,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler)
     {
         using var hasher = Hasher.New();
-        var readBufferSize = ReadBufferSizeFor(entry.Size);
         DirectIoSourceReader.OverlappedSession? direct = null;
         FileStream? buffered = null;
         try
@@ -565,6 +581,7 @@ public static class CopyEngine
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
+        int readBufferSize,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
@@ -580,7 +597,7 @@ public static class CopyEngine
         var readTask = PrefetchSourceAsync(
             entry,
             sourceDevice,
-            ReadBufferSizeFor(entry.Size),
+            readBufferSize,
             sourceQueue.Writer,
             bufferBudget,
             job,
@@ -1751,12 +1768,28 @@ public static class CopyEngine
 
     private static long ToUnixNanoseconds(DateTime utc) =>
         checked((utc.ToUniversalTime().Ticks - DateTime.UnixEpoch.Ticks) * 100L);
+    private static int TransferAlignmentFor(
+        StorageDeviceInfo source,
+        IReadOnlyList<DestinationWorker> active)
+    {
+        var alignment = Math.Max(1, Environment.SystemPageSize);
+        if (source.HasKnownSectorAlignment)
+        {
+            var sourceAlignment = DirectIoSourceReader.RequiredAlignment(source);
+            if (sourceAlignment > 0 && (sourceAlignment & (sourceAlignment - 1)) == 0)
+                alignment = Math.Max(alignment, sourceAlignment);
+        }
+        foreach (var worker in active)
+        {
+            if (!worker.Device.HasKnownSectorAlignment)
+                continue;
+            var destinationAlignment = DirectIoSourceReader.RequiredAlignment(worker.Device);
+            if (destinationAlignment > 0 && (destinationAlignment & (destinationAlignment - 1)) == 0)
+                alignment = Math.Max(alignment, destinationAlignment);
+        }
+        return alignment;
+    }
 
-    private static int ReadBufferSizeFor(long fileSize) =>
-        fileSize <= SmallBufferSize ? SmallBufferSize :
-        fileSize <= MediumBufferSize ? MediumBufferSize :
-        fileSize <= LargeBufferSize ? LargeBufferSize :
-        BlockSize;
 
     private static FileStream ReopenPart(string path) =>
         OpenPartStream(path, FileMode.Open, preallocationSize: 0);
@@ -1963,7 +1996,7 @@ public static class CopyEngine
         private readonly object _gate = new();
         private readonly Queue<PrefetchWaiter> _slotWaiters = new();
         private readonly AdaptiveByteBudget _budget;
-        private readonly int _bytesPerBlock;
+        private int _bytesPerBlock;
         private int _prefetchLimit;
         private int _minimumObservedPrefetchLimit;
         private int _maximumObservedPrefetchLimit;
@@ -2017,6 +2050,18 @@ public static class CopyEngine
             }
         }
 
+        internal void SetBytesPerBlock(int bytesPerBlock)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerBlock);
+            lock (_gate)
+            {
+                _bytesPerBlock = bytesPerBlock;
+                var capacity = CurrentCapacityLocked();
+                if (_prefetchLimit > capacity)
+                    _prefetchLimit = capacity;
+                PumpSlotsLocked();
+            }
+        }
         public ValueTask AcquirePrefetchSlotAsync(CancellationToken token)
         {
             lock (_gate)
@@ -2363,6 +2408,7 @@ public static class CopyEngine
         private readonly object _gate = new();
         private readonly Queue<Waiter> _waiters = new();
         private readonly Func<long, long> _capacityProvider;
+        private readonly bool _usesSystemCapacity;
         private long _targetBytes;
         private long _usedBytes;
 
@@ -2377,24 +2423,29 @@ public static class CopyEngine
         }
 
         internal AdaptiveByteBudget(long initialBytes, long maximumBytes)
-            : this(initialBytes, _ => maximumBytes)
+            : this(initialBytes, _ => maximumBytes, usesSystemCapacity: false)
         {
             if (maximumBytes <= 0 || initialBytes <= 0 || initialBytes > maximumBytes)
                 throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         }
 
-        private AdaptiveByteBudget(long initialBytes, Func<long, long> capacityProvider)
+        private AdaptiveByteBudget(
+            long initialBytes,
+            Func<long, long> capacityProvider,
+            bool usesSystemCapacity)
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialBytes);
             _capacityProvider = capacityProvider ?? throw new ArgumentNullException(nameof(capacityProvider));
+            _usesSystemCapacity = usesSystemCapacity;
             _targetBytes = initialBytes;
         }
 
         public static AdaptiveByteBudget CreateForSystem()
         {
-            var safeNow = GetSystemSafeCapacity(0);
-            var initial = Math.Max((long)BlockSize, Math.Min(InitialBufferBudget, safeNow));
-            return new AdaptiveByteBudget(initial, GetSystemSafeCapacity);
+            var progressQuantum = Math.Max(1, Environment.SystemPageSize);
+            var safeNow = MemoryPressureCapacity.GetSafeTotalBytes(0, progressQuantum);
+            var initial = Math.Max((long)progressQuantum, Math.Min(InitialBufferBudget, safeNow));
+            return new AdaptiveByteBudget(initial, _ => 0, usesSystemCapacity: true);
         }
 
         internal int GetAdmissibleConcurrency(int bytesPerBlock)
@@ -2402,7 +2453,7 @@ public static class CopyEngine
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerBlock);
             lock (_gate)
             {
-                var capacity = CurrentSafeCapacityLocked();
+                var capacity = CurrentSafeCapacityLocked(bytesPerBlock);
                 var blocks = Math.Max(1L, capacity / bytesPerBlock);
                 return (int)Math.Min(int.MaxValue, blocks);
             }
@@ -2467,7 +2518,7 @@ public static class CopyEngine
 
         private bool TryAcquireLocked(int bytes)
         {
-            var safeCapacity = CurrentSafeCapacityLocked();
+            var safeCapacity = CurrentSafeCapacityLocked(bytes);
             var effectiveTarget = Math.Min(_targetBytes, safeCapacity);
             if (_usedBytes + bytes <= effectiveTarget)
             {
@@ -2499,14 +2550,13 @@ public static class CopyEngine
             return true;
         }
 
-        private long CurrentSafeCapacityLocked()
+        private long CurrentSafeCapacityLocked(int minimumProgressBytes)
         {
-            var capacity = _capacityProvider(_usedBytes);
+            var capacity = _usesSystemCapacity
+                ? MemoryPressureCapacity.GetSafeTotalBytes(_usedBytes, minimumProgressBytes)
+                : _capacityProvider(_usedBytes);
             return Math.Max(_usedBytes, capacity);
         }
-
-        private static long GetSystemSafeCapacity(long usedBytes) =>
-            MemoryPressureCapacity.GetSafeTotalBytes(usedBytes, BlockSize);
 
         private List<Waiter>? PumpWaitersLocked()
         {
