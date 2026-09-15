@@ -38,11 +38,11 @@ public sealed class PerformanceFreedomArchitectureTests
     [TestMethod]
     public void AlignedFanoutPayloadCanServeDirectDestinationsWithoutRestaging()
     {
-        using var payload = SourceBufferLease.RentAligned(1024 * 1024, DirectIoSourceReader.MaximumSupportedAlignment);
+        using var payload = SourceBufferLease.RentAligned(1024 * 1024, 128 * 1024);
 
         Assert.IsTrue(payload.IsAlignedFor(512));
         Assert.IsTrue(payload.IsAlignedFor(4096));
-        Assert.IsTrue(payload.IsAlignedFor(64 * 1024));
+        Assert.IsTrue(payload.IsAlignedFor(128 * 1024));
     }
 
     private static StorageDeviceInfo ExactLocalNvme() =>

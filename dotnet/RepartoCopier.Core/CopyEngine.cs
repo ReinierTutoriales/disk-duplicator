@@ -422,6 +422,7 @@ public static class CopyEngine
                         copy.SourceDevice,
                         active,
                         readBufferSize,
+                        transferAlignment,
                         bufferBudget,
                         job,
                         pipeline,
@@ -431,6 +432,7 @@ public static class CopyEngine
                         copy.SourceDevice,
                         active,
                         readBufferSize,
+                        transferAlignment,
                         bufferBudget,
                         job,
                         pipeline,
@@ -465,6 +467,7 @@ public static class CopyEngine
         StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
         int readBufferSize,
+        int transferAlignment,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
@@ -492,7 +495,7 @@ public static class CopyEngine
 
                 SourceBufferLease? lease = SourceBufferLease.RentAligned(
                     readBufferSize,
-                    DirectIoSourceReader.MaximumSupportedAlignment);
+                    transferAlignment);
                 var budgetOwned = true;
                 int read;
                 try
@@ -582,6 +585,7 @@ public static class CopyEngine
         StorageDeviceInfo sourceDevice,
         List<DestinationWorker> active,
         int readBufferSize,
+        int transferAlignment,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
         PipelineGovernor pipeline,
@@ -598,6 +602,7 @@ public static class CopyEngine
             entry,
             sourceDevice,
             readBufferSize,
+            transferAlignment,
             sourceQueue.Writer,
             bufferBudget,
             job,
@@ -680,6 +685,7 @@ public static class CopyEngine
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
         int readBufferSize,
+        int transferAlignment,
         ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
@@ -699,6 +705,7 @@ public static class CopyEngine
             entry,
             sourceDevice,
             readBufferSize,
+            transferAlignment,
             hashQueue.Writer,
             bufferBudget,
             job,
@@ -757,6 +764,7 @@ public static class CopyEngine
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
         int readBufferSize,
+        int transferAlignment,
         ChannelWriter<SourceReadBlock> output,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
@@ -796,7 +804,7 @@ public static class CopyEngine
                     // using Direct I/O without a whole-block staging copy.
                     lease = SourceBufferLease.RentAligned(
                         readBufferSize,
-                        DirectIoSourceReader.MaximumSupportedAlignment);
+                        transferAlignment);
 
                     var readStarted = Stopwatch.GetTimestamp();
                     int read;
@@ -824,7 +832,7 @@ public static class CopyEngine
                                 buffered.Position = totalRead;
                                 lease = SourceBufferLease.RentAligned(
                                     readBufferSize,
-                                    DirectIoSourceReader.MaximumSupportedAlignment);
+                                    transferAlignment);
                                 var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
                                 read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                             }
@@ -1253,7 +1261,7 @@ public static class CopyEngine
     {
         SourceBufferLease? lease = SourceBufferLease.RentAligned(
             segment.Length,
-            DirectIoSourceReader.MaximumSupportedAlignment);
+            BufferAlignmentFor(worker.Device));
         try
         {
             var replayStarted = Stopwatch.GetTimestamp();
@@ -1768,6 +1776,16 @@ public static class CopyEngine
 
     private static long ToUnixNanoseconds(DateTime utc) =>
         checked((utc.ToUniversalTime().Ticks - DateTime.UnixEpoch.Ticks) * 100L);
+    private static int BufferAlignmentFor(StorageDeviceInfo device)
+    {
+        var alignment = Math.Max(1, Environment.SystemPageSize);
+        if (!device.HasKnownSectorAlignment)
+            return alignment;
+        var required = DirectIoSourceReader.RequiredAlignment(device);
+        return required > 0 && (required & (required - 1)) == 0
+            ? Math.Max(alignment, required)
+            : alignment;
+    }
     private static int TransferAlignmentFor(
         StorageDeviceInfo source,
         IReadOnlyList<DestinationWorker> active)

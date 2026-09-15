@@ -77,9 +77,9 @@ Integrado replay por rama: cuando una rama supera su `BacklogTargetBytes` y exis
 El `BlockSize` fijo y las bandas de `ReadBufferSizeFor` fueron eliminados. `AdaptiveTransferSizer` calcula el tamaño por archivo usando headroom actual de `AdaptiveByteBudget`, destinos activos, QD físico, límite de prefetch y, cuando ya existe feedback, throughput + latencia observados para estimar bytes por operación. `PipelineGovernor` actualiza su bytes-per-block con cada selección y la telemetría expone tamaño actual/mínimo/máximo. Pendiente únicamente validar en hardware real cómo converge frente a ExtremeCopy.
 
 
-### P2 — alineación máxima Direct I/O
+### VALIDACIÓN FÍSICA — alineación Direct I/O
 
-El soporte de payload alineado mantiene `MaximumSupportedAlignment = 64 KiB`. Auditar si puede derivarse completamente del dispositivo sin máximo de implementación fijo.
+El techo artificial de 64 KiB fue eliminado de source, destination y verify. La elegibilidad Direct I/O ahora acepta cualquier alineación de sector conocida >=512 que sea potencia de dos y compatible con el tamaño de transferencia. Los buffers FAN-OUT reciben la alineación máxima real de los dispositivos participantes; replay usa la alineación del destino y verification abre Direct con la alineación requerida por ese dispositivo. Existe contrato sintético de 128 KiB. Pendiente únicamente validación con hardware real que reporte alineaciones superiores a 64 KiB.
 
 ### P2 — CPU por byte / verificación
 

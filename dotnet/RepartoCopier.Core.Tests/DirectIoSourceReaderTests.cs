@@ -30,6 +30,18 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
+    public void AlignmentAboveSixtyFourKiBIsDerivedFromDeviceNotArtificiallyRejected()
+    {
+        const int alignment = 128 * 1024;
+        var device = Device("NVMe", StorageMediaKind.SolidState, 4096, alignment);
+
+        Assert.AreEqual(alignment, DirectIoSourceReader.RequiredAlignment(device));
+        Assert.IsTrue(DirectIoSourceReader.IsEligible(device, 2 * alignment));
+        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));
+        using var lease = SourceBufferLease.RentAligned(2 * alignment, alignment);
+        Assert.IsTrue(lease.IsAlignedFor(alignment));
+    }
+    [TestMethod]
     public void NetworkAndMisalignedTransfersFallBackButUncertainLocalIdentityCanAttemptDirectIo()
     {
         var network = Device("Network", StorageMediaKind.SolidState, 512, 4096) with

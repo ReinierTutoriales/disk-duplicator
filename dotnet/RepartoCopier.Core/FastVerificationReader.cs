@@ -18,10 +18,11 @@ internal static class FastVerificationReader
         if (plan.Blocks.Count == 0)
             return plan.Length == 0;
 
+        var directAlignment = DirectIoSourceReader.RequiredAlignment(device);
         if (DirectIoSourceReader.TryOpenOverlappedForVerification(
                 path,
                 device,
-                DirectIoSourceReader.MaximumSupportedAlignment,
+                Math.Max(1, directAlignment),
                 out var direct))
         {
             using (direct)
