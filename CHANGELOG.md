@@ -5,9 +5,15 @@
 - FAN-OUT productivo unificado alrededor de `SharedBlock`, replay por rama lenta y tamaño de transferencia adaptativo; eliminadas capas intermedias sin consumidor productivo.
 - Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED` integrado para source, destinos y verify cuando la topología/alineación es elegible, con fallback buffered seguro.
 - Escrituras full-block por offset explícito con multi-block in-flight y QD adaptativo por dispositivo; el antiguo QD2 fijo permanece eliminado.
+- Replay por rama lenta limitado a un dispositivo físicamente distinto demostrado con identidad exacta, con entrada/salida sostenidas e histéresis para evitar spill por picos momentáneos.
+- Reintentos buffered gobernados por clasificación explícita de errores transitorios; errores permanentes dejan de consumir retries inútiles.
 - Verificación unificada en CRC32C/Castagnoli, incluida nomenclatura de código/telemetría, aceleración hardware, fallback software y clasificación `VerificationBottleneck`.
+- Recovery endurecido frente a rewrites interrumpidos de journal/manifest, cleanup post-commit fallido, `.part` huérfanos y concurrencia entre procesos mediante lease exclusivo por destino sin romper migración de estado legacy.
+- Fallo de una rama FAN-OUT aislado y recuperable sin corromper ni detener ramas sanas; cancelación desde pausa desbloquea correctamente las esperas.
+- La UI fuerza throughput global y por destino a `0.0 B/s` mientras el trabajo está pausado, sin mostrar velocidad residual del promedio anterior.
 - `StorageWritePolicy`, `FanoutPerformancePolicy` y `ExplicitOffsetWriter` eliminados tras quedar reemplazados por las rutas productivas únicas.
 - Documentación y CI sincronizados con la arquitectura productiva actual.
+
 ## v2.0.0 — 2026-09-12
 
 RepartoCopier 2.0.0 establece el nuevo baseline nativo de Windows en C#/.NET 10 + WinUI 3 y reemplaza por completo la implementación activa anterior en Rust.
