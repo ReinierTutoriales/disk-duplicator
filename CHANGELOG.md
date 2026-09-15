@@ -2,6 +2,10 @@
 
 ## Unreleased — main
 
+Sin cambios publicados todavía.
+
+## v2.1.0 — 2026-09-15
+
 - FAN-OUT productivo unificado alrededor de `SharedBlock`, replay por rama lenta y tamaño de transferencia adaptativo; eliminadas capas intermedias sin consumidor productivo.
 - Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED` integrado para source, destinos y verify cuando la topología/alineación es elegible, con fallback buffered seguro.
 - Escrituras full-block por offset explícito con multi-block in-flight y QD adaptativo por dispositivo; el antiguo QD2 fijo permanece eliminado.
@@ -12,6 +16,7 @@
 - Fallo de una rama FAN-OUT aislado y recuperable sin corromper ni detener ramas sanas; cancelación desde pausa desbloquea correctamente las esperas.
 - La UI fuerza throughput global y por destino a `0.0 B/s` mientras el trabajo está pausado, sin mostrar velocidad residual del promedio anterior.
 - `StorageWritePolicy`, `FanoutPerformancePolicy` y `ExplicitOffsetWriter` eliminados tras quedar reemplazados por las rutas productivas únicas.
+- `AppLogo.png` regenerado desde el ICO válido con transparencia real en los bordes y estructura PNG íntegra.
 - Documentación y CI sincronizados con la arquitectura productiva actual.
 
 ## v2.0.0 — 2026-09-12
