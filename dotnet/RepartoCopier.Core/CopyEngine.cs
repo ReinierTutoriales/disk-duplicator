@@ -265,6 +265,7 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
+            var replayDirectory = BranchReplayPlacement.ResolveSafeDirectory(copy.SourceDevice, copy.DestinationDevices);
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(
                     root,
@@ -272,7 +273,8 @@ public static class CopyEngine
                     progress[index],
                     copy.DestinationDevices[index],
                     deviceSchedulers.For(copy.DestinationDevices[index]),
-                    controlBudget))
+                    controlBudget,
+                    replayDirectory))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -975,8 +977,13 @@ public static class CopyEngine
                     }
 
                     FanoutMessage branchMessage = message;
-                    if (recipients.Count > 1 &&
-                        worker.PendingPayloadBytes >= Math.Max(0L, worker.DeviceScheduler.BacklogTargetBytes - message.Block.Length))
+                    var shouldReplay = recipients.Count > 1 &&
+                        worker.ReplayStore.IsEnabled &&
+                        worker.ReplayGate.ShouldReplay(
+                            worker.PendingPayloadBytes,
+                            worker.DeviceScheduler.BacklogTargetBytes,
+                            Stopwatch.GetTimestamp());
+                    if (shouldReplay)
                     {
                         try
                         {
@@ -1370,7 +1377,7 @@ public static class CopyEngine
             catch (Exception ex)
             {
                 last = ex;
-                if (ex is OperationCanceledException || attempt >= Retries)
+                if (attempt >= Retries || !TransientIoErrorClassifier.IsTransient(ex))
                     break;
                 worker.Progress.AddRetry();
                 try
@@ -2629,7 +2636,8 @@ public static class CopyEngine
             DestinationProgress progress,
             StorageDeviceInfo device,
             DeviceScheduler deviceScheduler,
-            AdaptiveControlByteBudget controlBudget)
+            AdaptiveControlByteBudget controlBudget,
+            string? replayDirectory)
         {
             Root = root;
             Slot = slot;
@@ -2637,7 +2645,8 @@ public static class CopyEngine
             Device = device;
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
-            ReplayStore = new BranchReplayStore();
+            ReplayStore = new BranchReplayStore(replayDirectory);
+            ReplayGate = new BranchReplayGate();
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2653,6 +2662,7 @@ public static class CopyEngine
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
         internal BranchReplayStore ReplayStore { get; }
+        internal BranchReplayGate ReplayGate { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
