@@ -3,17 +3,21 @@ using Microsoft.Win32.SafeHandles;
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// Append-only temporary replay store used only by a destination branch that has
-/// exceeded its soft physical backlog watermark. It breaks the branch's ownership
-/// of source SharedBlock memory while preserving one physical source read.
-/// The file is created lazily on the system temporary volume and is delete-on-close.
+/// Append-only replay store for a persistently lagging destination branch.
+/// Placement is supplied by BranchReplayPlacement; a null directory disables
+/// disk replay rather than risking contention with source/destination devices.
 /// </summary>
 internal sealed class BranchReplayStore : IDisposable
 {
     private readonly object _gate = new();
+    private readonly string? _directory;
     private FileStream? _stream;
     private long _nextOffset;
     private bool _disposed;
+
+    internal BranchReplayStore(string? directory) => _directory = directory;
+
+    internal bool IsEnabled => !string.IsNullOrWhiteSpace(_directory);
 
     internal readonly record struct Segment(long Offset, int Length, uint VerificationCrc32C);
 
@@ -24,13 +28,15 @@ internal sealed class BranchReplayStore : IDisposable
     {
         if (data.IsEmpty)
             throw new ArgumentException("Replay payload cannot be empty.", nameof(data));
+        if (!IsEnabled)
+            throw new InvalidOperationException("Replay store is disabled because no safe physical placement was proven.");
 
         SafeFileHandle handle;
         long offset;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            _stream ??= OpenStore();
+            _stream ??= OpenStore(_directory!);
             handle = _stream.SafeFileHandle;
             offset = _nextOffset;
             _nextOffset = checked(_nextOffset + data.Length);
@@ -69,9 +75,8 @@ internal sealed class BranchReplayStore : IDisposable
         }
     }
 
-    private static FileStream OpenStore()
+    private static FileStream OpenStore(string directory)
     {
-        var directory = Path.Combine(Path.GetTempPath(), "RepartoCopier", "branch-replay");
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"{Environment.ProcessId}-{Guid.NewGuid():N}.replay");
         return new FileStream(path, new FileStreamOptions

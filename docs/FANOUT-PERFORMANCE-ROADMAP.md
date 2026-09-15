@@ -131,3 +131,10 @@ Una optimización se cierra únicamente cuando:
 ```
 
 Si alguno falla, el ítem permanece PARCIAL.
+
+### Cierre de auditoría — retry y replay por rama
+
+- Buffered retry consulta `TransientIoErrorClassifier.IsTransient` desde `WriteBlockAtOffsetAsync`; errores permanentes y fallos de medio (incluidos Win32 23/1117) no consumen reintentos.
+- Replay a disco solo se habilita cuando el volumen temporal tiene identidad física `Exact` y se demuestra distinto del origen y de todos los destinos activos. Sin esa prueba, replay queda deshabilitado de forma conservadora.
+- La entrada/salida de replay usa histéresis temporal por rama: backlog alto sostenido para entrar y backlog por debajo del 50% sostenido para salir. Un pico aislado no activa spool.
+- Contratos de arquitectura verifican el consumidor productivo del clasificador, la colocación física y la histéresis; `IOException` de spill conserva el fallback correcto al `SharedBlock` en memoria.
