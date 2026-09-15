@@ -128,7 +128,7 @@ internal static class RecoveryManager
         StateLayout.PrepareTempDirectory(destinationRoot);
         CleanupOwnedStaleFiles(destinationRoot, files);
         RecoverCompletedRewrite(destinationRoot);
-        var valid = NormalizeCompletedState(sourceRoot, destinationRoot, files);
+        var valid = NormalizeCompletedState(destinationRoot, files);
         CompactManifest(destinationRoot, files);
         return valid;
     }
@@ -333,7 +333,6 @@ internal static class RecoveryManager
     }
 
     private static HashSet<string> NormalizeCompletedState(
-        string sourceRoot,
         string destinationRoot,
         IReadOnlyList<RecoveryFile> files)
     {

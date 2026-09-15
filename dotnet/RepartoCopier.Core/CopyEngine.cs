@@ -99,10 +99,11 @@ public static class CopyEngine
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
+        ArgumentNullException.ThrowIfNull(plan);
         options ??= new CopyOptions(
-            Verify: false,
-            SkipSame: plan.SkipSame,
-            KeepGoing: plan.KeepGoing);
+                    Verify: false,
+                    SkipSame: plan.SkipSame,
+                    KeepGoing: plan.KeepGoing);
 
         var prepared = Preflight(plan);
         var progress = prepared.DestinationRoots
@@ -118,10 +119,11 @@ public static class CopyEngine
         CopyOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(plan);
         options ??= new CopyOptions(
-            Verify: false,
-            SkipSame: plan.SkipSame,
-            KeepGoing: plan.KeepGoing);
+                    Verify: false,
+                    SkipSame: plan.SkipSame,
+                    KeepGoing: plan.KeepGoing);
 
         var prepared = await Task.Run(() => Preflight(plan), cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
@@ -840,7 +842,7 @@ public static class CopyEngine
                         else
                         {
                             var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
-                        read = await buffered!.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
+                            read = await buffered!.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                         }
                     }
                     finally
@@ -871,7 +873,6 @@ public static class CopyEngine
                 }
                 catch
                 {
-                    lease?.Dispose();
                     if (budgetOwned)
                         bufferBudget.Release(readBufferSize);
                     if (slotOwned)
@@ -982,7 +983,7 @@ public static class CopyEngine
                             var replayStarted = Stopwatch.GetTimestamp();
                             var segment = await worker.ReplayStore.SpillAsync(
                                 message.Block.Memory,
-                                message.Block.VerificationCrc32,
+                                message.Block.VerificationCrc32C,
                                 job.Token).ConfigureAwait(false);
                             job.Telemetry.RecordBranchReplayWrite(
                                 segment.Length,
@@ -1144,7 +1145,7 @@ public static class CopyEngine
 
                             var offset = current.ReserveWriteOffset(chunkData.Block.Length);
                             current.VerificationBlocks.Add(
-                                new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32));
+                                new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32C));
                             current.PendingWrites.Add(
                                 WriteBlockAtOffsetAsync(worker, current, chunkData.Block, offset, job));
                             dataOwnedByWriter = false;
@@ -1167,7 +1168,7 @@ public static class CopyEngine
 
                             var replayOffset = current.ReserveWriteOffset(replayData.Segment.Length);
                             current.VerificationBlocks.Add(
-                                new VerificationBlock(replayData.Segment.Length, replayData.Segment.VerificationCrc32));
+                                new VerificationBlock(replayData.Segment.Length, replayData.Segment.VerificationCrc32C));
                             current.PendingWrites.Add(
                                 WriteReplayBlockAtOffsetAsync(worker, current, replayData.Segment, replayOffset, job));
                             replayOwnedByWriter = false;
@@ -1272,7 +1273,7 @@ public static class CopyEngine
             job.Telemetry.RecordBranchReplayRead(
                 segment.Length,
                 Stopwatch.GetElapsedTime(replayStarted));
-            var block = new SharedBlock(lease, segment.Length, segment.VerificationCrc32);
+            var block = new SharedBlock(lease, segment.Length, segment.VerificationCrc32C);
             lease = null;
             return await WriteBlockAtOffsetAsync(worker, current, block, offset, job).ConfigureAwait(false);
         }
@@ -1968,7 +1969,7 @@ public static class CopyEngine
         {
             _buffer = buffer;
             Length = length;
-            VerificationCrc32 = FastCrc32.Compute(buffer.Memory.Span[..length]);
+            VerificationCrc32C = FastCrc32C.Compute(buffer.Memory.Span[..length]);
             _reservedBytes = reservedBytes;
             _references = references;
             _budget = budget;
@@ -1978,14 +1979,14 @@ public static class CopyEngine
         {
             _buffer = buffer;
             Length = length;
-            VerificationCrc32 = verificationCrc32;
+            VerificationCrc32C = verificationCrc32;
             _reservedBytes = 0;
             _references = 1;
             _budget = null;
         }
 
         public int Length { get; }
-        public uint VerificationCrc32 { get; }
+        public uint VerificationCrc32C { get; }
         public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
         internal bool IsAlignedFor(int alignment) =>
             (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);

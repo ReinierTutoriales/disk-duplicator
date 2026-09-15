@@ -15,7 +15,7 @@ internal sealed class BranchReplayStore : IDisposable
     private long _nextOffset;
     private bool _disposed;
 
-    internal readonly record struct Segment(long Offset, int Length, uint VerificationCrc32);
+    internal readonly record struct Segment(long Offset, int Length, uint VerificationCrc32C);
 
     internal async ValueTask<Segment> SpillAsync(
         ReadOnlyMemory<byte> data,

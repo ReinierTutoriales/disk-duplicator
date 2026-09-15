@@ -18,7 +18,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 `RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
 
-`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para SkipSame/recovery y verificación post-copia automática mediante CRC32 por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
+`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para SkipSame/recovery y verificación post-copia automática mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
 
 ## Invariantes de copia
 
@@ -34,7 +34,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Rendimiento
 
-El hot path actual usa bloques compartidos de 32 MiB, prefetch acotado, presupuesto global de RAM, backpressure y scheduler por dispositivo físico. En orígenes SSD locales con identidad exacta y alineación conocida existe una ruta Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED`; la verificación usa el mismo principio cuando es elegible. Las escrituras de destino siguen siendo buffered con offsets explícitos y QD2 selectivo para SSD calificados; Direct I/O de escritura todavía no está implementado.
+El hot path usa FAN-OUT con `SharedBlock`, tamaño de transferencia adaptativo, presupuesto dinámico de RAM, replay por rama lenta y `DeviceScheduler` adaptativo por dispositivo físico. Source, destinos y verificación usan Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED` cuando la topología/alineación lo permiten, con fallback buffered seguro. Cada payload lógico se escribe completo por offset explícito y la concurrencia procede de múltiples bloques/rutas en vuelo, no de fragmentar artificialmente un bloque.
 
 La telemetría de `CopyJob.DiagnosticsSnapshot()` permite identificar el cuello real antes de modificar parámetros. La hoja de ruta vigente está en `docs/FANOUT-PERFORMANCE-ROADMAP.md`.
 

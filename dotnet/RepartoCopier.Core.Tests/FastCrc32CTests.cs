@@ -5,19 +5,19 @@ using RepartoCopier.Core;
 namespace RepartoCopier.Core.Tests;
 
 [TestClass]
-public sealed class FastCrc32Tests
+public sealed class FastCrc32CTests
 {
     [TestMethod]
     public void MatchesStandardCrc32CCheckVector()
     {
         var bytes = Encoding.ASCII.GetBytes("123456789");
-        Assert.AreEqual(0xE3069283u, FastCrc32.Compute(bytes));
+        Assert.AreEqual(0xE3069283u, FastCrc32C.Compute(bytes));
     }
 
     [TestMethod]
     public void EmptyPayloadMatchesCrc32CIdentity()
     {
-        Assert.AreEqual(0u, FastCrc32.Compute(ReadOnlySpan<byte>.Empty));
+        Assert.AreEqual(0u, FastCrc32C.Compute(ReadOnlySpan<byte>.Empty));
     }
 
     [TestMethod]
@@ -26,7 +26,7 @@ public sealed class FastCrc32Tests
         var first = new byte[1024 * 1024];
         var second = new byte[first.Length];
         second[^1] = 1;
-        Assert.AreNotEqual(FastCrc32.Compute(first), FastCrc32.Compute(second));
+        Assert.AreNotEqual(FastCrc32C.Compute(first), FastCrc32C.Compute(second));
     }
 
     [TestMethod]
@@ -39,11 +39,11 @@ public sealed class FastCrc32Tests
             new Random(length * 7919).NextBytes(data);
             Assert.AreEqual(
                 ComputeReference(data),
-                FastCrc32.ComputeSoftware(data),
+                FastCrc32C.ComputeSoftware(data),
                 $"CRC32C software divergente en longitud de borde {length}.");
             Assert.AreEqual(
-                FastCrc32.ComputeSoftware(data),
-                FastCrc32.Compute(data),
+                FastCrc32C.ComputeSoftware(data),
+                FastCrc32C.Compute(data),
                 $"Fast path CRC32C divergente en longitud de borde {length}.");
         }
     }
@@ -59,11 +59,11 @@ public sealed class FastCrc32Tests
             random.NextBytes(data);
             Assert.AreEqual(
                 ComputeReference(data),
-                FastCrc32.ComputeSoftware(data),
+                FastCrc32C.ComputeSoftware(data),
                 $"CRC32C software divergente en longitud {length}.");
             Assert.AreEqual(
-                FastCrc32.ComputeSoftware(data),
-                FastCrc32.Compute(data),
+                FastCrc32C.ComputeSoftware(data),
+                FastCrc32C.Compute(data),
                 $"Fast path CRC32C divergente en longitud {length}.");
         }
     }
@@ -71,7 +71,7 @@ public sealed class FastCrc32Tests
     [TestMethod]
     public void HardwareAndSoftwareImplementationsAreBitIdenticalWhenHardwareExists()
     {
-        if (!FastCrc32.IsHardwareAccelerated)
+        if (!FastCrc32C.IsHardwareAccelerated)
             return;
 
         var random = new Random(0x32C0FFEE);
@@ -81,8 +81,8 @@ public sealed class FastCrc32Tests
             var data = new byte[length];
             random.NextBytes(data);
             Assert.AreEqual(
-                FastCrc32.ComputeSoftware(data),
-                FastCrc32.ComputeHardware(data),
+                FastCrc32C.ComputeSoftware(data),
+                FastCrc32C.ComputeHardware(data),
                 $"Hardware/software CRC32C divergente en longitud {length}.");
         }
     }

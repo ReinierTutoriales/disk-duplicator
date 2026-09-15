@@ -94,9 +94,9 @@ internal static class FastVerificationReader
                         throw new IOException($"Lectura incompleta durante verificación: {path}");
 
                     var crcStarted = Stopwatch.GetTimestamp();
-                    var actual = FastCrc32.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
-                    job.Telemetry.RecordVerifyHash(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
-                    if (actual != current.Expected.Crc32)
+                    var actual = FastCrc32C.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
+                    job.Telemetry.RecordVerifyCrc32C(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
+                    if (actual != current.Expected.Crc32C)
                         return false;
                     progress.AddVerified(current.Expected.Length);
                 }
@@ -179,9 +179,9 @@ internal static class FastVerificationReader
                         throw new IOException($"Lectura incompleta durante verificación: {path}");
 
                     var crcStarted = Stopwatch.GetTimestamp();
-                    var actual = FastCrc32.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
-                    job.Telemetry.RecordVerifyHash(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
-                    if (actual != current.Expected.Crc32)
+                    var actual = FastCrc32C.Compute(current.Buffer.Memory.Span[..current.Expected.Length]);
+                    job.Telemetry.RecordVerifyCrc32C(current.Expected.Length, Stopwatch.GetElapsedTime(crcStarted));
+                    if (actual != current.Expected.Crc32C)
                         return false;
                     progress.AddVerified(current.Expected.Length);
                 }

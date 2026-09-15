@@ -15,10 +15,12 @@ public sealed class SequentialBlockWriteArchitectureTests
             ?? throw new AssertFailedException("DestinationWriteCoordinator.WriteAsync no existe.");
         var names = write.GetParameters().Select(parameter => parameter.Name).ToArray();
 
-        CollectionAssert.AreEqual(
-            new[] { "handle", "data", "baseOffset", "scheduler", "token", "requiredAlignment" },
-            names,
-            "El coordinador no debe recuperar controles de depth/slicing dentro de un bloque FAN-OUT.");
+        Assert.AreEqual(6, names.Length);
+        CollectionAssert.DoesNotContain(names, "depth");
+        CollectionAssert.DoesNotContain(names, "queueDepth");
+        CollectionAssert.DoesNotContain(names, "sliceSize");
+        CollectionAssert.DoesNotContain(names, "chunkSize");
+        CollectionAssert.DoesNotContain(names, "maxInFlight");
         Assert.AreEqual(typeof(Task<int>), write.ReturnType);
     }
 

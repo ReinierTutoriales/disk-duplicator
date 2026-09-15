@@ -163,6 +163,7 @@ internal static class DirectIoSourceReader
 
     private static class NativeMethods
     {
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
         internal static extern SafeFileHandle CreateFileW(
             string fileName,

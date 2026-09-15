@@ -36,7 +36,7 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - `WriteThrough` fue eliminado del hot path. La durabilidad se conserva mediante flush explícito antes de `AtomicFileCommit`.
 - `AtomicFileCommit` es la única primitiva de reemplazo productiva.
 - Verificación post-copia usa CRC32C/Castagnoli por bloque y lectura Direct/buffered async con `VerificationReadBudget` dinámico.
-- `FastCrc32.Compute` usa CRC32C hardware mediante SSE4.2 en x86/x64 o instrucciones CRC de ARM cuando están disponibles; el fallback usa slicing-by-8 Castagnoli y debe ser bit-idéntico al hardware.
+- `FastCrc32C.Compute` usa CRC32C hardware mediante SSE4.2 en x86/x64 o instrucciones CRC de ARM cuando están disponibles; el fallback usa slicing-by-8 Castagnoli y debe ser bit-idéntico al hardware.
 - `PendingRead` en verificación es un `readonly record struct`, evitando una asignación de objeto por descriptor de lectura pendiente sin cambiar QD ni presupuesto de memoria.
 - Los CRC32C de `VerificationBlock` son internos a la ejecución de copy/verify; recovery continúa usando el hash BLAKE3 persistente y no depende del checksum de bloque.
 - Estado interno permanece fuera del árbol copiado en `.disk-duplicator-state/<state_id>`.
@@ -59,7 +59,7 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 - **Multi-block in-flight integrado**: eliminada la ruta secuencial `WriteWithRetryAsync`; los bloques se programan por offset explícito, el commit espera al drenaje total y el fallback Direct se resuelve solo después de drenar I/O pendiente.
 - CRC32 IEEE interno de verificación sustituido por CRC32C/Castagnoli coherente en hardware y software, con vector estándar y contrato hardware/software.
 - Descriptor `PendingRead` de verificación convertido a valor readonly para eliminar la asignación de heap por entrada pendiente.
-- StorageWritePolicy y sus tests eliminados tras quedar huérfanos con la migración full-block; el QD productivo queda gobernado únicamente por DeviceScheduler + FanoutPerformancePolicy.
+- StorageWritePolicy, FanoutPerformancePolicy y ExplicitOffsetWriter eliminados tras quedar huérfanos; `StorageIoProfile` clasifica el punto inicial y `DeviceScheduler` gobierna la ruta productiva adaptativa, mientras `DestinationWriteCoordinator` emite la escritura real.
 - Infraestructura temporal de migraciones eliminada de `main`; solo queda el workflow permanente `windows-dotnet.yml`.
 
 ## Prioridad actual
@@ -83,7 +83,7 @@ El techo artificial de 64 KiB fue eliminado de source, destination y verify. La 
 
 ### VALIDACIÓN FÍSICA — CPU por byte / verificación
 
-CRC32C interno ya dispone de ruta hardware y fallback software Castagnoli bit-idéntico. La telemetría conserva las métricas históricas `VerifyHash*` por compatibilidad y expone aliases explícitos `VerifyCrc32CBytes`, `VerifyCrc32CTime` y `VerifyCrc32CBytesPerSecond`. `VerificationBottleneck` clasifica la tasa de servicio como `StorageRead`, `Crc32C`, `Balanced` (banda del 15%) o `None` sin muestras suficientes. El mensaje de mismatch productivo también identifica CRC32C. Pendiente únicamente validar en hardware real GiB/s, CPU y la clasificación frente al tiempo de pared.
+CRC32C interno ya dispone de ruta hardware y fallback software Castagnoli bit-idéntico. La telemetría usa exclusivamente `VerifyCrc32CBytes`, `VerifyCrc32CTime` y `VerifyCrc32CBytesPerSecond`; la nomenclatura histórica `VerifyHash*` fue eliminada para evitar dos contratos para la misma medición. `VerificationBottleneck` clasifica la tasa de servicio como `StorageRead`, `Crc32C`, `Balanced` (banda del 15%) o `None` sin muestras suficientes. El mensaje de mismatch productivo también identifica CRC32C. Pendiente únicamente validar en hardware real GiB/s, CPU y la clasificación frente al tiempo de pared.
 
 ## Benchmark físico contra ExtremeCopy
 

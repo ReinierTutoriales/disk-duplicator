@@ -30,7 +30,7 @@ public sealed class ProductionFastPathTests
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
         Assert.AreEqual(0L, metrics.VerifyReadBytes);
-        Assert.AreEqual(0L, metrics.VerifyHashBytes);
+        Assert.AreEqual(0L, metrics.VerifyCrc32CBytes);
         Assert.AreEqual(TimeSpan.Zero, metrics.VerifyPhaseElapsed);
 
         var expected = SHA256.HashData(payload);
@@ -93,7 +93,7 @@ public sealed class ProductionFastPathTests
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
         Assert.AreEqual((long)payloadSize, metrics.VerifyReadBytes);
-        Assert.AreEqual((long)payloadSize, metrics.VerifyHashBytes);
+        Assert.AreEqual((long)payloadSize, metrics.VerifyCrc32CBytes);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
         Assert.IsGreaterThan(0L, metrics.VerificationReadBudgetBytes);
         Assert.IsGreaterThan(0L, metrics.PeakVerificationReadBytes);

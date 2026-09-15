@@ -15,15 +15,15 @@ public sealed class BranchReplayStoreTests
         new Random(20260914).NextBytes(first);
         new Random(20260915).NextBytes(second);
 
-        var firstCrc = FastCrc32.Compute(first);
-        var secondCrc = FastCrc32.Compute(second);
+        var firstCrc = FastCrc32C.Compute(first);
+        var secondCrc = FastCrc32C.Compute(second);
         var firstSegment = await store.SpillAsync(first, firstCrc, CancellationToken.None);
         var secondSegment = await store.SpillAsync(second, secondCrc, CancellationToken.None);
 
         Assert.AreEqual(first.Length, firstSegment.Length);
         Assert.AreEqual(second.Length, secondSegment.Length);
-        Assert.AreEqual(firstCrc, firstSegment.VerificationCrc32);
-        Assert.AreEqual(secondCrc, secondSegment.VerificationCrc32);
+        Assert.AreEqual(firstCrc, firstSegment.VerificationCrc32C);
+        Assert.AreEqual(secondCrc, secondSegment.VerificationCrc32C);
         Assert.IsTrue(secondSegment.Offset >= firstSegment.Offset + firstSegment.Length);
 
         var firstRead = new byte[first.Length];
