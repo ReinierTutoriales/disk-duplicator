@@ -196,6 +196,7 @@ public sealed partial class MainWindow : Window
         {
             OperationTitleText.Text = "Pausado";
             StatusText.Text = "Pausado";
+            RefreshProgress();
             return;
         }
 
@@ -269,10 +270,11 @@ public sealed partial class MainWindow : Window
     {
         if (_job is null) return;
         var snapshots = _job.Snapshot();
+        var paused = _job.IsPaused;
         while (_progressRows.Count < snapshots.Count)
-            _progressRows.Add(new ProgressRow(snapshots[_progressRows.Count]));
+            _progressRows.Add(new ProgressRow(snapshots[_progressRows.Count], paused));
         for (var index = 0; index < snapshots.Count; index++)
-            _progressRows[index].Update(snapshots[index]);
+            _progressRows[index].Update(snapshots[index], paused);
 
         var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
         double percent;
@@ -282,7 +284,7 @@ public sealed partial class MainWindow : Window
             var verified = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifiedBytes));
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
-            SpeedMetricText.Text = "—";
+            SpeedMetricText.Text = paused ? "0.0 B/s" : "—";
             RemainingMetricText.Text = "--:--:--";
             if (!_job.IsPaused)
             {
@@ -294,12 +296,14 @@ public sealed partial class MainWindow : Window
         {
             var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Total));
             var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Written));
-            var speed = snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
+            var speed = paused
+                ? 0d
+                : snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
             OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
-            SpeedMetricText.Text = Throughput.Format(speed);
+            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
             var remaining = total > written ? total - written : 0;
-            RemainingMetricText.Text = speed > 1
+            RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
             if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
@@ -664,7 +668,7 @@ public sealed partial class MainWindow : Window
         private string _percentText = string.Empty;
         private double _percent;
 
-        public ProgressRow(DestinationSnapshot snapshot) => Update(snapshot);
+        public ProgressRow(DestinationSnapshot snapshot, bool paused = false) => Update(snapshot, paused);
 
         public string Label { get => _label; private set => Set(ref _label, value); }
         public string PhaseText { get => _phaseText; private set => Set(ref _phaseText, value); }
@@ -676,7 +680,7 @@ public sealed partial class MainWindow : Window
         public double Percent { get => _percent; private set => Set(ref _percent, value); }
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        public void Update(DestinationSnapshot snapshot)
+        public void Update(DestinationSnapshot snapshot, bool paused = false)
         {
             Label = snapshot.Label;
             PhaseText = snapshot.Phase switch
@@ -713,9 +717,11 @@ public sealed partial class MainWindow : Window
                     : snapshot.CopyFraction * 100.0;
             PercentText = $"{Percent:0}%";
             Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0 ? $"{snapshot.FilesDone}/{snapshot.FilesTotal} archivo(s)" : snapshot.LastFile);
-            Speed = snapshot.Phase == DestinationPhase.Verifying
-                ? "—"
-                : Throughput.Format(snapshot.RecentBytesPerSecond);
+            Speed = paused
+                ? "0.0 B/s"
+                : snapshot.Phase == DestinationPhase.Verifying
+                    ? "—"
+                    : Throughput.Format(snapshot.RecentBytesPerSecond);
         }
 
         private void Set<T>(ref T field, T value, [CallerMemberName] string? property = null)

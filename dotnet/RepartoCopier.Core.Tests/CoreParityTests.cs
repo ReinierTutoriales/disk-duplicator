@@ -506,6 +506,57 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task CancellationWhilePausedUnblocksGateAndCancelsWaiter()
+    {
+        await using var job = new CopyJob(Array.Empty<DestinationProgress>());
+        job.SetPaused(true);
+        var blocked = job.WaitIfPausedAsync(job.Token).AsTask();
+        Assert.IsFalse(blocked.IsCompleted);
+
+        job.RequestCancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(async () => await blocked);
+        Assert.IsFalse(job.IsPaused);
+    }
+
+    [TestMethod]
+    public async Task LockedDestinationCommitFailsOnlyThatBranchAndHealthyBranchCompletes()
+    {
+        using var temp = new TempDirectory("branch-fault-isolation");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[4 * 1024 * 1024 + 257];
+        new Random(424242).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+
+        var blockedBase = Directory.CreateDirectory(Path.Combine(temp.Path, "blocked-dest")).FullName;
+        var healthyBase = Directory.CreateDirectory(Path.Combine(temp.Path, "healthy-dest")).FullName;
+        var blockedRoot = Directory.CreateDirectory(Path.Combine(blockedBase, "Origen")).FullName;
+        var blockedFile = Path.Combine(blockedRoot, "payload.bin");
+        await File.WriteAllTextAsync(blockedFile, "old-version");
+
+        using (var held = new FileStream(blockedFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var plan = CopyPlan.Create(source, [blockedBase, healthyBase], skipSame: false, keepGoing: false);
+            await using var job = CopyEngine.Start(plan);
+            await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+
+            var snapshots = job.Snapshot();
+            Assert.AreEqual(1, snapshots.Count(item => item.Phase == DestinationPhase.Done));
+            Assert.AreEqual(1, snapshots.Count(item => item.Phase == DestinationPhase.Failed));
+            CollectionAssert.AreEqual(
+                payload,
+                await File.ReadAllBytesAsync(Path.Combine(healthyBase, "Origen", "payload.bin")));
+            Assert.AreEqual("old-version", await File.ReadAllTextAsync(blockedFile));
+        }
+
+        var retryPlan = CopyPlan.Create(source, [blockedBase], skipSame: false, keepGoing: false);
+        await using var retryJob = CopyEngine.Start(retryPlan);
+        await retryJob.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+        AssertHealthy(retryJob);
+        CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(blockedFile));
+    }
+
+    [TestMethod]
     public async Task FanOutStressWithRapidPauseResumePreservesEveryDestination()
     {
         using var temp = new TempDirectory("fanout-pause-stress");
