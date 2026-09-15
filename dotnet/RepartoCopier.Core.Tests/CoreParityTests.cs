@@ -864,6 +864,35 @@ public sealed class CoreParityTests
         Assert.AreEqual(DestinationPhase.Done, job.Snapshot().Single().Phase);
     }
 
+    [TestMethod]
+    public void RecoveryRestoresManifestBackupBeforeNormalizingCompletedState()
+    {
+        using var temp = new TempDirectory("recovery-manifest-crash");
+        var sourceRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "source")).FullName;
+        var source = Path.Combine(sourceRoot, "a.bin");
+        File.WriteAllBytes(source, Encoding.ASCII.GetBytes("abc"));
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        File.Copy(source, Path.Combine(destination, "a.bin"));
+        var file = RecoveryFileFor(source, "a.bin");
+        var hash = Hasher.Hash(File.ReadAllBytes(source)).AsSpan().ToArray();
+        WriteLegacyRecoveryProof(destination, file, hash);
+
+        var manifest = StateLayout.ManifestPath(destination);
+        var compactTemp = Path.ChangeExtension(manifest, "b3.compact");
+        var compactBackup = Path.ChangeExtension(manifest, "b3.compact.bak");
+        File.Move(manifest, compactBackup);
+        File.WriteAllText(compactTemp, "partial-new-manifest");
+
+        var valid = RecoveryManager.PrepareAndNormalize(sourceRoot, destination, [file]);
+
+        Assert.IsTrue(valid.Contains(RecoveryManager.StateKey(file)));
+        Assert.IsTrue(File.Exists(manifest));
+        Assert.IsFalse(File.Exists(compactBackup));
+        Assert.IsFalse(File.Exists(compactTemp));
+        StringAssert.Contains(File.ReadAllText(manifest), RecoveryManager.ManifestKey(file.RelativePath));
+        StringAssert.Contains(File.ReadAllText(StateLayout.JournalPath(destination)), RecoveryManager.StateKey(file));
+    }
+
     private static RecoveryFile RecoveryFileFor(string sourcePath, string relativePath)
     {
         var info = new FileInfo(sourcePath);

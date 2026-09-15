@@ -128,6 +128,7 @@ internal static class RecoveryManager
         StateLayout.PrepareTempDirectory(destinationRoot);
         CleanupOwnedStaleFiles(destinationRoot, files);
         RecoverCompletedRewrite(destinationRoot);
+        RecoverManifestRewrite(destinationRoot);
         var valid = NormalizeCompletedState(destinationRoot, files);
         CompactManifest(destinationRoot, files);
         return valid;
@@ -278,6 +279,7 @@ internal static class RecoveryManager
         string destinationRoot,
         IReadOnlyList<RecoveryFile> files)
     {
+        RecoverManifestRewrite(destinationRoot);
         var path = StateLayout.ManifestPath(destinationRoot);
         if (!File.Exists(path) && !Directory.Exists(path))
             return;
@@ -296,8 +298,8 @@ internal static class RecoveryManager
         }
         entries.Sort((left, right) => StringComparer.Ordinal.Compare(left.Key, right.Key));
 
-        var tmp = Path.ChangeExtension(path, "b3.compact");
-        var backup = Path.ChangeExtension(path, "b3.compact.bak");
+        var tmp = ManifestRewriteTempPath(destinationRoot);
+        var backup = ManifestRewriteBackupPath(destinationRoot);
         DeleteOwnedFileIfPresent(tmp, "temporal de manifest");
         DeleteOwnedFileIfPresent(backup, "backup de manifest");
 
@@ -330,6 +332,28 @@ internal static class RecoveryManager
             }
             throw new IOException($"No se pudo compactar {path}; el manifest anterior fue restaurado.", commitError);
         }
+    }
+
+    internal static void RecoverManifestRewrite(string destinationRoot)
+    {
+        var path = StateLayout.ManifestPath(destinationRoot);
+        var tmp = ManifestRewriteTempPath(destinationRoot);
+        var backup = ManifestRewriteBackupPath(destinationRoot);
+
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            EnsureOwnedRegularFile(path, "manifest");
+            DeleteOwnedFileIfPresent(backup, "backup de manifest");
+            DeleteOwnedFileIfPresent(tmp, "temporal de manifest");
+            return;
+        }
+
+        if (File.Exists(backup) || Directory.Exists(backup))
+        {
+            EnsureOwnedRegularFile(backup, "backup de manifest");
+            File.Move(backup, path);
+        }
+        DeleteOwnedFileIfPresent(tmp, "temporal de manifest");
     }
 
     private static HashSet<string> NormalizeCompletedState(
@@ -460,6 +484,12 @@ internal static class RecoveryManager
 
     private static string StateRewriteBackupPath(string destinationRoot) =>
         Path.Combine(StateLayout.StateDirectoryFor(destinationRoot), "completed.jsonl.preflight.bak");
+
+    private static string ManifestRewriteTempPath(string destinationRoot) =>
+        Path.ChangeExtension(StateLayout.ManifestPath(destinationRoot), "b3.compact");
+
+    private static string ManifestRewriteBackupPath(string destinationRoot) =>
+        Path.ChangeExtension(StateLayout.ManifestPath(destinationRoot), "b3.compact.bak");
 
     private static string PreviousStateId(string path) =>
         DigestHex(Encoding.Unicode.GetBytes(path), PreviousStateIdHex);

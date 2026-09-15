@@ -340,6 +340,18 @@ public sealed class UnificationContractTests
         CollectionAssert.DoesNotContain(engineMethods, "ReleaseQueuedMessage");
     }
     [TestMethod]
+    public void RecoveryOwnsManifestRewriteRecoveryRoute()
+    {
+        var methods = typeof(RecoveryManager)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(method => method.Name)
+            .ToArray();
+        CollectionAssert.Contains(methods, "RecoverManifestRewrite");
+        CollectionAssert.Contains(methods, "CompactManifest");
+        CollectionAssert.Contains(methods, "PrepareAndNormalize");
+    }
+
+    [TestMethod]
     public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
     {
         var engineMethods = typeof(CopyEngine)
