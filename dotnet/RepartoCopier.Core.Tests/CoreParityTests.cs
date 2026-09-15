@@ -886,6 +886,46 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void RecoveryDeletesOnlyOwnedOrphanPartsAndPreservesUnknownBackups()
+    {
+        using var temp = new TempDirectory("recovery-orphan-part");
+        var sourceRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "source")).FullName;
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var tmp = StateLayout.PrepareTempDirectory(destination);
+        var orphanPart = Path.Combine(tmp, $"{new string('a', 32)}.part");
+        var legacyPart = Path.Combine(tmp, $"{new string('b', 24)}.part");
+        var preservedBackup = Path.Combine(tmp, $"{new string('c', 32)}.bak");
+        var foreignPart = Path.Combine(tmp, "not-owned.part");
+        File.WriteAllText(orphanPart, "partial");
+        File.WriteAllText(legacyPart, "partial-legacy");
+        File.WriteAllText(preservedBackup, "recoverable");
+        File.WriteAllText(foreignPart, "foreign");
+
+        RecoveryManager.PrepareAndNormalize(sourceRoot, destination, []);
+
+        Assert.IsFalse(File.Exists(orphanPart));
+        Assert.IsFalse(File.Exists(legacyPart));
+        Assert.IsTrue(File.Exists(preservedBackup), "Un .bak huérfano desconocido puede ser la única copia recuperable y debe preservarse.");
+        Assert.IsTrue(File.Exists(foreignPart), "No se deben borrar temporales que no pertenecen inequívocamente al namespace de RepartoCopier.");
+    }
+
+    [TestMethod]
+    public void RecoveryRejectsOwnedOrphanPartDirectoryInsteadOfDeletingIt()
+    {
+        using var temp = new TempDirectory("recovery-orphan-part-directory");
+        var sourceRoot = Directory.CreateDirectory(Path.Combine(temp.Path, "source")).FullName;
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var tmp = StateLayout.PrepareTempDirectory(destination);
+        var unsafeEntry = Path.Combine(tmp, $"{new string('d', 32)}.part");
+        Directory.CreateDirectory(unsafeEntry);
+
+        var error = Assert.ThrowsExactly<IOException>(() =>
+            RecoveryManager.PrepareAndNormalize(sourceRoot, destination, []));
+        StringAssert.Contains(error.Message, "Entrada de estado no segura");
+        Assert.IsTrue(Directory.Exists(unsafeEntry));
+    }
+
+    [TestMethod]
     public void RecoveryRestoresManifestBackupBeforeNormalizingCompletedState()
     {
         using var temp = new TempDirectory("recovery-manifest-crash");

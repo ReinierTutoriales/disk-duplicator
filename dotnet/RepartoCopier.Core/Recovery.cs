@@ -127,6 +127,7 @@ internal static class RecoveryManager
         MigrateStateDirectory(destinationRoot);
         StateLayout.PrepareTempDirectory(destinationRoot);
         CleanupOwnedStaleFiles(destinationRoot, files);
+        CleanupOwnedOrphanParts(destinationRoot);
         RecoverCompletedRewrite(destinationRoot);
         RecoverManifestRewrite(destinationRoot);
         var valid = NormalizeCompletedState(destinationRoot, files);
@@ -438,6 +439,38 @@ internal static class RecoveryManager
                 }
             }
         }
+    }
+
+    internal static void CleanupOwnedOrphanParts(string destinationRoot)
+    {
+        var tmp = Path.Combine(StateLayout.StateDirectoryFor(destinationRoot), "tmp");
+        if (!Directory.Exists(tmp))
+            return;
+        WindowsPath.EnsureNormalDirectory(tmp, "El directorio temporal de estado");
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(tmp))
+        {
+            var name = Path.GetFileName(entry);
+            if (!IsOwnedTransientPartName(name))
+                continue;
+            EnsureOwnedRegularFile(entry, "temporal huérfano");
+            File.Delete(entry);
+        }
+    }
+
+    internal static bool IsOwnedTransientPartName(string name)
+    {
+        if (!name.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var stem = name[..^5];
+        if (stem.Length is not (24 or 32))
+            return false;
+        foreach (var ch in stem)
+        {
+            if (!Uri.IsHexDigit(ch))
+                return false;
+        }
+        return true;
     }
 
     private static IEnumerable<string> PartCandidates(string root, string destination)
