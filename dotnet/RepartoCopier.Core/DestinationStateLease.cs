@@ -4,8 +4,9 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Cross-process ownership lease for a destination's recovery namespace.
-/// The lock file is intentionally persistent; exclusivity is provided by the
-/// open handle with FileShare.None, so a crashed process releases the lease.
+/// The lock lives in the common state container rather than inside the current
+/// state id so acquiring it cannot create the current state directory and skip
+/// legacy state migration.
 /// </summary>
 internal sealed class DestinationStateLease : IDisposable
 {
@@ -22,9 +23,17 @@ internal sealed class DestinationStateLease : IDisposable
     internal static DestinationStateLease Acquire(string destinationRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationRoot);
-        StateLayout.PrepareStateDirectory(destinationRoot);
-        var stateDirectory = StateLayout.StateDirectoryFor(destinationRoot);
-        var lockPath = Path.Combine(stateDirectory, "active.lock");
+        var normalizedRoot = Path.GetFullPath(destinationRoot);
+        var stateDirectory = StateLayout.StateDirectoryFor(normalizedRoot);
+        var container = Path.GetDirectoryName(stateDirectory)
+            ?? throw new IOException("La ruta del estado no tiene contenedor.");
+        Directory.CreateDirectory(container);
+        WindowsPath.EnsureNormalDirectory(container, "El contenedor de estado");
+        var lockDirectory = Path.Combine(container, ".locks");
+        Directory.CreateDirectory(lockDirectory);
+        WindowsPath.EnsureNormalDirectory(lockDirectory, "El directorio de locks de estado");
+
+        var lockPath = Path.Combine(lockDirectory, $"{StateLayout.StateId(normalizedRoot)}.lock");
         if (Directory.Exists(lockPath))
             throw new IOException($"El lock de estado no puede ser una carpeta: {lockPath}");
         if (File.Exists(lockPath))
@@ -45,13 +54,13 @@ internal sealed class DestinationStateLease : IDisposable
             var owner = Encoding.UTF8.GetBytes($"pid={Environment.ProcessId};utc={DateTimeOffset.UtcNow:O}");
             stream.Write(owner);
             stream.Flush(flushToDisk: true);
-            return new DestinationStateLease(stream, Path.GetFullPath(destinationRoot));
+            return new DestinationStateLease(stream, normalizedRoot);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             stream?.Dispose();
             throw new IOException(
-                $"El destino ya está siendo usado por otra operación o no se pudo bloquear su estado: {destinationRoot}",
+                $"El destino ya está siendo usado por otra operación o no se pudo bloquear su estado: {normalizedRoot}",
                 ex);
         }
     }
