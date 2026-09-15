@@ -72,9 +72,9 @@ Igualar o superar ExtremeCopy en FAN-OUT sobre hardware Windows real. El criteri
 
 Integrado replay por rama: cuando una rama supera su `BacklogTargetBytes` y existen múltiples destinos, el payload se deriva a un `BranchReplayStore` temporal append-only, se libera inmediatamente la referencia de esa rama al `SharedBlock` y el writer la reproduce después conservando CRC32C, offsets y una sola lectura física del source. El replay es best-effort: si el volumen temporal no puede aceptarlo se conserva la ruta shared normal. Telemetría expone bytes/tiempo/segmentos de replay. Pendiente únicamente medir en hardware real el punto de activación y el coste del volumen temporal.
 
-### P1 — BlockSize / ventana de lectura adaptativos
+### VALIDACIÓN FÍSICA — tamaño de transferencia / ventana de lectura
 
-`BlockSize` continúa fijo en 32 MiB y `ReadBufferSizeFor` usa bandas 64 KiB / 1 MiB / 4 MiB / 32 MiB. Son heurísticas pendientes de demostrar. La siguiente evolución debe explorar tamaño de bloque/ventana según throughput, latencia, QD, número de destinos y presión de memoria. No sustituir 32 MiB por otro número fijo.
+El `BlockSize` fijo y las bandas de `ReadBufferSizeFor` fueron eliminados. `AdaptiveTransferSizer` calcula el tamaño por archivo usando headroom actual de `AdaptiveByteBudget`, destinos activos, QD físico, límite de prefetch y, cuando ya existe feedback, throughput + latencia observados para estimar bytes por operación. `PipelineGovernor` actualiza su bytes-per-block con cada selección y la telemetría expone tamaño actual/mínimo/máximo. Pendiente únicamente validar en hardware real cómo converge frente a ExtremeCopy.
 
 
 ### P2 — alineación máxima Direct I/O
