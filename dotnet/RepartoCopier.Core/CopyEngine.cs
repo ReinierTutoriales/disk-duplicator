@@ -1638,7 +1638,7 @@ public static class CopyEngine
                     progress[slot]).ConfigureAwait(false);
                 if (!valid)
                 {
-                    workers[slot].Fail($"CRC32 no coincide durante verificación: {destination}");
+                    workers[slot].Fail($"CRC32C no coincide durante verificación: {destination}");
                     break;
                 }
                 progress[slot].MarkVerifyFileDone();
