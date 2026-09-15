@@ -1,8 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-# Run the already validated structural cleanup, then correct two merge-only issues
-# before compilation: preserve StorageIoProfile's exact public/behavior contract and
-# collapse the duplicated CRC32C rate property created while removing aliases.
+# Run the already validated structural cleanup, then correct merge-only issues
+# before compilation: preserve StorageIoProfile's exact public/behavior contract,
+# collapse the duplicated CRC32C rate property created while removing aliases,
+# and keep the whole-block architecture test focused on behavior rather than
+# superseded parameter names.
 & (Join-Path (Get-Location) 'tools/patch-unify-clean-main-v4.ps1')
 
 $profile = @'
@@ -110,6 +112,30 @@ if ($second -lt 0) { throw 'Expected duplicate CRC32C rate property was not prod
 $t = $t.Remove($second, $rateLine.Length)
 [System.IO.File]::WriteAllText((Resolve-Path $telemetryPath), $t, [System.Text.UTF8Encoding]::new($false))
 
+# The whole-block contract must reject depth/slicing controls without coupling the
+# test to incidental parameter names changed by the unification.
+$architectureTestPath = 'dotnet/RepartoCopier.Core.Tests/SequentialBlockWriteArchitectureTests.cs'
+$a = [System.IO.File]::ReadAllText((Resolve-Path $architectureTestPath))
+$old = @'
+        CollectionAssert.AreEqual(
+            new[] { "handle", "data", "baseOffset", "scheduler", "token", "requiredAlignment" },
+            names,
+            "El coordinador no debe recuperar controles de depth/slicing dentro de un bloque FAN-OUT.");
+        Assert.AreEqual(typeof(Task<int>), write.ReturnType);
+'@
+$new = @'
+        Assert.AreEqual(6, names.Length);
+        CollectionAssert.DoesNotContain(names, "depth");
+        CollectionAssert.DoesNotContain(names, "queueDepth");
+        CollectionAssert.DoesNotContain(names, "sliceSize");
+        CollectionAssert.DoesNotContain(names, "chunkSize");
+        CollectionAssert.DoesNotContain(names, "maxInFlight");
+        Assert.AreEqual(typeof(Task<int>), write.ReturnType);
+'@
+if (-not $a.Contains($old)) { throw 'Whole-block architecture test anchor missing.' }
+$a = $a.Replace($old, $new)
+[System.IO.File]::WriteAllText((Resolve-Path $architectureTestPath), $a, [System.Text.UTF8Encoding]::new($false))
+
 # The unification must not change the established storage-profile behavior contract.
 if (Test-Path 'dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs') {
     throw 'FanoutPerformancePolicy should have been removed by the base cleanup.'
@@ -117,4 +143,4 @@ if (Test-Path 'dotnet/RepartoCopier.Core/FanoutPerformancePolicy.cs') {
 
 dotnet format whitespace RepartoCopier.sln --no-restore --verbosity minimal
 git diff --check
-Write-Host 'Behavior-preserving storage profile merge and CRC32C property cleanup applied.'
+Write-Host 'Behavior-preserving storage merge, CRC32C cleanup, and whole-block contract update applied.'
