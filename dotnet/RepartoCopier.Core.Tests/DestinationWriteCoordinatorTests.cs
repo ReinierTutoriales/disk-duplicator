@@ -5,7 +5,7 @@ using RepartoCopier.Core;
 namespace RepartoCopier.Core.Tests;
 
 [TestClass]
-public sealed class ExplicitOffsetWriterTests
+public sealed class DestinationWriteCoordinatorTests
 {
     [TestMethod]
     public async Task FullBlockFollowedByTailPreservesExactBytesWithoutIntraBlockSplitting()

@@ -23,7 +23,7 @@ dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r
 - Recovery: journal, manifest, backup, corrupción, estado legacy y validación BLAKE3 física.
 - Pausa, continuación, cancelación y fallo aislado por destino.
 - Gobernadores adaptativos: RAM por bytes, prefetch, backpressure y trabajo CPU-bound.
-- Telemetría: source read/hash, buffer wait, FAN-OUT/queue wait, write, flush, commit, recovery y verify.
+- Telemetría: source read/hash, buffer wait, FAN-OUT/backpressure, write, flush, commit, recovery y verify.
 
 ## Baseline de rendimiento congelado
 
@@ -63,11 +63,11 @@ Antes de comparar dos cambios, usar el mismo dataset, origen, destinos, opciones
 ## Interpretación de cuellos
 
 - `BufferWaitTime` alto con almacenamiento todavía ocioso: revisar presupuesto de RAM/prefetch.
-- `FanoutWaitTime` o `QueueWaitTime` altos: uno o más consumidores o el bus están imponiendo backpressure; no aumentar RAM automáticamente.
+- `FanoutWaitTime` alto o backlog por dispositivo sostenido: uno o más consumidores o el bus están imponiendo backpressure; no aumentar RAM automáticamente.
 - `SourceHashTime` dominante respecto a lectura: investigar CPU/BLAKE3 antes de tocar I/O.
 - `WriteTime` dominante: límite de destino/controlador/filesystem; confirmar con throughput físico.
 - `DurableFlushTime`, `CommitTime` o `RecoveryTime` dominantes en small-file: optimizar metadata/durabilidad solo si se preserva el contrato transaccional.
-- `VerifyHashTime` dominante: el CRC32 es el cuello de CPU y debe optimizarse antes de aumentar I/O; `VerifyReadTime` dominante: el límite es lectura física de destinos.
+- `VerificationBottleneck == Crc32C`: el checksum limita VERIFY; `StorageRead`: limita la lectura física; `Balanced`: ambas tasas de servicio están dentro de la banda del 15%. Usar además `VerifyCrc32CBytesPerSecond` y `VerifyReadBytesPerSecond`.
 
 ## Pruebas de fallo físico antes de release
 

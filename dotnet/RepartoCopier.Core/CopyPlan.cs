@@ -46,6 +46,8 @@ public sealed record CopyPlan(
         IList<string> existing,
         IEnumerable<string> selected)
     {
+        ArgumentNullException.ThrowIfNull(existing);
+        ArgumentNullException.ThrowIfNull(selected);
         var added = 0;
         foreach (var raw in selected)
         {

@@ -42,8 +42,8 @@ public sealed record CopyDiagnosticsSnapshot(
     TimeSpan RecoveryTime,
     long VerifyReadBytes,
     TimeSpan VerifyReadTime,
-    long VerifyHashBytes,
-    TimeSpan VerifyHashTime,
+    long VerifyCrc32CBytes,
+    TimeSpan VerifyCrc32CTime,
     long PeakBufferedBytes,
     long MaximumObservedBufferTargetBytes,
     TimeSpan CopyPhaseElapsed,
@@ -54,10 +54,8 @@ public sealed record CopyDiagnosticsSnapshot(
     public double SourceHashBytesPerSecond => Rate(SourceHashBytes, SourceHashTime);
     public double WriteBytesPerSecond => Rate(WrittenBytes, WriteTime);
     public double VerifyReadBytesPerSecond => Rate(VerifyReadBytes, VerifyReadTime);
-    public double VerifyHashBytesPerSecond => Rate(VerifyHashBytes, VerifyHashTime);
-    public long VerifyCrc32CBytes => VerifyHashBytes;
-    public TimeSpan VerifyCrc32CTime => VerifyHashTime;
     public double VerifyCrc32CBytesPerSecond => Rate(VerifyCrc32CBytes, VerifyCrc32CTime);
+
     public VerificationBottleneckKind VerificationBottleneck => ClassifyVerificationBottleneck(
         VerifyReadBytesPerSecond,
         VerifyCrc32CBytesPerSecond,
@@ -125,7 +123,7 @@ internal sealed class CopyTelemetry
     private int _flushes, _commits, _recoveryEvents;
     private long _flushTicks, _commitTicks, _recoveryTicks;
     private long _verifyReadBytes, _verifyReadTicks;
-    private long _verifyHashBytes, _verifyHashTicks;
+    private long _verifyCrc32CBytes, _verifyCrc32CTicks;
     private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
     private long _branchReplayWriteBytes, _branchReplayWriteTicks;
     private long _branchReplayReadBytes, _branchReplayReadTicks, _branchReplaySegments;
@@ -180,7 +178,7 @@ internal sealed class CopyTelemetry
     }
 
     internal void RecordVerifyRead(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyReadBytes, bytes); AddTicks(ref _verifyReadTicks, elapsed); }
-    internal void RecordVerifyHash(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyHashBytes, bytes); AddTicks(ref _verifyHashTicks, elapsed); }
+    internal void RecordVerifyCrc32C(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyCrc32CBytes, bytes); AddTicks(ref _verifyCrc32CTicks, elapsed); }
     internal void RecordVerificationBufferBudget(long budgetBytes, long peakBytes)
     {
         if (budgetBytes > 0) Interlocked.Exchange(ref _verificationReadBudgetBytes, budgetBytes);
@@ -224,7 +222,7 @@ internal sealed class CopyTelemetry
             Volatile.Read(ref _commits), ToTimeSpan(Interlocked.Read(ref _commitTicks)),
             Volatile.Read(ref _recoveryEvents), ToTimeSpan(Interlocked.Read(ref _recoveryTicks)),
             Interlocked.Read(ref _verifyReadBytes), ToTimeSpan(Interlocked.Read(ref _verifyReadTicks)),
-            Interlocked.Read(ref _verifyHashBytes), ToTimeSpan(Interlocked.Read(ref _verifyHashTicks)),
+            Interlocked.Read(ref _verifyCrc32CBytes), ToTimeSpan(Interlocked.Read(ref _verifyCrc32CTicks)),
             Interlocked.Read(ref _peakBufferedBytes), Interlocked.Read(ref _maxObservedBufferTargetBytes),
             ToTimeSpan(Interlocked.Read(ref _copyPhaseTicks)),
             ToTimeSpan(Interlocked.Read(ref _verifyPhaseTicks)),

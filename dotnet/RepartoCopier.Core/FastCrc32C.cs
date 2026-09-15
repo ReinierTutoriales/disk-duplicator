@@ -4,7 +4,7 @@ using System.Runtime.Intrinsics.X86;
 
 namespace RepartoCopier.Core;
 
-internal static class FastCrc32
+internal static class FastCrc32C
 {
     // Reflected CRC-32C/Castagnoli polynomial. The checksum is internal to a
     // single copy/verify execution; it is not part of recovery or any persisted format.
@@ -147,5 +147,5 @@ internal static class FastCrc32
     }
 }
 
-internal readonly record struct VerificationBlock(int Length, uint Crc32);
+internal readonly record struct VerificationBlock(int Length, uint Crc32C);
 internal sealed record VerificationPlan(long Length, IReadOnlyList<VerificationBlock> Blocks);

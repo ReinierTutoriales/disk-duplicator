@@ -75,11 +75,8 @@ public sealed class UnificationContractTests
             .ToArray();
         CollectionAssert.DoesNotContain(schedulerNested, "IoPairLease");
 
-        var writerMethods = typeof(ExplicitOffsetWriter)
-            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
-            .Select(method => method.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(writerMethods, "WriteTwoAsync");
+        Assert.IsNull(typeof(CopyEngine).Assembly.GetType("RepartoCopier.Core.ExplicitOffsetWriter"));
+
 
         var engineMethods = typeof(CopyEngine)
             .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
@@ -88,6 +85,7 @@ public sealed class UnificationContractTests
         CollectionAssert.DoesNotContain(engineMethods, "WriteQueueDepthTwoAsync");
 
         Assert.IsNull(typeof(CopyEngine).Assembly.GetType("RepartoCopier.Core.StorageWritePolicy"));
+        Assert.IsNull(typeof(CopyEngine).Assembly.GetType("RepartoCopier.Core.FanoutPerformancePolicy"));
 
         var coordinator = typeof(DestinationWriteCoordinator).GetMethod(
             "WriteAsync",
@@ -247,6 +245,24 @@ public sealed class UnificationContractTests
         CollectionAssert.Contains(properties, nameof(CopyDiagnosticsSnapshot.VerificationBottleneck));
         Assert.AreEqual(typeof(VerificationBottleneckKind),
             typeof(CopyDiagnosticsSnapshot).GetProperty(nameof(CopyDiagnosticsSnapshot.VerificationBottleneck))!.PropertyType);
+    }
+    [TestMethod]
+    public void VerificationUsesOnlyCrc32CNaming()
+    {
+        var assembly = typeof(CopyEngine).Assembly;
+        Assert.IsNull(assembly.GetType("RepartoCopier.Core.FastCrc32"));
+        Assert.IsNotNull(assembly.GetType("RepartoCopier.Core.FastCrc32C"));
+
+        var diagnostics = typeof(CopyDiagnosticsSnapshot)
+            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Select(property => property.Name)
+            .ToArray();
+        CollectionAssert.Contains(diagnostics, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CBytes));
+        CollectionAssert.Contains(diagnostics, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CTime));
+        CollectionAssert.Contains(diagnostics, nameof(CopyDiagnosticsSnapshot.VerifyCrc32CBytesPerSecond));
+        CollectionAssert.DoesNotContain(diagnostics, "VerifyHashBytes");
+        CollectionAssert.DoesNotContain(diagnostics, "VerifyHashTime");
+        CollectionAssert.DoesNotContain(diagnostics, "VerifyHashBytesPerSecond");
     }
     [TestMethod]
     public void DirectIoAlignmentHasNoSixtyFourKiBCap()

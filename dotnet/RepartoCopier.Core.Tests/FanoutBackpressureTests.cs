@@ -67,8 +67,8 @@ public sealed class FanoutBackpressureTests
 
         var metrics = job.DiagnosticsSnapshot();
         Assert.IsTrue(metrics.VerifyReadBytes >= (long)payload.Length * destinations.Length);
-        Assert.IsTrue(metrics.VerifyHashBytes >= (long)payload.Length * destinations.Length);
-        Assert.IsTrue(metrics.VerifyHashTime > TimeSpan.Zero);
+        Assert.IsTrue(metrics.VerifyCrc32CBytes >= (long)payload.Length * destinations.Length);
+        Assert.IsTrue(metrics.VerifyCrc32CTime > TimeSpan.Zero);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
     }
 

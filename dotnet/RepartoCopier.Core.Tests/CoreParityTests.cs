@@ -595,7 +595,7 @@ public sealed class CoreParityTests
         Assert.IsTrue(metrics.SourceHashBytes >= payload.Length);
         Assert.IsTrue(metrics.WrittenBytes >= (long)payload.Length * destinations.Length);
         Assert.IsTrue(metrics.VerifyReadBytes >= (long)payload.Length * destinations.Length);
-        Assert.IsTrue(metrics.VerifyHashBytes >= (long)payload.Length * destinations.Length);
+        Assert.IsTrue(metrics.VerifyCrc32CBytes >= (long)payload.Length * destinations.Length);
         Assert.IsTrue(metrics.PeakBufferedBytes > 0);
         Assert.IsTrue(metrics.MaximumObservedBufferTargetBytes >= metrics.PeakBufferedBytes);
         Assert.AreEqual(destinations.Length, metrics.DurableFlushes);
