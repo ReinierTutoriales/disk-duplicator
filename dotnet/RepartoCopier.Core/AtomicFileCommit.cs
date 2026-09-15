@@ -25,7 +25,6 @@ internal static class AtomicFileCommit
         try
         {
             File.Replace(part, destination, backup, ignoreMetadataErrors: false);
-            DeleteBackupIfPresent(backup);
         }
         catch (Exception commitError)
         {
@@ -51,10 +50,14 @@ internal static class AtomicFileCommit
                     : $"No se pudo reemplazar {destination}.",
                 commitError);
         }
+
+        PostCommitCleanup.TryDeleteRegularFile(backup, "El backup de reemplazo");
     }
 
     private static void DeleteBackupIfPresent(string backup)
     {
+        if (Directory.Exists(backup))
+            throw new IOException($"El backup de reemplazo no puede ser una carpeta: {backup}");
         if (!File.Exists(backup))
             return;
         WindowsPath.EnsureRegularFile(backup, "El backup de reemplazo");

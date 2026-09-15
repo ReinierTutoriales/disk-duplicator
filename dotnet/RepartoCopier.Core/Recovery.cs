@@ -231,12 +231,10 @@ internal static class RecoveryManager
         try
         {
             File.Move(tmp, path);
-            if (hadOld)
-                File.Delete(backup);
         }
         catch (Exception commitError)
         {
-            if (hadOld && File.Exists(backup))
+            if (hadOld && File.Exists(backup) && !File.Exists(path))
             {
                 try
                 {
@@ -251,6 +249,9 @@ internal static class RecoveryManager
             }
             throw new IOException($"No se pudo actualizar el journal {path}.", commitError);
         }
+
+        if (hadOld)
+            PostCommitCleanup.TryDeleteRegularFile(backup, "backup de estado");
     }
 
     internal static void RecoverCompletedRewrite(string destinationRoot)
@@ -316,22 +317,26 @@ internal static class RecoveryManager
         try
         {
             File.Move(tmp, path);
-            File.Delete(backup);
         }
         catch (Exception commitError)
         {
-            try
+            if (!File.Exists(path))
             {
-                File.Move(backup, path);
+                try
+                {
+                    File.Move(backup, path);
+                }
+                catch (Exception restoreError)
+                {
+                    throw new IOException(
+                        $"CRÍTICO: falló la compactación de {path} y su restauración.",
+                        new AggregateException(commitError, restoreError));
+                }
             }
-            catch (Exception restoreError)
-            {
-                throw new IOException(
-                    $"CRÍTICO: falló la compactación de {path} y su restauración.",
-                    new AggregateException(commitError, restoreError));
-            }
-            throw new IOException($"No se pudo compactar {path}; el manifest anterior fue restaurado.", commitError);
+            throw new IOException($"No se pudo compactar {path}; el manifest anterior permanece recuperable.", commitError);
         }
+
+        PostCommitCleanup.TryDeleteRegularFile(backup, "backup de manifest");
     }
 
     internal static void RecoverManifestRewrite(string destinationRoot)

@@ -352,6 +352,27 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void DataAndRecoveryCommitsUsePostCommitCleanupWithoutOwningCommitSuccess()
+    {
+        var target = typeof(PostCommitCleanup).GetMethod(
+            "TryDeleteRegularFile",
+            BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new AssertFailedException("PostCommitCleanup.TryDeleteRegularFile no existe.");
+        var callers = new[]
+        {
+            typeof(AtomicFileCommit).GetMethod("Commit", BindingFlags.Static | BindingFlags.NonPublic),
+            typeof(RecoveryManager).GetMethod("RewriteCompleted", BindingFlags.Static | BindingFlags.NonPublic),
+            typeof(RecoveryManager).GetMethod("CompactManifest", BindingFlags.Static | BindingFlags.NonPublic),
+        };
+
+        foreach (var caller in callers)
+        {
+            Assert.IsNotNull(caller);
+            Assert.IsTrue(MethodCalls(caller!, target), $"{caller!.Name} debe consumir PostCommitCleanup.TryDeleteRegularFile.");
+        }
+    }
+
+    [TestMethod]
     public void DestinationWriterKeepsMultipleBlocksInFlightWithExplicitOffsets()
     {
         var engineMethods = typeof(CopyEngine)
@@ -391,5 +412,19 @@ public sealed class UnificationContractTests
         Assert.IsNotNull(reserve);
         var record = currentFile.GetMethod("RecordCompletedWrite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.IsNotNull(record);
+    }
+
+    private static bool MethodCalls(MethodInfo caller, MethodInfo target)
+    {
+        var il = caller.GetMethodBody()?.GetILAsByteArray();
+        if (il is null)
+            return false;
+        var token = BitConverter.GetBytes(target.MetadataToken);
+        for (var index = 0; index <= il.Length - token.Length; index++)
+        {
+            if (il.AsSpan(index, token.Length).SequenceEqual(token))
+                return true;
+        }
+        return false;
     }
 }
