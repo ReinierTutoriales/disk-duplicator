@@ -39,6 +39,23 @@ public sealed class AtomicFileCommitTests
         Assert.IsFalse(File.Exists(backup));
     }
 
+    [TestMethod]
+    public void PostCommitCleanupDoesNotFailAValidCommitWhenBackupIsTemporarilyLocked()
+    {
+        using var temp = new TempScope();
+        var backup = Path.Combine(temp.Path, "locked.backup");
+        File.WriteAllBytes(backup, [7, 8, 9]);
+
+        using (var held = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Assert.IsFalse(PostCommitCleanup.TryDeleteRegularFile(backup, "backup bloqueado"));
+            Assert.IsTrue(File.Exists(backup));
+        }
+
+        Assert.IsTrue(PostCommitCleanup.TryDeleteRegularFile(backup, "backup liberado"));
+        Assert.IsFalse(File.Exists(backup));
+    }
+
     private sealed class TempScope : IDisposable
     {
         internal TempScope()
