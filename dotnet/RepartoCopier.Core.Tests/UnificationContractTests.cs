@@ -235,6 +235,20 @@ public sealed class UnificationContractTests
     }
 
     [TestMethod]
+    public void DirectIoAlignmentHasNoSixtyFourKiBCap()
+    {
+        var field = typeof(DirectIoSourceReader).GetField(
+            "MaximumSupportedAlignment",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.IsNull(field);
+
+        var sourceFields = typeof(DirectIoSourceReader)
+            .GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .Select(item => item.Name)
+            .ToArray();
+        CollectionAssert.DoesNotContain(sourceFields, "MaximumSupportedAlignment");
+    }
+    [TestMethod]
     public void AdaptiveTransferSizingReplacesFixedReadBands()
     {
         var assembly = typeof(CopyEngine).Assembly;

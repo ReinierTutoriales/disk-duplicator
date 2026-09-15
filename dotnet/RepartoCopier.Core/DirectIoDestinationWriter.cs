@@ -26,7 +26,7 @@ internal static class DirectIoDestinationWriter
             return false;
 
         var alignment = DirectIoSourceReader.RequiredAlignment(device);
-        return alignment is >= 512 and <= 64 * 1024 && IsPowerOfTwo(alignment);
+        return alignment >= 512 && IsPowerOfTwo(alignment);
     }
 
     internal static bool TryOpen(string path, StorageDeviceInfo device, long fileSize, out Session? session)
@@ -186,4 +186,3 @@ internal static class DirectIoDestinationWriter
             IntPtr templateFile);
     }
 }
-

@@ -12,7 +12,6 @@ internal static class DirectIoSourceReader
     private const uint FileFlagSequentialScan = 0x08000000;
     private const uint FileFlagOverlapped = 0x40000000;
 
-    internal const int MaximumSupportedAlignment = 64 * 1024;
 
     internal static bool IsEligible(StorageDeviceInfo device, int transferSize) =>
         IsEligibleCore(device, transferSize);
@@ -29,7 +28,7 @@ internal static class DirectIoSourceReader
             return false;
 
         var alignment = RequiredAlignment(device);
-        return alignment is >= 512 and <= MaximumSupportedAlignment &&
+        return alignment >= 512 &&
                IsPowerOfTwo(alignment) &&
                transferSize % alignment == 0;
     }
@@ -202,7 +201,7 @@ internal sealed class SourceBufferLease : IDisposable
                 return 1;
             var pointer = Pointer.ToInt64();
             var alignment = 1;
-            while (alignment < DirectIoSourceReader.MaximumSupportedAlignment && pointer % (alignment * 2L) == 0)
+            while (alignment <= int.MaxValue / 2 && pointer % (alignment * 2L) == 0)
                 alignment *= 2;
             return alignment;
         }
