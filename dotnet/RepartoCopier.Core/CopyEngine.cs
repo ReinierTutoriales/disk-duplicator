@@ -106,12 +106,20 @@ public static class CopyEngine
                     KeepGoing: plan.KeepGoing);
 
         var prepared = Preflight(plan);
-        var progress = prepared.DestinationRoots
-            .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
-            .ToArray();
-        var job = new CopyJob(progress);
-        job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
-        return job;
+        try
+        {
+            var progress = prepared.DestinationRoots
+                .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
+                .ToArray();
+            var job = new CopyJob(progress);
+            job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
+            return job;
+        }
+        catch
+        {
+            prepared.ReleaseStateLeases();
+            throw;
+        }
     }
 
     public static async Task<CopyJob> StartAsync(
@@ -126,13 +134,21 @@ public static class CopyEngine
                     KeepGoing: plan.KeepGoing);
 
         var prepared = await Task.Run(() => Preflight(plan), cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        var progress = prepared.DestinationRoots
-            .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
-            .ToArray();
-        var job = new CopyJob(progress);
-        job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
-        return job;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var progress = prepared.DestinationRoots
+                .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
+                .ToArray();
+            var job = new CopyJob(progress);
+            job.Attach(Task.Run(() => RunAsync(prepared, progress, options, job), CancellationToken.None));
+            return job;
+        }
+        catch
+        {
+            prepared.ReleaseStateLeases();
+            throw;
+        }
     }
 
     private static PreparedCopy Preflight(CopyPlan plan)
@@ -208,34 +224,48 @@ public static class CopyEngine
                 file.ModifiedUnixNanoseconds))
             .ToArray();
         var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
-        for (var slot = 0; slot < destinationRoots.Length; slot++)
+        var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
+        try
         {
-            var root = destinationRoots[slot];
-            PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files);
-            var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles);
-            var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
-            {
-                if (!completed.Contains(RecoveryManager.StateKey(recoveryFiles[fileIndex])))
-                    continue;
-                preverifiedSkips[fileIndex][slot] = true;
-                skippedPaths.Add(files[fileIndex].RelativePath);
-            }
-            PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths);
-            foreach (var relative in directories)
-                EnsureDestinationDirectory(root, relative);
-        }
+            foreach (var root in destinationRoots)
+                stateLeases.Add(DestinationStateLease.Acquire(root));
 
-        return new PreparedCopy(
-            sourceRoot,
-            destinationRoots,
-            files,
-            directories,
-            totalBytes,
-            preverifiedSkips,
-            sourceIsDirectory ? scan : null,
-            sourceDevice,
-            destinationDevices);
+            for (var slot = 0; slot < destinationRoots.Length; slot++)
+            {
+                var root = destinationRoots[slot];
+                PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files);
+                var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles);
+                var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
+                {
+                    if (!completed.Contains(RecoveryManager.StateKey(recoveryFiles[fileIndex])))
+                        continue;
+                    preverifiedSkips[fileIndex][slot] = true;
+                    skippedPaths.Add(files[fileIndex].RelativePath);
+                }
+                PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths);
+                foreach (var relative in directories)
+                    EnsureDestinationDirectory(root, relative);
+            }
+
+            return new PreparedCopy(
+                sourceRoot,
+                destinationRoots,
+                files,
+                directories,
+                totalBytes,
+                preverifiedSkips,
+                sourceIsDirectory ? scan : null,
+                sourceDevice,
+                destinationDevices,
+                stateLeases.ToArray());
+        }
+        catch
+        {
+            foreach (var lease in stateLeases)
+                lease.Dispose();
+            throw;
+        }
     }
 
     private static async Task RunAsync(
@@ -362,6 +392,7 @@ public static class CopyEngine
                 DrainAndRelease(worker);
                 worker.Dispose();
             }
+            copy.ReleaseStateLeases();
         }
     }
 
@@ -1880,7 +1911,15 @@ public static class CopyEngine
         bool[][] PreverifiedSkips,
         SourceTreeScan? SourceScan,
         StorageDeviceInfo SourceDevice,
-        StorageDeviceInfo[] DestinationDevices);
+        StorageDeviceInfo[] DestinationDevices,
+        DestinationStateLease[] StateLeases)
+    {
+        internal void ReleaseStateLeases()
+        {
+            foreach (var lease in StateLeases)
+                lease.Dispose();
+        }
+    }
 
     private sealed record FileEntry(
         string SourcePath,
