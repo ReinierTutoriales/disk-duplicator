@@ -346,15 +346,20 @@ public sealed class CoreParityTests
     {
         using var temp = new TempDirectory("destination-state-lease");
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var currentState = StateLayout.StateDirectoryFor(destination);
 
         using (var first = DestinationStateLease.Acquire(destination))
         {
+            Assert.IsFalse(
+                Directory.Exists(currentState),
+                "Acquire no debe crear el state id actual antes de que RecoveryManager pueda migrar estado legacy.");
             var error = Assert.ThrowsExactly<IOException>(() => DestinationStateLease.Acquire(destination));
             StringAssert.Contains(error.Message, "ya está siendo usado");
         }
 
         using var reacquired = DestinationStateLease.Acquire(destination);
         Assert.AreEqual(Path.GetFullPath(destination), reacquired.DestinationRoot);
+        Assert.IsFalse(Directory.Exists(currentState));
     }
 
     [TestMethod]
