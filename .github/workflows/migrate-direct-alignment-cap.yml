@@ -1,0 +1,66 @@
+name: Migrate direct I/O alignment cap
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tools/patch-direct-alignment-cap.ps1'
+      - '.github/workflows/migrate-direct-alignment-cap.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Rebase on latest main
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+      - name: Apply direct I/O alignment migration
+        shell: pwsh
+        run: ./tools/patch-direct-alignment-cap.ps1
+      - name: Normalize generated output
+        shell: pwsh
+        run: |
+          $newline = "`r`n"
+          $paths = @(
+            'docs/FANOUT-PERFORMANCE-ROADMAP.md',
+            'dotnet/RepartoCopier.Core.Tests/DirectIoSourceReaderTests.cs',
+            'dotnet/RepartoCopier.Core.Tests/PerformanceFreedomArchitectureTests.cs',
+            'dotnet/RepartoCopier.Core.Tests/UnificationContractTests.cs',
+            'dotnet/RepartoCopier.Core/CopyEngine.cs',
+            'dotnet/RepartoCopier.Core/DirectIoDestinationWriter.cs',
+            'dotnet/RepartoCopier.Core/DirectIoSourceReader.cs',
+            'dotnet/RepartoCopier.Core/FastVerificationReader.cs'
+          )
+          foreach ($path in $paths) {
+            $content = Get-Content -LiteralPath $path -Raw
+            $content = [regex]::Replace($content, '(\r?\n)+\z', '') + $newline
+            [System.IO.File]::WriteAllText((Resolve-Path $path), $content, [System.Text.UTF8Encoding]::new($false))
+          }
+          git diff --check
+      - name: Core tests
+        shell: pwsh
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release
+      - name: WinUI release build
+        shell: pwsh
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -p:Platform=x64
+      - name: Commit migration and cleanup
+        shell: pwsh
+        run: |
+          git rm tools/patch-direct-alignment-cap.ps1 .github/workflows/migrate-direct-alignment-cap.yml
+          git add dotnet docs
+          git status --short
+          git commit -m "perf: derive direct I/O alignment from participating devices"
+          git pull --rebase origin main
+          git push origin main
