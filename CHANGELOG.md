@@ -2,7 +2,16 @@
 
 ## Unreleased — main
 
-Sin cambios publicados todavía.
+- Recuperación de I/O unificada para buffered, Direct-write y Direct-read: los errores Win32 transitorios reducen presión mediante `DeviceScheduler` y dejan de depender de sleeps/retries fijos.
+- Verificación CRC32C posterior a la copia configurable desde WinUI y persistida en perfiles `.rcopy`; activada por defecto pero desactivable para benchmarks y copias sin verify.
+- FAN-OUT con aislamiento por rama: el productor entrega a un staging independiente por destino y una rama rezagada se desacopla del `SharedBlock` según su ventana real de QD/backlog, evitando retener indefinidamente el presupuesto global del origen.
+- Replay retirado del hot path del productor: el spill a disco temporal se ejecuta en la etapa de la rama lenta. Si no existe placement físico seguro o el spill falla, la rama usa un buffer propio sin bloquear las demás.
+- Eliminado `BranchReplayGate` y su política temporal de 500 ms; la activación de aislamiento se deriva ahora de presión de payload, tamaño de bloque, QD actual y backlog objetivo del dispositivo.
+- Admisión de escrituras pendientes acotada dinámicamente por destino mediante el `DeviceScheduler`, evitando crecimiento ilimitado de tareas en espera.
+- El backlog físico permanece contabilizado hasta la finalización/liberación real del payload, no solo hasta sacarlo del canal.
+- El tamaño global de transferencia deja de reducirse por el QD máximo de una sola rama y deja de promediar una rama lenta con las rápidas para decidir bytes por operación.
+- `CopyJob.DiagnosticsSnapshot()` expone `BranchFlows` con cola de entrada, payload pendiente, pico de payload, backlog físico, I/O outstanding, QD actual y disponibilidad de replay.
+- Contratos de arquitectura actualizados para impedir la reaparición de replay inline, del gate temporal retirado y de pending writes sin ventana de admisión.
 
 ## v2.1.0 — 2026-09-15
 
