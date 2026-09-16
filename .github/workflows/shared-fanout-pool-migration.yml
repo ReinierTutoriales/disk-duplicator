@@ -1,0 +1,75 @@
+name: Shared FAN-OUT pool migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/apply_shared_fanout_pool.py'
+      - 'tools/shared_fanout_pool_migration.py'
+      - 'dotnet/RepartoCopier.Core/SharedFanoutBufferPool.cs'
+      - '.github/workflows/shared-fanout-pool-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shared-fanout-pool-main
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Apply shared page pool migration
+        shell: pwsh
+        run: python tools/apply_shared_fanout_pool.py
+
+      - name: Architecture guards
+        shell: pwsh
+        run: |
+          $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
+          $pool = Get-Content dotnet/RepartoCopier.Core/SharedFanoutBufferPool.cs -Raw
+          if ($engine -notmatch 'SharedFanoutPoolBytes = 256L \* 1024 \* 1024') { throw '256 MiB pool is not wired into production.' }
+          if ($engine -notmatch 'SharedFanoutBlockBytes = 8 \* 1024 \* 1024') { throw 'ExtremeCopy-like 8 MiB read granularity changed unexpectedly.' }
+          foreach ($token in @('AdaptiveByteBudget','bufferBudget','SourceBufferLease.RentAligned')) {
+            if ($engine.Contains($token)) { throw "Retired productive-path token remains: $token" }
+          }
+          foreach ($token in @('GC.AllocateUninitializedArray<byte>','VirtualLock','_pageReferences','ReleaseReference')) {
+            if (-not $pool.Contains($token)) { throw "Shared pool invariant missing: $token" }
+          }
+          git diff --check
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Publish self-contained x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+
+      - name: Commit migrated production path and remove migration scaffolding
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f tools/apply_shared_fanout_pool.py tools/shared_fanout_pool_migration.py .github/workflows/shared-fanout-pool-migration.yml
+          git add -A
+          git commit -m 'perf: adopt 256 MiB page-referenced FAN-OUT pool'
+          git push origin HEAD:main
