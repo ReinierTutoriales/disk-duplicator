@@ -95,8 +95,6 @@ public static class CopyEngine
     private const long InitialBufferBudget = 512L * 1024 * 1024;
 
 
-    private const int Retries = 2;
-
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
@@ -295,7 +293,9 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
-            var replayDirectory = BranchReplayPlacement.ResolveSafeDirectory(copy.SourceDevice, copy.DestinationDevices);
+            var replayDirectory = options.EnableReplay
+                ? BranchReplayPlacement.ResolveSafeDirectory(copy.SourceDevice, copy.DestinationDevices)
+                : null;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(
                     root,
@@ -1347,21 +1347,46 @@ public static class CopyEngine
                 }
 
                 var started = Stopwatch.GetTimestamp();
+                var directRetryCount = 0;
+                var lastTransientCode = 0;
                 int operations;
-                try
+                while (true)
                 {
-                    operations = await direct.WriteAsync(
-                        data,
-                        offset,
-                        current.Entry.Size,
-                        payloadIsAligned: true,
-                        worker.DeviceScheduler,
-                        job.Token).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
-                {
-                    current.RequestDirectFallback();
-                    return PendingWriteResult.NeedsBufferedRetry(block, offset, ex);
+                    try
+                    {
+                        operations = await direct.WriteAsync(
+                            data,
+                            offset,
+                            current.Entry.Size,
+                            payloadIsAligned: true,
+                            worker.DeviceScheduler,
+                            job.Token).ConfigureAwait(false);
+                        if (directRetryCount > 0)
+                            job.Telemetry.RecordIoRecovery(
+                                "copy-write", current.Entry.RelativePath, "direct", lastTransientCode,
+                                worker.DeviceScheduler.CurrentQueueDepth, directRetryCount, offset, recovered: true);
+                        break;
+                    }
+                    catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+                    {
+                        var failedQueueDepth = worker.DeviceScheduler.CurrentQueueDepth;
+                        lastTransientCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
+                        directRetryCount++;
+                        worker.Progress.AddRetry();
+                        job.Telemetry.RecordIoRecovery(
+                            "copy-write", current.Entry.RelativePath, "direct", lastTransientCode,
+                            failedQueueDepth, directRetryCount, offset, recovered: false);
+                        if (!worker.DeviceScheduler.RecordTransientFailure())
+                        {
+                            ReleaseBranchBlock(worker, block);
+                            return PendingWriteResult.Failed(ex);
+                        }
+                    }
+                    catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
+                    {
+                        current.RequestDirectFallback();
+                        return PendingWriteResult.NeedsBufferedRetry(block, offset, ex);
+                    }
                 }
 
                 job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
@@ -1381,7 +1406,9 @@ public static class CopyEngine
             }
         }
 
-        for (var attempt = 0; attempt <= Retries; attempt++)
+        var bufferedRetryCount = 0;
+        var lastBufferedTransientCode = 0;
+        while (true)
         {
             try
             {
@@ -1403,23 +1430,27 @@ public static class CopyEngine
                 worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
                 ReleaseBranchBlock(worker, block);
+                if (bufferedRetryCount > 0)
+                    job.Telemetry.RecordIoRecovery(
+                        "copy-write", current.Entry.RelativePath, "buffered", lastBufferedTransientCode,
+                        worker.DeviceScheduler.CurrentQueueDepth, bufferedRetryCount, offset, recovered: true);
                 return PendingWriteResult.Success();
             }
             catch (Exception ex)
             {
                 last = ex;
-                if (attempt >= Retries || !TransientIoErrorClassifier.IsTransient(ex))
+                if (!TransientIoErrorClassifier.IsTransient(ex))
                     break;
+
+                var failedQueueDepth = worker.DeviceScheduler.CurrentQueueDepth;
+                lastBufferedTransientCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
+                bufferedRetryCount++;
                 worker.Progress.AddRetry();
-                try
-                {
-                    await Task.Delay(75 * (attempt + 1), job.Token).ConfigureAwait(false);
-                }
-                catch (Exception delayError)
-                {
-                    last = delayError;
+                job.Telemetry.RecordIoRecovery(
+                    "copy-write", current.Entry.RelativePath, "buffered", lastBufferedTransientCode,
+                    failedQueueDepth, bufferedRetryCount, offset, recovered: false);
+                if (!worker.DeviceScheduler.RecordTransientFailure())
                     break;
-                }
             }
         }
 

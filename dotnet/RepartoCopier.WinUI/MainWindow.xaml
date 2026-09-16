@@ -216,6 +216,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
+                        <CheckBox x:Name="VerifyCheck" Content="Verificar después de copiar" IsChecked="True" />
                         <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" />
                         <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
                     </StackPanel>

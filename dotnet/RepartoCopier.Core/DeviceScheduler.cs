@@ -144,6 +144,31 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
+    internal bool RecordTransientFailure()
+    {
+        lock (_ioGate)
+        {
+            ThrowIfDisposed();
+            var previous = _currentQueueDepth;
+            var bestKnown = Math.Max(1, Math.Min(_bestObservedQueueDepth, previous));
+            var next = bestKnown < previous ? bestKnown : Math.Max(1, previous / 2);
+
+            ResetSampleLocked();
+            if (next >= previous)
+            {
+                _lastQueueDepthDecision = "hold:transient-at-minimum";
+                return false;
+            }
+
+            _currentQueueDepth = next;
+            _queueDepthDownshifts++;
+            _lastQueueDepthDecision = "decrease:transient-failure";
+            if (next < _minimumObservedQueueDepth)
+                _minimumObservedQueueDepth = next;
+            return true;
+        }
+    }
+
     public void ReserveBacklog(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);

@@ -93,11 +93,7 @@ internal static class DirectIoSourceReader
     }
 
     internal static bool IsFallbackable(Exception error) =>
-        error is DirectIoReadException direct && direct.NativeErrorCode is
-            1 or   // ERROR_INVALID_FUNCTION
-            5 or   // ERROR_ACCESS_DENIED
-            50 or  // ERROR_NOT_SUPPORTED
-            87;    // ERROR_INVALID_PARAMETER
+        TransientIoErrorClassifier.IsDirectFallbackable(error);
 
     private static bool IsPowerOfTwo(int value) => value > 0 && (value & (value - 1)) == 0;
 
@@ -145,7 +141,7 @@ internal static class DirectIoSourceReader
             }
             catch (IOException ex)
             {
-                var code = ex.HResult & 0xFFFF;
+                var code = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
                 throw new DirectIoReadException(code, ex.Message);
             }
         }

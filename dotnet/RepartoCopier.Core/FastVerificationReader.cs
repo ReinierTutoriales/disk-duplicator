@@ -71,7 +71,7 @@ internal static class FastVerificationReader
                     {
                         lease = SourceBufferLease.RentAligned(requestSize, session.Alignment);
                         var started = Stopwatch.GetTimestamp();
-                        var task = ReadDirectAsync(session, scheduler, lease, requestSize, offset, job.Token);
+                        var task = ReadDirectAsync(session, scheduler, lease, requestSize, offset, path, job, progress);
                         pending.Enqueue(new PendingRead(expected, lease, reservation, started, task));
                         lease = null;
                         reservation = null!;
@@ -157,7 +157,9 @@ internal static class FastVerificationReader
                             lease,
                             expected.Length,
                             offset,
-                            job.Token);
+                            path,
+                            job,
+                            progress);
                         pending.Enqueue(new PendingRead(expected, lease, reservation, started, task));
                         lease = null;
                         reservation = null!;
@@ -221,10 +223,37 @@ internal static class FastVerificationReader
         SourceBufferLease buffer,
         int requestSize,
         long offset,
-        CancellationToken token)
+        string path,
+        CopyJob job,
+        DestinationProgress progress)
     {
-        using var io = await scheduler.AcquireIoAsync(requestSize, token).ConfigureAwait(false);
-        return await session.ReadAsync(buffer, requestSize, offset, token).ConfigureAwait(false);
+        var retries = 0;
+        var lastCode = 0;
+        while (true)
+        {
+            using var io = await scheduler.AcquireIoAsync(requestSize, job.Token).ConfigureAwait(false);
+            try
+            {
+                var read = await session.ReadAsync(buffer, requestSize, offset, job.Token).ConfigureAwait(false);
+                if (retries > 0)
+                    job.Telemetry.RecordIoRecovery(
+                        "verify-read", path, "direct", lastCode,
+                        scheduler.CurrentQueueDepth, retries, offset, recovered: true);
+                return read;
+            }
+            catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+            {
+                var failedQueueDepth = scheduler.CurrentQueueDepth;
+                lastCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
+                retries++;
+                progress.AddRetry();
+                job.Telemetry.RecordIoRecovery(
+                    "verify-read", path, "direct", lastCode,
+                    failedQueueDepth, retries, offset, recovered: false);
+                if (!scheduler.RecordTransientFailure())
+                    throw;
+            }
+        }
     }
 
     private static async Task<int> ReadBufferedAsync(
@@ -233,10 +262,38 @@ internal static class FastVerificationReader
         SourceBufferLease buffer,
         int requestSize,
         long offset,
-        CancellationToken token)
+        string path,
+        CopyJob job,
+        DestinationProgress progress)
     {
-        using var io = await scheduler.AcquireIoAsync(requestSize, token).ConfigureAwait(false);
-        return await RandomAccess.ReadAsync(handle, buffer.Memory[..requestSize], offset, token).ConfigureAwait(false);
+        var retries = 0;
+        var lastCode = 0;
+        while (true)
+        {
+            using var io = await scheduler.AcquireIoAsync(requestSize, job.Token).ConfigureAwait(false);
+            try
+            {
+                var read = await RandomAccess.ReadAsync(
+                    handle, buffer.Memory[..requestSize], offset, job.Token).ConfigureAwait(false);
+                if (retries > 0)
+                    job.Telemetry.RecordIoRecovery(
+                        "verify-read", path, "buffered", lastCode,
+                        scheduler.CurrentQueueDepth, retries, offset, recovered: true);
+                return read;
+            }
+            catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+            {
+                var failedQueueDepth = scheduler.CurrentQueueDepth;
+                lastCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
+                retries++;
+                progress.AddRetry();
+                job.Telemetry.RecordIoRecovery(
+                    "verify-read", path, "buffered", lastCode,
+                    failedQueueDepth, retries, offset, recovered: false);
+                if (!scheduler.RecordTransientFailure())
+                    throw;
+            }
+        }
     }
 
     private static int AlignUp(int value, int alignment)

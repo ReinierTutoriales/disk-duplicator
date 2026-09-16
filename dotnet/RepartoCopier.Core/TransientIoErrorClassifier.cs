@@ -1,31 +1,55 @@
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// Classifies only failures for which retrying the same buffered write can
-/// plausibly succeed without changing the request. Hardware/media errors such
-/// as CRC (23) and I/O device error (1117) are deliberately not masked.
+/// Extracts and classifies native Win32 I/O failures without manufacturing
+/// HRESULT values. Direct I/O exceptions expose their native code explicitly;
+/// generic IOException values are accepted only for FACILITY_WIN32 HRESULTs.
 /// </summary>
 internal static class TransientIoErrorClassifier
 {
-    internal static bool IsTransient(Exception exception)
+    internal static bool TryGetNativeCode(Exception error, out int code)
     {
-        ArgumentNullException.ThrowIfNull(exception);
-        if (exception is OperationCanceledException)
-            return false;
-        if (exception is not IOException io)
-            return false;
+        ArgumentNullException.ThrowIfNull(error);
+        switch (error)
+        {
+            case DirectIoDestinationWriter.DirectIoWriteException directWrite:
+                code = directWrite.NativeErrorCode;
+                return code > 0;
+            case DirectIoSourceReader.DirectIoReadException directRead:
+                code = directRead.NativeErrorCode;
+                return code > 0;
+            case IOException io:
+            {
+                var hr = unchecked((uint)io.HResult);
+                if ((hr & 0xFFFF0000u) == 0x80070000u)
+                {
+                    code = (int)(hr & 0xFFFFu);
+                    return code > 0;
+                }
+                break;
+            }
+        }
 
-        var code = io.HResult & 0xFFFF;
+        code = 0;
+        return false;
+    }
+
+    internal static int GetNativeCodeOrZero(Exception error) =>
+        TryGetNativeCode(error, out var code) ? code : 0;
+
+    internal static bool IsTransient(Exception error)
+    {
+        if (!TryGetNativeCode(error, out var code))
+            return false;
         return code is
-            32 or   // ERROR_SHARING_VIOLATION
-            33 or   // ERROR_LOCK_VIOLATION
-            54 or   // ERROR_NETWORK_BUSY
-            64 or   // ERROR_NETNAME_DELETED
-            121 or  // ERROR_SEM_TIMEOUT
-            1231 or // ERROR_NETWORK_UNREACHABLE
-            1232 or // ERROR_HOST_UNREACHABLE
-            1233 or // ERROR_PROTOCOL_UNREACHABLE
-            1236 or // ERROR_CONNECTION_ABORTED
-            1237;   // ERROR_RETRY
+            32 or 33 or 54 or 64 or 121 or
+            1231 or 1232 or 1233 or 1236 or 1237;
+    }
+
+    internal static bool IsDirectFallbackable(Exception error)
+    {
+        if (!TryGetNativeCode(error, out var code))
+            return false;
+        return code is 1 or 5 or 50 or 87;
     }
 }
