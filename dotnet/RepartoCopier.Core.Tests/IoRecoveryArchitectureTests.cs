@@ -40,13 +40,6 @@ public sealed class IoRecoveryArchitectureTests
     }
 
     [TestMethod]
-    public void ReplayCanBeDisabledForPhysicalABWithoutChangingDefault()
-    {
-        Assert.IsTrue(new CopyOptions().EnableReplay);
-        Assert.IsFalse(new CopyOptions(EnableReplay: false).EnableReplay);
-    }
-
-    [TestMethod]
     public void DiagnosticsExposeRecoveryContext()
     {
         var telemetry = new CopyTelemetry();
@@ -61,29 +54,5 @@ public sealed class IoRecoveryArchitectureTests
         Assert.IsFalse(item.Recovered);
     }
 
-    [TestMethod]
-    public void ProductivePathsDoNotContainLegacyFixedRetryDelayPolicy()
-    {
-        var root = FindRepositoryRoot();
-        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
-        var verify = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "FastVerificationReader.cs"));
-        Assert.IsFalse(engine.Contains("private const int Retries = 2", StringComparison.Ordinal));
-        Assert.IsFalse(engine.Contains("Task.Delay(75 *", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("RecordTransientFailure", StringComparison.Ordinal));
-        Assert.IsTrue(verify.Contains("RecordTransientFailure", StringComparison.Ordinal));
-        Assert.IsTrue(verify.Contains("TransientIoErrorClassifier.IsTransient", StringComparison.Ordinal));
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
-        while (current is not null)
-        {
-            if (File.Exists(Path.Combine(current.FullName, "RepartoCopier.sln")))
-                return current.FullName;
-            current = current.Parent;
-        }
-        throw new AssertFailedException("No se encontró la raíz del repositorio.");
-    }
 }
 

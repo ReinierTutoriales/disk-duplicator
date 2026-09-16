@@ -363,38 +363,6 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
-    public async Task PipelineGovernorCancellationDoesNotLeakPrefetchCapacity()
-    {
-        var pipelineBudget = new CopyEngine.AdaptiveByteBudget(4, 4);
-        var governor = new CopyEngine.PipelineGovernor(pipelineBudget, 1);
-        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-        await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-
-        using var cancel = new CancellationTokenSource();
-        var blocked = governor.AcquirePrefetchSlotAsync(cancel.Token).AsTask();
-        cancel.Cancel();
-        try
-        {
-            await blocked;
-            Assert.Fail("Se esperaba cancelación.");
-        }
-        catch (OperationCanceledException)
-        {
-        }
-
-        governor.ReleasePrefetchSlot();
-        await governor.AcquirePrefetchSlotAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.AreEqual(4, governor.InFlight);
-        governor.ReleasePrefetchSlot();
-        governor.ReleasePrefetchSlot();
-        governor.ReleasePrefetchSlot();
-        governor.ReleasePrefetchSlot();
-        Assert.AreEqual(0, governor.InFlight);
-    }
-
-    [TestMethod]
     public async Task AdaptiveByteBudgetCancellationReturnsGrantedBytes()
     {
         var budget = new CopyEngine.AdaptiveByteBudget(64, 64);
@@ -466,43 +434,6 @@ public sealed class CoreParityTests
         job.SetPaused(false);
         await Task.WhenAll(waits).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsFalse(job.IsPaused);
-    }
-
-    [TestMethod]
-    public async Task PipelineGovernorRepeatedCancellationStressDoesNotLeakSlots()
-    {
-        var pipelineBudget = new CopyEngine.AdaptiveByteBudget(4, 4);
-        var governor = new CopyEngine.PipelineGovernor(pipelineBudget, 1);
-        for (var iteration = 0; iteration < 200; iteration++)
-        {
-            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-            await governor.AcquirePrefetchSlotAsync(CancellationToken.None);
-
-            using var cancel = new CancellationTokenSource();
-            var blocked = Enumerable.Range(0, 16)
-                .Select(_ => governor.AcquirePrefetchSlotAsync(cancel.Token).AsTask())
-                .ToArray();
-            cancel.Cancel();
-            foreach (var task in blocked)
-            {
-                try
-                {
-                    await task;
-                    Assert.Fail("Se esperaba cancelación.");
-                }
-                catch (OperationCanceledException)
-                {
-                }
-            }
-
-            governor.ReleasePrefetchSlot();
-            governor.ReleasePrefetchSlot();
-            governor.ReleasePrefetchSlot();
-            governor.ReleasePrefetchSlot();
-            Assert.AreEqual(0, governor.InFlight);
-        }
     }
 
     [TestMethod]

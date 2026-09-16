@@ -8,7 +8,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class SustainedDestinationRateArchitectureTests
 {
     [TestMethod]
-    public void GlobalAndPerDestinationRatesShareOneSlidingWindowPrimitive()
+    public void GlobalSourceAndWriteRatesUseTheSameSlidingWindowPrimitive()
     {
         var telemetryFields = typeof(CopyTelemetry)
             .GetFields(BindingFlags.Instance | BindingFlags.NonPublic);
@@ -16,7 +16,7 @@ public sealed class SustainedDestinationRateArchitectureTests
             .Select(field => field.FieldType)
             .ToArray();
         CollectionAssert.Contains(telemetryFieldTypes, typeof(SlidingByteRateWindow));
-        Assert.AreEqual(1, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));
+        Assert.AreEqual(2, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));
 
         var legacyTelemetryFields = telemetryFields.Select(field => field.Name).ToArray();
         CollectionAssert.DoesNotContain(legacyTelemetryFields, "_rateGate");

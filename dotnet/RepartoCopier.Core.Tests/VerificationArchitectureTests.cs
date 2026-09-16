@@ -1,6 +1,4 @@
-using System.Reflection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
-using RepartoCopier.Core;
 
 namespace RepartoCopier.Core.Tests;
 
@@ -8,62 +6,38 @@ namespace RepartoCopier.Core.Tests;
 public sealed class VerificationArchitectureTests
 {
     [TestMethod]
-    public void ProductionVerifierRequiresSharedByteBudgetAndPublishesItsPressure()
+    public void VerificationAdvancesAllDestinationsTogetherBySourceCrcBlock()
     {
-        var verify = typeof(FastVerificationReader).GetMethod(
-            "VerifyAsync",
-            BindingFlags.Static | BindingFlags.NonPublic);
-        Assert.IsNotNull(verify);
-        var parameterTypes = verify.GetParameters().Select(parameter => parameter.ParameterType).ToArray();
-        CollectionAssert.Contains(parameterTypes, typeof(VerificationReadBudget));
-
-        var diagnostics = typeof(CopyDiagnosticsSnapshot)
-            .GetProperties(BindingFlags.Instance | BindingFlags.Public)
-            .Select(property => property.Name)
-            .ToArray();
-        CollectionAssert.Contains(diagnostics, nameof(CopyDiagnosticsSnapshot.VerificationReadBudgetBytes));
-        CollectionAssert.Contains(diagnostics, nameof(CopyDiagnosticsSnapshot.PeakVerificationReadBytes));
+        var root = FindRepositoryRoot();
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("ReadVerifyTargetAsync", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Task.WhenAll(reads)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("FastCrc32C.Compute(target.Buffer!.Memory.Span[..block.Length])", StringComparison.Ordinal));
+        Assert.IsFalse(File.Exists(Path.Combine(root, "dotnet", "RepartoCopier.Core", "FastVerificationReader.cs")));
+        Assert.IsFalse(File.Exists(Path.Combine(root, "dotnet", "RepartoCopier.Core", "VerificationReadBudget.cs")));
     }
 
     [TestMethod]
-    public void VerificationHasNoFixedSizeOrQd2Thresholds()
+    public void VerificationDoesNotRereadSourceOrBuildPerDestinationReadPipelines()
     {
-        var fields = typeof(FastVerificationReader)
-            .GetFields(BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-            .Select(field => field.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(fields, "DirectThreshold");
-
-        var methods = typeof(FastVerificationReader)
-            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-            .Select(method => method.Name)
-            .ToArray();
-        CollectionAssert.Contains(methods, "ReadDirectAsync");
-        CollectionAssert.Contains(methods, "ReadBufferedAsync");
-        CollectionAssert.Contains(methods, "VerifyBufferedAsync");
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        var start = engine.IndexOf("private static async Task VerifyDestinationsAsync", StringComparison.Ordinal);
+        var end = engine.IndexOf("private static async Task<bool[][]> BuildVerifiedSkipMasksAsync", start, StringComparison.Ordinal);
+        Assert.IsTrue(start >= 0 && end > start);
+        var verify = engine[start..end];
+        Assert.IsFalse(verify.Contains("entry.SourcePath", StringComparison.Ordinal));
+        Assert.IsFalse(verify.Contains("PendingRead", StringComparison.Ordinal));
+        Assert.IsFalse(verify.Contains("ExplorationQueueDepth", StringComparison.Ordinal));
     }
 
-    [TestMethod]
-    public void VerificationBudgetHasNoFixedGigabyteCeilingField()
+    private static string FindRepositoryRoot()
     {
-        var fields = typeof(VerificationReadBudget)
-            .GetFields(BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-            .Select(field => field.Name)
-            .ToArray();
-
-        CollectionAssert.DoesNotContain(fields, "MaximumBudget");
-        CollectionAssert.DoesNotContain(fields, "MaxBytes");
-    }
-
-    [TestMethod]
-    public void PendingVerificationReadIsAValueType()
-    {
-        var pendingRead = typeof(FastVerificationReader).GetNestedType(
-            "PendingRead",
-            BindingFlags.NonPublic);
-
-        Assert.IsNotNull(pendingRead);
-        Assert.IsTrue(pendingRead.IsValueType, "PendingRead debe permanecer como readonly struct para no asignar un objeto por I/O pendiente.");
-        Assert.IsTrue(pendingRead.IsDefined(typeof(System.Runtime.CompilerServices.IsReadOnlyAttribute), inherit: false));
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "RepartoCopier.sln"))) return current.FullName;
+            current = current.Parent;
+        }
+        throw new AssertFailedException("No se encontró la raíz del repositorio.");
     }
 }

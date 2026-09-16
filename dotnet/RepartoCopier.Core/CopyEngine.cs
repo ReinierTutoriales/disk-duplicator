@@ -92,7 +92,8 @@ public sealed class CopyJob : IAsyncDisposable
 public static class CopyEngine
 {
 
-    private const long InitialBufferBudget = 512L * 1024 * 1024;
+    private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
+    private const long SharedFanoutPoolBytes = 64L * 1024 * 1024;
 
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
@@ -276,10 +277,8 @@ public static class CopyEngine
         var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
-        var bufferBudget = AdaptiveByteBudget.CreateForSystem();
+        var bufferBudget = new AdaptiveByteBudget(SharedFanoutPoolBytes, SharedFanoutPoolBytes);
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
-        var pipeline = new PipelineGovernor(bufferBudget, Math.Max(1, Environment.SystemPageSize));
-        job.Telemetry.AttachPipelineGovernor(pipeline.Snapshot);
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         try
@@ -293,9 +292,6 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
-            var replayDirectory = options.EnableReplay
-                ? BranchReplayPlacement.ResolveSafeDirectory(copy.SourceDevice, copy.DestinationDevices)
-                : null;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(
                     root,
@@ -303,18 +299,12 @@ public static class CopyEngine
                     progress[index],
                     copy.DestinationDevices[index],
                     deviceSchedulers.For(copy.DestinationDevices[index]),
-                    controlBudget,
-                    replayDirectory))
+                    controlBudget))
                 .ToArray();
-
-            job.Telemetry.AttachBranchFlows(() => workers.Select(worker => worker.FlowSnapshot()).ToArray());
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job))
-                .ToArray();
-            var stagingTasks = workers
-                .Select(worker => StageBranchAsync(worker, job))
                 .ToArray();
 
             Exception? producerError = null;
@@ -327,7 +317,6 @@ public static class CopyEngine
                     skipMasks,
                     expectedHashes,
                     job,
-                    pipeline,
                     bufferBudget,
                     deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
             }
@@ -338,13 +327,12 @@ public static class CopyEngine
             finally
             {
                 foreach (var worker in workers)
-                    worker.Ingress.Writer.TryComplete(producerError);
+                    worker.Channel.Writer.TryComplete(producerError);
             }
 
             Exception? writerError = null;
             try
             {
-                await Task.WhenAll(stagingTasks).ConfigureAwait(false);
                 await Task.WhenAll(writerTasks).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -394,11 +382,8 @@ public static class CopyEngine
         {
             foreach (var worker in workers)
             {
-                worker.Ingress.Writer.TryComplete();
                 worker.Channel.Writer.TryComplete();
-                DrainAndRelease(worker.Ingress.Reader, worker);
                 DrainAndRelease(worker.Channel.Reader, worker);
-                worker.Dispose();
             }
             copy.ReleaseStateLeases();
         }
@@ -411,7 +396,6 @@ public static class CopyEngine
         bool[][] skipMasks,
         Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
-        PipelineGovernor pipeline,
         AdaptiveByteBudget bufferBudget,
         DeviceScheduler? sharedSourceScheduler)
     {
@@ -440,46 +424,18 @@ public static class CopyEngine
                 await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
 
                 var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
-                var signals = active
-                    .Select(worker => worker.DeviceScheduler.Snapshot())
-                    .Select(snapshot => new TransferDeviceSignal(
-                        snapshot.CurrentQueueDepth,
-                        snapshot.BestObservedQueueDepth,
-                        snapshot.BestObservedThroughputBytesPerSecond,
-                        snapshot.BestObservedAverageLatencyMilliseconds))
-                    .ToArray();
-                var readBufferSize = AdaptiveTransferSizer.Select(
-                    entry.Size,
-                    active.Count,
-                    transferAlignment,
-                    bufferBudget.TargetBytes,
-                    bufferBudget.UsedBytes,
-                    Math.Max(1, pipeline.Snapshot().CurrentPrefetchLimit),
-                    signals);
-                pipeline.SetBytesPerBlock(readBufferSize);
+                var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
                 job.Telemetry.RecordTransferSize(readBufferSize);
 
-                var sourceResult = entry.Size > readBufferSize
-                    ? await ReadAndFanOutPrefetchedAsync(
-                        entry,
-                        copy.SourceDevice,
-                        active,
-                        readBufferSize,
-                        transferAlignment,
-                        bufferBudget,
-                        job,
-                        pipeline,
-                        sharedSourceScheduler).ConfigureAwait(false)
-                    : await ReadAndFanOutSequentialAsync(
-                        entry,
-                        copy.SourceDevice,
-                        active,
-                        readBufferSize,
-                        transferAlignment,
-                        bufferBudget,
-                        job,
-                        pipeline,
-                        sharedSourceScheduler).ConfigureAwait(false);
+                var sourceResult = await ReadAndFanOutSequentialAsync(
+                    entry,
+                    copy.SourceDevice,
+                    active,
+                    readBufferSize,
+                    transferAlignment,
+                    bufferBudget,
+                    job,
+                    sharedSourceScheduler).ConfigureAwait(false);
                 if (sourceResult is null)
                     continue;
 
@@ -513,7 +469,6 @@ public static class CopyEngine
         int transferAlignment,
         AdaptiveByteBudget bufferBudget,
         CopyJob job,
-        PipelineGovernor pipeline,
         DeviceScheduler? sharedSourceScheduler)
     {
         using var hasher = Hasher.New();
@@ -532,7 +487,6 @@ public static class CopyEngine
                 var budgetStarted = Stopwatch.GetTimestamp();
                 await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
                 var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
-                pipeline.RecordBudgetWait(budgetElapsed);
                 job.Telemetry.RecordBufferWait(budgetElapsed);
                 job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
 
@@ -578,7 +532,6 @@ public static class CopyEngine
                         sourceIo?.Dispose();
                     }
                     var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    pipeline.RecordSourceRead(readElapsed);
                     job.Telemetry.RecordSourceRead(read, readElapsed);
 
                     if (read == 0)
@@ -598,7 +551,6 @@ public static class CopyEngine
                     var deliveryStarted = Stopwatch.GetTimestamp();
                     await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
                     var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                    pipeline.RecordDeliveryWait(deliveryElapsed);
                     job.Telemetry.RecordFanoutWait(deliveryElapsed);
                     active.RemoveAll(worker => !worker.IsActive);
                     if (active.Count == 0)
@@ -620,320 +572,6 @@ public static class CopyEngine
             direct?.Dispose();
             if (buffered is not null)
                 await buffered.DisposeAsync().ConfigureAwait(false);
-        }
-    }
-
-    private static async Task<SourceReadResult?> ReadAndFanOutPrefetchedAsync(
-        FileEntry entry,
-        StorageDeviceInfo sourceDevice,
-        List<DestinationWorker> active,
-        int readBufferSize,
-        int transferAlignment,
-        AdaptiveByteBudget bufferBudget,
-        CopyJob job,
-        PipelineGovernor pipeline,
-        DeviceScheduler? sharedSourceScheduler)
-    {
-        using var prefetchCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
-        var sourceQueue = Channel.CreateUnbounded<SourceReadBlock>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = true,
-            AllowSynchronousContinuations = false,
-        });
-        var readTask = PrefetchSourceAsync(
-            entry,
-            sourceDevice,
-            readBufferSize,
-            transferAlignment,
-            sourceQueue.Writer,
-            bufferBudget,
-            job,
-            pipeline,
-            sharedSourceScheduler,
-            prefetchCancel.Token);
-
-        Exception? deliveryError = null;
-        var stoppedEarly = false;
-        try
-        {
-            while (true)
-            {
-                var consumerStarted = Stopwatch.GetTimestamp();
-                if (!await sourceQueue.Reader.WaitToReadAsync(job.Token).ConfigureAwait(false))
-                    break;
-                pipeline.RecordConsumerWait(Stopwatch.GetElapsedTime(consumerStarted));
-                if (!sourceQueue.Reader.TryRead(out var sourceBlock))
-                    continue;
-                pipeline.ReleasePrefetchSlot();
-                active.RemoveAll(worker => !worker.IsActive);
-                if (active.Count == 0)
-                {
-                    sourceBlock.Release();
-                    stoppedEarly = true;
-                    prefetchCancel.Cancel();
-                    break;
-                }
-
-                var shared = sourceBlock.TransferToShared(active.Count);
-                var deliveryStarted = Stopwatch.GetTimestamp();
-                await DeliverAsync(active, new DataMessage(shared), job).ConfigureAwait(false);
-                var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                pipeline.RecordDeliveryWait(deliveryElapsed);
-                job.Telemetry.RecordFanoutWait(deliveryElapsed);
-                active.RemoveAll(worker => !worker.IsActive);
-                if (active.Count == 0)
-                {
-                    stoppedEarly = true;
-                    prefetchCancel.Cancel();
-                    break;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            deliveryError = ex;
-            prefetchCancel.Cancel();
-        }
-
-        SourceReadResult? result = null;
-        try
-        {
-            result = await readTask.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (stoppedEarly || deliveryError is not null || job.Token.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            deliveryError ??= ex;
-        }
-        finally
-        {
-            while (sourceQueue.Reader.TryRead(out var leftover))
-            {
-                pipeline.ReleasePrefetchSlot();
-                leftover.Release();
-            }
-        }
-
-        if (deliveryError is not null)
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(deliveryError).Throw();
-        if (stoppedEarly)
-            return null;
-        return result ?? throw new IOException($"La lectura anticipada terminó sin resultado: {entry.RelativePath}");
-    }
-
-    private static async Task<SourceReadResult> PrefetchSourceAsync(
-        FileEntry entry,
-        StorageDeviceInfo sourceDevice,
-        int readBufferSize,
-        int transferAlignment,
-        ChannelWriter<SourceReadBlock> output,
-        AdaptiveByteBudget bufferBudget,
-        CopyJob job,
-        PipelineGovernor pipeline,
-        DeviceScheduler? sharedSourceScheduler,
-        CancellationToken token)
-    {
-        Exception? completionError = null;
-        using var stageCancel = CancellationTokenSource.CreateLinkedTokenSource(token);
-        var hashQueue = Channel.CreateUnbounded<SourceReadBlock>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = true,
-            AllowSynchronousContinuations = false,
-        });
-        var readTask = ReadSourceAheadAsync(
-            entry,
-            sourceDevice,
-            readBufferSize,
-            transferAlignment,
-            hashQueue.Writer,
-            bufferBudget,
-            job,
-            pipeline,
-            sharedSourceScheduler,
-            stageCancel.Token);
-
-        try
-        {
-            using var hasher = Hasher.New();
-            long totalHashed = 0;
-            await foreach (var block in hashQueue.Reader.ReadAllAsync(stageCancel.Token).ConfigureAwait(false))
-            {
-                totalHashed += block.Length;
-                var hashStarted = Stopwatch.GetTimestamp();
-                hasher.UpdateWithJoin(block.Memory.Span);
-                job.Telemetry.RecordSourceHash(block.Length, Stopwatch.GetElapsedTime(hashStarted));
-                try
-                {
-                    await output.WriteAsync(block, stageCancel.Token).ConfigureAwait(false);
-                }
-                catch
-                {
-                    block.Release();
-                    pipeline.ReleasePrefetchSlot();
-                    throw;
-                }
-            }
-
-            var totalRead = await readTask.ConfigureAwait(false);
-            if (totalHashed != totalRead)
-                throw new IOException($"La tubería de origen perdió datos en {entry.RelativePath}: leídos {totalRead}, procesados {totalHashed}.");
-            ValidateCompletedSourceRead(entry, totalRead);
-            return new SourceReadResult(totalRead, hasher.Finalize().AsSpan().ToArray());
-        }
-        catch (Exception ex)
-        {
-            completionError = ex;
-            stageCancel.Cancel();
-            try { await readTask.ConfigureAwait(false); }
-            catch { }
-            while (hashQueue.Reader.TryRead(out var leftover))
-            {
-                leftover.Release();
-                pipeline.ReleasePrefetchSlot();
-            }
-            throw;
-        }
-        finally
-        {
-            output.TryComplete(completionError);
-        }
-    }
-
-    private static async Task<long> ReadSourceAheadAsync(
-        FileEntry entry,
-        StorageDeviceInfo sourceDevice,
-        int readBufferSize,
-        int transferAlignment,
-        ChannelWriter<SourceReadBlock> output,
-        AdaptiveByteBudget bufferBudget,
-        CopyJob job,
-        PipelineGovernor pipeline,
-        DeviceScheduler? sharedSourceScheduler,
-        CancellationToken token)
-    {
-        Exception? completionError = null;
-        DirectIoSourceReader.OverlappedSession? direct = null;
-        FileStream? buffered = null;
-        try
-        {
-            if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
-                buffered = OpenSourceStream(entry.SourcePath);
-
-            long totalRead = 0;
-            while (totalRead < entry.Size)
-            {
-                token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
-                await pipeline.AcquirePrefetchSlotAsync(token).ConfigureAwait(false);
-                var slotOwned = true;
-                var budgetOwned = false;
-                SourceBufferLease? lease = null;
-                try
-                {
-                    var budgetStarted = Stopwatch.GetTimestamp();
-                    await bufferBudget.AcquireAsync(readBufferSize, token).ConfigureAwait(false);
-                    budgetOwned = true;
-                    var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
-                    pipeline.RecordBudgetWait(budgetElapsed);
-                    job.Telemetry.RecordBufferWait(budgetElapsed);
-                    job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
-
-                    // FAN-OUT payloads are always aligned, even when the source itself
-                    // falls back to buffered I/O, so every capable destination can keep
-                    // using Direct I/O without a whole-block staging copy.
-                    lease = SourceBufferLease.RentAligned(
-                        readBufferSize,
-                        transferAlignment);
-
-                    var readStarted = Stopwatch.GetTimestamp();
-                    int read;
-                    DeviceScheduler.IoLease? sourceIo = null;
-                    try
-                    {
-                        if (sharedSourceScheduler is not null)
-                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(readBufferSize, token).ConfigureAwait(false);
-
-                        if (direct is not null)
-                        {
-                            try
-                            {
-                                read = await direct.ReadAsync(lease, readBufferSize, totalRead, token).ConfigureAwait(false);
-                                job.Telemetry.RecordDirectSourceRead(read);
-                            }
-                            catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
-                            {
-                                lease.Dispose();
-                                lease = null;
-                                direct.Dispose();
-                                direct = null;
-                                job.Telemetry.RecordDirectSourceFallback();
-                                buffered = OpenSourceStream(entry.SourcePath);
-                                buffered.Position = totalRead;
-                                lease = SourceBufferLease.RentAligned(
-                                    readBufferSize,
-                                    transferAlignment);
-                                var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
-                                read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
-                            }
-                        }
-                        else
-                        {
-                            var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
-                            read = await buffered!.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
-                        }
-                    }
-                    finally
-                    {
-                        sourceIo?.Dispose();
-                    }
-
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    pipeline.RecordSourceRead(readElapsed);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
-                    if (read == 0)
-                    {
-                        lease.Dispose();
-                        lease = null;
-                        bufferBudget.Release(readBufferSize);
-                        budgetOwned = false;
-                        pipeline.ReleasePrefetchSlot();
-                        slotOwned = false;
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
-                    }
-
-                    totalRead += read;
-                    var block = new SourceReadBlock(lease, read, readBufferSize, bufferBudget);
-                    lease = null;
-                    budgetOwned = false;
-                    await output.WriteAsync(block, token).ConfigureAwait(false);
-                    slotOwned = false;
-                }
-                catch
-                {
-                    if (budgetOwned)
-                        bufferBudget.Release(readBufferSize);
-                    if (slotOwned)
-                        pipeline.ReleasePrefetchSlot();
-                    throw;
-                }
-            }
-            return totalRead;
-        }
-        catch (Exception ex)
-        {
-            completionError = ex;
-            throw;
-        }
-        finally
-        {
-            direct?.Dispose();
-            if (buffered is not null)
-                await buffered.DisposeAsync().ConfigureAwait(false);
-            output.TryComplete(completionError);
         }
     }
 
@@ -993,35 +631,21 @@ public static class CopyEngine
                     continue;
                 }
 
-                var backlogOwned = false;
-                var pendingPayloadOwned = false;
+                var payloadOwned = false;
                 var queueOwned = false;
                 var blockOwned = true;
                 try
                 {
                     worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
-                    backlogOwned = true;
                     worker.ReservePendingPayload(message.Block.Length);
-                    pendingPayloadOwned = true;
-
-                    if (!worker.IsActive)
-                    {
-                        ReleaseBranchPayload(worker, message.Block.Length);
-                        backlogOwned = false;
-                        pendingPayloadOwned = false;
-                        message.Block.Release();
-                        blockOwned = false;
-                        continue;
-                    }
-
-                    var branchMessage = new DataMessage(message.Block, recipients.Count > 1);
+                    payloadOwned = true;
                     worker.IncrementQueueDepth();
                     queueOwned = true;
-                    if (worker.Ingress.Writer.TryWrite(branchMessage))
+
+                    if (worker.Channel.Writer.TryWrite(message))
                     {
+                        payloadOwned = false;
                         queueOwned = false;
-                        backlogOwned = false;
-                        pendingPayloadOwned = false;
                         blockOwned = false;
                         continue;
                     }
@@ -1029,18 +653,17 @@ public static class CopyEngine
                     worker.DecrementQueueDepth();
                     queueOwned = false;
                     ReleaseBranchPayload(worker, message.Block.Length);
-                    backlogOwned = false;
-                    pendingPayloadOwned = false;
+                    payloadOwned = false;
                     message.Block.Release();
                     blockOwned = false;
                     if (worker.IsActive)
-                        worker.Fail("El canal de entrada del destino se cerró antes de recibir todos los datos.");
+                        worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
                 }
                 catch
                 {
                     if (queueOwned)
                         worker.DecrementQueueDepth();
-                    if (backlogOwned || pendingPayloadOwned)
+                    if (payloadOwned)
                         ReleaseBranchPayload(worker, message.Block.Length);
                     if (blockOwned)
                         message.Block.Release();
@@ -1053,116 +676,6 @@ public static class CopyEngine
             for (var remaining = index + 1; remaining < recipients.Count; remaining++)
                 message.Block.Release();
             throw;
-        }
-    }
-
-    private static async Task StageBranchAsync(DestinationWorker worker, CopyJob job)
-    {
-        Exception? completionError = null;
-        try
-        {
-            await foreach (var message in worker.Ingress.Reader.ReadAllAsync(job.Token).ConfigureAwait(false))
-            {
-                worker.DecrementQueueDepth();
-                FanoutMessage staged = message;
-                var ownsOriginal = message is DataMessage;
-                try
-                {
-                    if (!worker.IsActive)
-                    {
-                        ReleaseQueuedPayload(worker, message);
-                        ownsOriginal = false;
-                        continue;
-                    }
-
-                    if (message is DataMessage data &&
-                        data.AllowIsolation &&
-                        BranchIsolationPolicy.ShouldDetach(
-                            worker.PendingPayloadBytes,
-                            data.Block.Length,
-                            worker.DeviceScheduler.CurrentQueueDepth,
-                            worker.DeviceScheduler.BacklogTargetBytes))
-                    {
-                        if (worker.ReplayStore.IsEnabled)
-                        {
-                            try
-                            {
-                                var replayStarted = Stopwatch.GetTimestamp();
-                                var segment = await worker.ReplayStore.SpillAsync(
-                                    data.Block.Memory,
-                                    data.Block.VerificationCrc32C,
-                                    job.Token).ConfigureAwait(false);
-                                job.Telemetry.RecordBranchReplayWrite(
-                                    segment.Length,
-                                    Stopwatch.GetElapsedTime(replayStarted));
-                                data.Block.Release();
-                                ownsOriginal = false;
-                                staged = new ReplayDataMessage(segment);
-                            }
-                            catch (IOException)
-                            {
-                                staged = new DataMessage(DetachBranchBlock(worker, data.Block), false);
-                                ownsOriginal = false;
-                            }
-                        }
-                        else
-                        {
-                            staged = new DataMessage(DetachBranchBlock(worker, data.Block), false);
-                            ownsOriginal = false;
-                        }
-                    }
-
-                    if (!worker.Channel.Writer.TryWrite(staged))
-                    {
-                        ReleaseQueuedPayload(worker, staged);
-                        ownsOriginal = false;
-                        if (worker.IsActive)
-                            worker.Fail("El canal de escritura del destino se cerró antes de recibir todos los datos.");
-                    }
-                    else
-                    {
-                        ownsOriginal = false;
-                    }
-                }
-                catch
-                {
-                    if (ownsOriginal)
-                        ReleaseQueuedPayload(worker, message);
-                    throw;
-                }
-            }
-        }
-        catch (OperationCanceledException) when (job.Token.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            completionError = ex;
-            worker.Fail(ex.Message);
-            throw;
-        }
-        finally
-        {
-            worker.Channel.Writer.TryComplete(completionError);
-        }
-    }
-
-    private static SharedBlock DetachBranchBlock(DestinationWorker worker, SharedBlock source)
-    {
-        SourceBufferLease? detached = SourceBufferLease.RentAligned(
-            source.Length,
-            BufferAlignmentFor(worker.Device));
-        try
-        {
-            source.Memory.CopyTo(detached.Memory[..source.Length]);
-            var result = new SharedBlock(detached, source.Length, source.VerificationCrc32C);
-            detached = null;
-            source.Release();
-            return result;
-        }
-        finally
-        {
-            detached?.Dispose();
         }
     }
 
@@ -1190,7 +703,7 @@ public static class CopyEngine
 
             worker.IncrementQueueDepth();
             queueOwned = true;
-            if (worker.Ingress.Writer.TryWrite(delivery))
+            if (worker.Channel.Writer.TryWrite(delivery))
             {
                 delivery = null;
                 queueOwned = false;
@@ -1200,7 +713,7 @@ public static class CopyEngine
             worker.DecrementQueueDepth();
             queueOwned = false;
             if (worker.IsActive)
-                worker.Fail("El canal de entrada del destino se cerró antes de recibir todos los datos.");
+                worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
         }
         finally
         {
@@ -1222,12 +735,11 @@ public static class CopyEngine
             worker.Progress.SetPhase(DestinationPhase.Copying);
             await foreach (var message in worker.Channel.Reader.ReadAllAsync())
             {
+                worker.DecrementQueueDepth();
                 var controlDelivery = message as ControlDelivery;
                 var effectiveMessage = controlDelivery?.Message ?? message;
                 var data = effectiveMessage as DataMessage;
-                var replay = effectiveMessage as ReplayDataMessage;
                 var dataOwnedByWriter = data is not null;
-                var replayOwnedByWriter = replay is not null;
                 try
                 {
                     if (!worker.IsActive)
@@ -1277,38 +789,7 @@ public static class CopyEngine
                             PruneCompletedSuccesses(current);
                             break;
 
-                        case ReplayDataMessage replayData when current is not null:
-                            if (current.Failed)
-                                break;
-
-                            if (current.DirectFallbackRequested)
-                            {
-                                var fallbackError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
-                                if (fallbackError is not null)
-                                {
-                                    FailCurrentFile(worker, current, options, fallbackError.Message);
-                                    break;
-                                }
-                            }
-
-                            var replayAdmissionError = await EnsureWriteWindowAsync(worker, current, job).ConfigureAwait(false);
-                            if (replayAdmissionError is not null)
-                            {
-                                FailCurrentFile(worker, current, options, replayAdmissionError.Message);
-                                break;
-                            }
-
-                            var replayOffset = current.ReserveWriteOffset(replayData.Segment.Length);
-                            current.VerificationBlocks.Add(
-                                new VerificationBlock(replayData.Segment.Length, replayData.Segment.VerificationCrc32C));
-                            current.PendingWrites.Add(
-                                WriteReplayBlockAtOffsetAsync(worker, current, replayData.Segment, replayOffset, job));
-                            replayOwnedByWriter = false;
-                            PruneCompletedSuccesses(current);
-                            break;
-
                         case DataMessage:
-                        case ReplayDataMessage:
                             break;
 
                         case EndMessage end when current is not null:
@@ -1326,8 +807,6 @@ public static class CopyEngine
                 {
                     if (dataOwnedByWriter && data is not null)
                         ReleaseBranchBlock(worker, data.Block);
-                    if (replayOwnedByWriter && replay is not null)
-                        ReleaseBranchPayload(worker, replay.Segment.Length);
                     controlDelivery?.ReleaseBudget();
                 }
             }
@@ -1351,7 +830,6 @@ public static class CopyEngine
                 if (current.Copied > 0 && !current.Failed)
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
-            DrainAndRelease(worker.Ingress.Reader, worker);
             DrainAndRelease(worker.Channel.Reader, worker);
         }
     }
@@ -1386,37 +864,6 @@ public static class CopyEngine
         return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
     }
 
-    private static async Task<PendingWriteResult> WriteReplayBlockAtOffsetAsync(
-        DestinationWorker worker,
-        CurrentFile current,
-        BranchReplayStore.Segment segment,
-        long offset,
-        CopyJob job)
-    {
-        SourceBufferLease? lease = SourceBufferLease.RentAligned(
-            segment.Length,
-            BufferAlignmentFor(worker.Device));
-        try
-        {
-            var replayStarted = Stopwatch.GetTimestamp();
-            await worker.ReplayStore.ReadAsync(
-                segment,
-                lease.Memory[..segment.Length],
-                job.Token).ConfigureAwait(false);
-            job.Telemetry.RecordBranchReplayRead(
-                segment.Length,
-                Stopwatch.GetElapsedTime(replayStarted));
-            var block = new SharedBlock(lease, segment.Length, segment.VerificationCrc32C);
-            lease = null;
-            return await WriteBlockAtOffsetAsync(worker, current, block, offset, job).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            lease?.Dispose();
-            ReleaseBranchPayload(worker, segment.Length);
-            return PendingWriteResult.Failed(ex);
-        }
-    }
     private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
         CurrentFile current,
@@ -1663,18 +1110,10 @@ public static class CopyEngine
 
     private static void ReleaseQueuedPayload(DestinationWorker worker, FanoutMessage message)
     {
-        switch (message)
-        {
-            case DataMessage data:
-                ReleaseBranchBlock(worker, data.Block);
-                break;
-            case ReplayDataMessage replay:
-                ReleaseBranchPayload(worker, replay.Segment.Length);
-                break;
-            default:
-                ReleaseQueuedControl(message);
-                break;
-        }
+        if (message is DataMessage data)
+            ReleaseBranchBlock(worker, data.Block);
+        else
+            ReleaseQueuedControl(message);
     }
 
     private static void SwitchToBufferedAfterDrain(CurrentFile current, CopyJob job)
@@ -1788,68 +1227,232 @@ public static class CopyEngine
         DestinationProgress[] progress,
         CopyJob job)
     {
-        var readBudget = VerificationReadBudget.CreateForSystem();
-        var activeSlots = Enumerable.Range(0, workers.Length)
-            .Where(slot => workers[slot].IsActive)
-            .ToArray();
-        var tasks = activeSlots.Select(async slot =>
+        for (var slot = 0; slot < workers.Length; slot++)
         {
-            var verifyEntries = copy.Files
+            if (!workers[slot].IsActive)
+                continue;
+            var entries = copy.Files
                 .Where(entry => workers[slot].VerificationPlans.ContainsKey(PathKey(entry.RelativePath)))
                 .ToArray();
-            var verifyBytes = verifyEntries.Aggregate<FileEntry, ulong>(
-                0,
-                (sum, entry) => checked(sum + (ulong)entry.Size));
-            progress[slot].SetVerifyWork(verifyBytes, (ulong)verifyEntries.Length);
-            if (verifyEntries.Length == 0)
-                return;
-
-            progress[slot].SetPhase(DestinationPhase.Verifying);
-            foreach (var entry in verifyEntries)
-            {
-                job.Token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-                var key = PathKey(entry.RelativePath);
-                if (!workers[slot].VerificationPlans.TryGetValue(key, out var plan))
-                    continue;
-                progress[slot].SetLastFile(entry.RelativePath);
-                var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                if (!File.Exists(destination))
-                {
-                    workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
-                    break;
-                }
-                ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
-                WindowsPath.EnsureRegularFile(destination, "El archivo durante verificación");
-                if (new FileInfo(destination).Length != entry.Size)
-                {
-                    workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
-                    break;
-                }
-
-                var valid = await FastVerificationReader.VerifyAsync(
-                    destination,
-                    copy.DestinationDevices[slot],
-                    workers[slot].DeviceScheduler,
-                    plan,
-                    readBudget,
-                    job,
-                    progress[slot]).ConfigureAwait(false);
-                if (!valid)
-                {
-                    workers[slot].Fail($"CRC32C no coincide durante verificación: {destination}");
-                    break;
-                }
-                progress[slot].MarkVerifyFileDone();
-            }
-        }).ToArray();
-        try
-        {
-            await Task.WhenAll(tasks).ConfigureAwait(false);
+            var bytes = entries.Aggregate<FileEntry, ulong>(0, (sum, entry) => checked(sum + (ulong)entry.Size));
+            progress[slot].SetVerifyWork(bytes, (ulong)entries.Length);
+            if (entries.Length > 0)
+                progress[slot].SetPhase(DestinationPhase.Verifying);
         }
-        finally
+
+        foreach (var entry in copy.Files)
         {
-            job.Telemetry.RecordVerificationBufferBudget(readBudget.LimitBytes, readBudget.PeakUsedBytes);
+            job.Token.ThrowIfCancellationRequested();
+            await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+
+            var slots = Enumerable.Range(0, workers.Length)
+                .Where(slot => workers[slot].IsActive && workers[slot].VerificationPlans.ContainsKey(PathKey(entry.RelativePath)))
+                .ToArray();
+            if (slots.Length == 0)
+                continue;
+
+            var plan = workers[slots[0]].VerificationPlans[PathKey(entry.RelativePath)];
+            var targets = new List<CoordinatedVerifyTarget>(slots.Length);
+            try
+            {
+                foreach (var slot in slots)
+                {
+                    progress[slot].SetLastFile(entry.RelativePath);
+                    var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                    if (!File.Exists(destination))
+                    {
+                        workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
+                        continue;
+                    }
+                    ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                    WindowsPath.EnsureRegularFile(destination, "El archivo durante verificación");
+                    if (new FileInfo(destination).Length != entry.Size)
+                    {
+                        workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
+                        continue;
+                    }
+                    targets.Add(new CoordinatedVerifyTarget(
+                        slot, destination, copy.DestinationDevices[slot], workers[slot].DeviceScheduler, progress[slot]));
+                }
+
+                if (targets.Count == 0)
+                    continue;
+
+                foreach (var target in targets)
+                    target.Open(plan.Blocks.Count == 0 ? 4096 : plan.Blocks.Max(block => block.Length));
+
+                long offset = 0;
+                foreach (var block in plan.Blocks)
+                {
+                    job.Token.ThrowIfCancellationRequested();
+                    await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
+
+                    var activeTargets = targets.Where(target => workers[target.Slot].IsActive).ToArray();
+                    if (activeTargets.Length == 0)
+                        break;
+
+                    var reads = activeTargets
+                        .Select(target => ReadVerifyTargetAsync(target, block.Length, offset, job))
+                        .ToArray();
+                    var results = await Task.WhenAll(reads).ConfigureAwait(false);
+                    for (var index = 0; index < activeTargets.Length; index++)
+                    {
+                        var target = activeTargets[index];
+                        var read = results[index];
+                        if (read < block.Length)
+                        {
+                            workers[target.Slot].Fail($"Lectura incompleta durante verificación: {target.Path}");
+                            continue;
+                        }
+
+                        var crcStarted = Stopwatch.GetTimestamp();
+                        var actual = FastCrc32C.Compute(target.Buffer!.Memory.Span[..block.Length]);
+                        job.Telemetry.RecordVerifyCrc32C(block.Length, Stopwatch.GetElapsedTime(crcStarted));
+                        if (actual != block.Crc32C)
+                        {
+                            workers[target.Slot].Fail($"CRC32C no coincide durante verificación: {target.Path}");
+                            continue;
+                        }
+                        target.Progress.AddVerified(block.Length);
+                    }
+                    offset = checked(offset + block.Length);
+                }
+
+                if (offset != plan.Length)
+                {
+                    foreach (var target in targets.Where(target => workers[target.Slot].IsActive))
+                        workers[target.Slot].Fail($"Verificación incompleta: {target.Path}");
+                }
+                else
+                {
+                    foreach (var target in targets.Where(target => workers[target.Slot].IsActive))
+                        target.Progress.MarkVerifyFileDone();
+                }
+            }
+            finally
+            {
+                foreach (var target in targets)
+                    target.Dispose();
+            }
+        }
+    }
+
+    private static async Task<int> ReadVerifyTargetAsync(
+        CoordinatedVerifyTarget target,
+        int expectedBytes,
+        long offset,
+        CopyJob job)
+    {
+        var retries = 0;
+        var lastCode = 0;
+        while (true)
+        {
+            var requestBytes = target.Direct is null
+                ? expectedBytes
+                : AlignUp(expectedBytes, target.Direct.Alignment);
+            using var io = await target.Scheduler.AcquireIoAsync(requestBytes, job.Token).ConfigureAwait(false);
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                int read;
+                if (target.Direct is not null)
+                {
+                    try
+                    {
+                        read = await target.Direct.ReadAsync(target.Buffer!, requestBytes, offset, job.Token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                    {
+                        target.SwitchToBuffered();
+                        continue;
+                    }
+                }
+                else
+                {
+                    read = await RandomAccess.ReadAsync(
+                        target.BufferedHandle!, target.Buffer!.Memory[..expectedBytes], offset, job.Token).ConfigureAwait(false);
+                }
+
+                job.Telemetry.RecordVerifyRead(expectedBytes, Stopwatch.GetElapsedTime(started));
+                if (retries > 0)
+                    job.Telemetry.RecordIoRecovery("verify-read", target.Path,
+                        target.Direct is null ? "buffered" : "direct", lastCode,
+                        target.Scheduler.CurrentQueueDepth, retries, offset, recovered: true);
+                return read;
+            }
+            catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+            {
+                lastCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
+                retries++;
+                target.Progress.AddRetry();
+                job.Telemetry.RecordIoRecovery("verify-read", target.Path,
+                    target.Direct is null ? "buffered" : "direct", lastCode,
+                    target.Scheduler.CurrentQueueDepth, retries, offset, recovered: false);
+                if (!target.Scheduler.RecordTransientFailure())
+                    throw;
+            }
+        }
+    }
+
+    private static int AlignUp(int value, int alignment)
+    {
+        var remainder = value % alignment;
+        return remainder == 0 ? value : checked(value + alignment - remainder);
+    }
+
+    private sealed class CoordinatedVerifyTarget : IDisposable
+    {
+        internal CoordinatedVerifyTarget(
+            int slot,
+            string path,
+            StorageDeviceInfo device,
+            DeviceScheduler scheduler,
+            DestinationProgress progress)
+        {
+            Slot = slot;
+            Path = path;
+            Device = device;
+            Scheduler = scheduler;
+            Progress = progress;
+        }
+
+        internal int Slot { get; }
+        internal string Path { get; }
+        internal StorageDeviceInfo Device { get; }
+        internal DeviceScheduler Scheduler { get; }
+        internal DestinationProgress Progress { get; }
+        internal DirectIoSourceReader.OverlappedSession? Direct { get; private set; }
+        internal Microsoft.Win32.SafeHandles.SafeFileHandle? BufferedHandle { get; private set; }
+        internal SourceBufferLease? Buffer { get; private set; }
+
+        internal void Open(int maximumBlockBytes)
+        {
+            var alignment = Math.Max(1, DirectIoSourceReader.RequiredAlignment(Device));
+            var directCapacity = AlignUp(Math.Max(1, maximumBlockBytes), Math.Max(1, alignment));
+            if (DirectIoSourceReader.TryOpenOverlappedForVerification(Path, Device, directCapacity, out var direct))
+            {
+                Direct = direct;
+                Buffer = SourceBufferLease.RentAligned(directCapacity, Math.Max(Environment.SystemPageSize, alignment));
+                return;
+            }
+            BufferedHandle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            Buffer = SourceBufferLease.RentBuffered(Math.Max(1, maximumBlockBytes));
+        }
+
+        internal void SwitchToBuffered()
+        {
+            Direct?.Dispose();
+            Direct = null;
+            BufferedHandle ??= File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+
+        public void Dispose()
+        {
+            Direct?.Dispose();
+            BufferedHandle?.Dispose();
+            Buffer?.Dispose();
         }
     }
 
@@ -1975,6 +1578,15 @@ public static class CopyEngine
 
     private static long ToUnixNanoseconds(DateTime utc) =>
         checked((utc.ToUniversalTime().Ticks - DateTime.UnixEpoch.Ticks) * 100L);
+    private static int SelectSharedFanoutBlockSize(long fileSize, int alignment)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(fileSize);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(alignment);
+        var desired = (int)Math.Min(SharedFanoutBlockBytes, Math.Max((long)alignment, fileSize));
+        var remainder = desired % alignment;
+        return remainder == 0 ? desired : checked(desired + alignment - remainder);
+    }
+
     private static int BufferAlignmentFor(StorageDeviceInfo device)
     {
         var alignment = Math.Max(1, Environment.SystemPageSize);
@@ -2032,8 +1644,7 @@ public static class CopyEngine
     {
         while (reader.TryRead(out var message))
         {
-            if (ReferenceEquals(reader, worker.Ingress.Reader))
-                worker.DecrementQueueDepth();
+            worker.DecrementQueueDepth();
             ReleaseQueuedPayload(worker, message);
         }
     }
@@ -2078,48 +1689,10 @@ public static class CopyEngine
 
     private sealed record SourceReadResult(long BytesRead, byte[] Hash);
 
-    private sealed class SourceReadBlock
-    {
-        private SourceBufferLease? _buffer;
-        private readonly int _reservedBytes;
-        private readonly AdaptiveByteBudget _budget;
-
-        public SourceReadBlock(SourceBufferLease buffer, int length, int reservedBytes, AdaptiveByteBudget budget)
-        {
-            _buffer = buffer;
-            Length = length;
-            _reservedBytes = reservedBytes;
-            _budget = budget;
-        }
-
-        public int Length { get; }
-        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SourceReadBlock))).Memory[..Length];
-
-        public SharedBlock TransferToShared(int references)
-        {
-            if (references <= 0)
-                throw new ArgumentOutOfRangeException(nameof(references));
-            var buffer = Interlocked.Exchange(ref _buffer, null)
-                ?? throw new ObjectDisposedException(nameof(SourceReadBlock));
-            return new SharedBlock(buffer, Length, _reservedBytes, references, _budget);
-        }
-
-        public void Release()
-        {
-            var buffer = Interlocked.Exchange(ref _buffer, null);
-            if (buffer is null)
-                return;
-            buffer.Dispose();
-            if (_budget is not null && _reservedBytes > 0)
-                _budget.Release(_reservedBytes);
-        }
-    }
-
     private abstract record FanoutMessage;
     private abstract record ControlMessage : FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
-    private sealed record DataMessage(SharedBlock Block, bool AllowIsolation = false) : FanoutMessage;
-    private sealed record ReplayDataMessage(BranchReplayStore.Segment Segment) : FanoutMessage;
+    private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
@@ -2197,254 +1770,6 @@ public static class CopyEngine
             buffer.Dispose();
             if (_budget is not null && _reservedBytes > 0)
                 _budget.Release(_reservedBytes);
-        }
-    }
-
-    internal sealed class PipelineGovernor
-    {
-        private const int MinPrefetch = 1;
-        private const int InitialPrefetch = 4;
-        private const int SamplesPerDecision = 8;
-
-        private readonly object _gate = new();
-        private readonly Queue<PrefetchWaiter> _slotWaiters = new();
-        private readonly AdaptiveByteBudget _budget;
-        private int _bytesPerBlock;
-        private int _prefetchLimit;
-        private int _minimumObservedPrefetchLimit;
-        private int _maximumObservedPrefetchLimit;
-        private int _inFlight;
-        private int _samples;
-        private int _decisionCount;
-        private int _upshifts;
-        private int _downshifts;
-        private string _lastDecision = "initial";
-        private double _consumerWaitMs;
-        private double _deliveryWaitMs;
-        private double _budgetWaitMs;
-        private double _readMs;
-        private double _totalConsumerWaitMs;
-        private double _totalDeliveryWaitMs;
-        private double _totalBudgetWaitMs;
-        private double _totalReadMs;
-
-        internal PipelineGovernor(AdaptiveByteBudget budget, int bytesPerBlock)
-        {
-            _budget = budget ?? throw new ArgumentNullException(nameof(budget));
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerBlock);
-            _bytesPerBlock = bytesPerBlock;
-            _prefetchLimit = Math.Min(InitialPrefetch, CurrentCapacityLocked());
-            _minimumObservedPrefetchLimit = _prefetchLimit;
-            _maximumObservedPrefetchLimit = _prefetchLimit;
-        }
-
-        internal int InFlight
-        {
-            get { lock (_gate) return _inFlight; }
-        }
-
-        internal PipelineGovernorSnapshot Snapshot()
-        {
-            lock (_gate)
-            {
-                return new PipelineGovernorSnapshot(
-                    _prefetchLimit,
-                    _minimumObservedPrefetchLimit,
-                    _maximumObservedPrefetchLimit,
-                    _inFlight,
-                    _decisionCount,
-                    _upshifts,
-                    _downshifts,
-                    _lastDecision,
-                    TimeSpan.FromMilliseconds(_totalConsumerWaitMs),
-                    TimeSpan.FromMilliseconds(_totalDeliveryWaitMs),
-                    TimeSpan.FromMilliseconds(_totalBudgetWaitMs),
-                    TimeSpan.FromMilliseconds(_totalReadMs));
-            }
-        }
-
-        internal void SetBytesPerBlock(int bytesPerBlock)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerBlock);
-            lock (_gate)
-            {
-                _bytesPerBlock = bytesPerBlock;
-                var capacity = CurrentCapacityLocked();
-                if (_prefetchLimit > capacity)
-                    _prefetchLimit = capacity;
-                PumpSlotsLocked();
-            }
-        }
-        public ValueTask AcquirePrefetchSlotAsync(CancellationToken token)
-        {
-            lock (_gate)
-            {
-                var capacity = CurrentCapacityLocked();
-                if (_prefetchLimit > capacity)
-                    _prefetchLimit = capacity;
-                if (_inFlight < _prefetchLimit && _slotWaiters.Count == 0)
-                {
-                    _inFlight++;
-                    return ValueTask.CompletedTask;
-                }
-
-                var waiter = new PrefetchWaiter();
-                _slotWaiters.Enqueue(waiter);
-                return new ValueTask(WaitForPrefetchSlotAsync(waiter, token));
-            }
-        }
-
-        private async Task WaitForPrefetchSlotAsync(PrefetchWaiter waiter, CancellationToken token)
-        {
-            try
-            {
-                await waiter.Ready.Task.WaitAsync(token).ConfigureAwait(false);
-            }
-            catch
-            {
-                lock (_gate)
-                {
-                    if (waiter.Granted)
-                    {
-                        waiter.Granted = false;
-                        if (_inFlight <= 0)
-                            throw new InvalidOperationException("Contabilidad de prefetch inválida durante cancelación.");
-                        _inFlight--;
-                    }
-                    else
-                    {
-                        waiter.Cancelled = true;
-                    }
-                    PumpSlotsLocked();
-                }
-                throw;
-            }
-        }
-
-        public void ReleasePrefetchSlot()
-        {
-            lock (_gate)
-            {
-                if (_inFlight <= 0)
-                    throw new InvalidOperationException("Se intentó liberar un slot de prefetch no adquirido.");
-                _inFlight--;
-                EvaluateLocked();
-                PumpSlotsLocked();
-            }
-        }
-
-        public void RecordConsumerWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Consumer);
-        public void RecordDeliveryWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Delivery);
-        public void RecordBudgetWait(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Budget);
-        public void RecordSourceRead(TimeSpan elapsed) => RecordSample(elapsed.TotalMilliseconds, SampleKind.Read);
-
-        private void RecordSample(double milliseconds, SampleKind kind)
-        {
-            lock (_gate)
-            {
-                switch (kind)
-                {
-                    case SampleKind.Consumer:
-                        _consumerWaitMs += milliseconds;
-                        _totalConsumerWaitMs += milliseconds;
-                        break;
-                    case SampleKind.Delivery:
-                        _deliveryWaitMs += milliseconds;
-                        _totalDeliveryWaitMs += milliseconds;
-                        break;
-                    case SampleKind.Budget:
-                        _budgetWaitMs += milliseconds;
-                        _totalBudgetWaitMs += milliseconds;
-                        break;
-                    case SampleKind.Read:
-                        _readMs += milliseconds;
-                        _totalReadMs += milliseconds;
-                        break;
-                }
-                if (kind == SampleKind.Consumer)
-                    _samples++;
-                EvaluateLocked();
-            }
-        }
-
-        private void EvaluateLocked()
-        {
-            if (_samples < SamplesPerDecision)
-                return;
-
-            var starvation = _consumerWaitMs;
-            var pressure = _deliveryWaitMs + _budgetWaitMs;
-            var sourceCost = _readMs;
-            var previous = _prefetchLimit;
-            var capacity = CurrentCapacityLocked();
-            var decision = "hold:balanced";
-
-            if (pressure > starvation * 1.5 && pressure > sourceCost)
-            {
-                _prefetchLimit = Math.Max(MinPrefetch, _prefetchLimit / 2);
-                decision = _prefetchLimit < previous ? "decrease:pressure" : "hold:min";
-            }
-            else if (starvation > pressure * 1.5 && starvation > sourceCost * 0.25)
-            {
-                var doubled = previous > int.MaxValue / 2 ? int.MaxValue : previous * 2;
-                _prefetchLimit = Math.Min(capacity, Math.Max(previous + 1, doubled));
-                decision = _prefetchLimit > previous ? "increase:starvation" : "hold:memory";
-            }
-            else if (_prefetchLimit > capacity)
-            {
-                _prefetchLimit = capacity;
-                decision = "decrease:memory";
-            }
-
-            _decisionCount++;
-            if (_prefetchLimit > previous)
-                _upshifts++;
-            else if (_prefetchLimit < previous)
-                _downshifts++;
-            _minimumObservedPrefetchLimit = Math.Min(_minimumObservedPrefetchLimit, _prefetchLimit);
-            _maximumObservedPrefetchLimit = Math.Max(_maximumObservedPrefetchLimit, _prefetchLimit);
-            _lastDecision = decision;
-
-            _samples = 0;
-            _consumerWaitMs = 0;
-            _deliveryWaitMs = 0;
-            _budgetWaitMs = 0;
-            _readMs = 0;
-            PumpSlotsLocked();
-        }
-
-        private int CurrentCapacityLocked() =>
-            Math.Max(MinPrefetch, _budget.GetAdmissibleConcurrency(_bytesPerBlock));
-
-        private void PumpSlotsLocked()
-        {
-            var capacity = CurrentCapacityLocked();
-            if (_prefetchLimit > capacity)
-                _prefetchLimit = capacity;
-            while (_inFlight < _prefetchLimit && _slotWaiters.Count > 0)
-            {
-                var waiter = _slotWaiters.Dequeue();
-                if (waiter.Cancelled)
-                    continue;
-                waiter.Granted = true;
-                _inFlight++;
-                waiter.Ready.TrySetResult();
-            }
-        }
-
-        private sealed class PrefetchWaiter
-        {
-            public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            public bool Cancelled { get; set; }
-            public bool Granted { get; set; }
-        }
-
-        private enum SampleKind
-        {
-            Consumer,
-            Delivery,
-            Budget,
-            Read,
         }
     }
 
@@ -2657,7 +1982,7 @@ public static class CopyEngine
         {
             var progressQuantum = Math.Max(1, Environment.SystemPageSize);
             var safeNow = MemoryPressureCapacity.GetSafeTotalBytes(0, progressQuantum);
-            var initial = Math.Max((long)progressQuantum, Math.Min(InitialBufferBudget, safeNow));
+            var initial = Math.Max((long)progressQuantum, Math.Min(SharedFanoutPoolBytes, safeNow));
             return new AdaptiveByteBudget(initial, _ => 0, usesSystemCapacity: true);
         }
 
@@ -2808,7 +2133,7 @@ public static class CopyEngine
         }
     }
 
-    private sealed class DestinationWorker : IDisposable
+    private sealed class DestinationWorker
     {
         public Dictionary<string, VerificationPlan> VerificationPlans { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
@@ -2823,8 +2148,7 @@ public static class CopyEngine
             DestinationProgress progress,
             StorageDeviceInfo device,
             DeviceScheduler deviceScheduler,
-            AdaptiveControlByteBudget controlBudget,
-            string? replayDirectory)
+            AdaptiveControlByteBudget controlBudget)
         {
             Root = root;
             Slot = slot;
@@ -2832,13 +2156,6 @@ public static class CopyEngine
             Device = device;
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
-            ReplayStore = new BranchReplayStore(replayDirectory);
-            Ingress = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
-            {
-                SingleReader = true,
-                SingleWriter = true,
-                AllowSynchronousContinuations = false,
-            });
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2853,23 +2170,11 @@ public static class CopyEngine
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
-        internal BranchReplayStore ReplayStore { get; }
-        public Channel<FanoutMessage> Ingress { get; }
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
         public long PeakPendingPayloadBytes => Interlocked.Read(ref _peakPendingPayloadBytes);
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
-
-        internal BranchFlowSnapshot FlowSnapshot() => new(
-            Root,
-            Volatile.Read(ref _queueDepth),
-            PendingPayloadBytes,
-            PeakPendingPayloadBytes,
-            DeviceScheduler.QueuedBytes,
-            DeviceScheduler.OutstandingIo,
-            DeviceScheduler.CurrentQueueDepth,
-            ReplayStore.IsEnabled);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
 
@@ -2881,8 +2186,7 @@ public static class CopyEngine
             while (pending > peak)
             {
                 var observed = Interlocked.CompareExchange(ref _peakPendingPayloadBytes, pending, peak);
-                if (observed == peak)
-                    break;
+                if (observed == peak) break;
                 peak = observed;
             }
         }
@@ -2922,11 +2226,8 @@ public static class CopyEngine
             if (Interlocked.Exchange(ref _active, 0) == 0) return;
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
-            Ingress.Writer.TryComplete();
             Channel.Writer.TryComplete();
         }
-
-        public void Dispose() => ReplayStore.Dispose();
     }
 
     private enum PendingWriteStatus

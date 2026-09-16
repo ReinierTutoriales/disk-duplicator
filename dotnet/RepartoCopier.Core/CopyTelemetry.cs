@@ -22,20 +22,6 @@ public enum VerificationBottleneckKind
     Crc32C,
     Balanced,
 }
-public sealed record PipelineGovernorSnapshot(
-    int CurrentPrefetchLimit,
-    int MinimumObservedPrefetchLimit,
-    int MaximumObservedPrefetchLimit,
-    int InFlight,
-    int DecisionCount,
-    int Upshifts,
-    int Downshifts,
-    string LastDecision,
-    TimeSpan ConsumerWaitTime,
-    TimeSpan DeliveryWaitTime,
-    TimeSpan BudgetWaitTime,
-    TimeSpan SourceReadTime);
-
 public sealed record CopyDiagnosticsSnapshot(
     long SourceReadBytes,
     TimeSpan SourceReadTime,
@@ -77,8 +63,9 @@ public sealed record CopyDiagnosticsSnapshot(
     public double FanoutLogicalWriteWallClockBytesPerSecond => Rate(WrittenBytes, CopyPhaseElapsed);
     public double SustainedWrite5sBytesPerSecond { get; init; }
     public double SustainedWrite10sBytesPerSecond { get; init; }
+    public double SourceRead5sBytesPerSecond { get; init; }
+    public double SourceRead10sBytesPerSecond { get; init; }
     public IReadOnlyList<DeviceIoSnapshot> DeviceSchedulers { get; init; } = [];
-    public PipelineGovernorSnapshot? PipelineGovernor { get; init; }
     public long DirectSourceReadBytes { get; init; }
     public long DirectSourceReadOperations { get; init; }
     public int DirectSourceFallbacks { get; init; }
@@ -86,18 +73,10 @@ public sealed record CopyDiagnosticsSnapshot(
     public long DirectDestinationWriteBytes { get; init; }
     public long DirectDestinationWriteOperations { get; init; }
     public int DirectDestinationFallbacks { get; init; }
-    public long VerificationReadBudgetBytes { get; init; }
-    public long PeakVerificationReadBytes { get; init; }
-    public long BranchReplayWriteBytes { get; init; }
-    public TimeSpan BranchReplayWriteTime { get; init; }
-    public long BranchReplayReadBytes { get; init; }
-    public TimeSpan BranchReplayReadTime { get; init; }
-    public long BranchReplaySegments { get; init; }
     public int CurrentTransferBytes { get; init; }
     public int MinimumTransferBytes { get; init; }
     public int MaximumTransferBytes { get; init; }
     public IReadOnlyList<IoRecoveryEvent> RecentIoRecoveryEvents { get; init; } = [];
-    public IReadOnlyList<BranchFlowSnapshot> BranchFlows { get; init; } = [];
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -124,10 +103,9 @@ internal sealed class CopyTelemetry
 {
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly SlidingByteRateWindow _writeRate = new();
+    private readonly SlidingByteRateWindow _sourceReadRate = new();
     private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
-    private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
-    private Func<IReadOnlyList<BranchFlowSnapshot>>? _branchFlowSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
     private long _directSourceReadBytes, _directSourceReadOperations;
     private int _directSourceFallbacks;
@@ -140,9 +118,6 @@ internal sealed class CopyTelemetry
     private long _flushTicks, _commitTicks, _recoveryTicks;
     private long _verifyReadBytes, _verifyReadTicks;
     private long _verifyCrc32CBytes, _verifyCrc32CTicks;
-    private long _verificationReadBudgetBytes, _peakVerificationReadBytes;
-    private long _branchReplayWriteBytes, _branchReplayWriteTicks;
-    private long _branchReplayReadBytes, _branchReplayReadTicks, _branchReplaySegments;
     private int _currentTransferBytes, _minimumTransferBytes = int.MaxValue, _maximumTransferBytes;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
@@ -150,19 +125,13 @@ internal sealed class CopyTelemetry
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
         _deviceSchedulers = schedulers.ToArray();
 
-    internal void AttachPipelineGovernor(Func<PipelineGovernorSnapshot> snapshotProvider)
-    {
-        ArgumentNullException.ThrowIfNull(snapshotProvider);
-        _pipelineGovernorSnapshot = snapshotProvider;
-    }
 
-    internal void AttachBranchFlows(Func<IReadOnlyList<BranchFlowSnapshot>> snapshotProvider)
+    internal void RecordSourceRead(int bytes, TimeSpan elapsed)
     {
-        ArgumentNullException.ThrowIfNull(snapshotProvider);
-        _branchFlowSnapshot = snapshotProvider;
+        AddBytes(ref _sourceReadBytes, bytes);
+        AddTicks(ref _sourceReadTicks, elapsed);
+        if (bytes > 0) _sourceReadRate.Record(bytes);
     }
-
-    internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
     internal void RecordDirectSourceRead(int bytes) { AddBytes(ref _directSourceReadBytes, bytes); Interlocked.Increment(ref _directSourceReadOperations); }
     internal void RecordDirectSourceFallback() => Interlocked.Increment(ref _directSourceFallbacks);
     internal void RecordDirectDestinationFile() => Interlocked.Increment(ref _directDestinationFiles);
@@ -223,13 +192,6 @@ internal sealed class CopyTelemetry
 
     internal void RecordVerifyRead(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyReadBytes, bytes); AddTicks(ref _verifyReadTicks, elapsed); }
     internal void RecordVerifyCrc32C(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyCrc32CBytes, bytes); AddTicks(ref _verifyCrc32CTicks, elapsed); }
-    internal void RecordVerificationBufferBudget(long budgetBytes, long peakBytes)
-    {
-        if (budgetBytes > 0) Interlocked.Exchange(ref _verificationReadBudgetBytes, budgetBytes);
-        if (peakBytes > 0) UpdateMax(ref _peakVerificationReadBytes, peakBytes);
-    }
-    internal void RecordBranchReplayWrite(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayWriteBytes, bytes); AddTicks(ref _branchReplayWriteTicks, elapsed); Interlocked.Increment(ref _branchReplaySegments); }
-    internal void RecordBranchReplayRead(int bytes, TimeSpan elapsed) { AddBytes(ref _branchReplayReadBytes, bytes); AddTicks(ref _branchReplayReadTicks, elapsed); }
     internal void RecordTransferSize(int bytes)
     {
         if (bytes <= 0) return;
@@ -249,13 +211,12 @@ internal sealed class CopyTelemetry
     internal CopyDiagnosticsSnapshot Snapshot()
     {
         var sustained = _writeRate.Snapshot();
+        var sourceSustained = _sourceReadRate.Snapshot();
 
         var devices = _deviceSchedulers?
             .Select(item => item.Snapshot())
             .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
             .ToArray() ?? [];
-        var pipeline = _pipelineGovernorSnapshot?.Invoke();
-
         return new CopyDiagnosticsSnapshot(
             Interlocked.Read(ref _sourceReadBytes), ToTimeSpan(Interlocked.Read(ref _sourceReadTicks)),
             Interlocked.Read(ref _sourceHashBytes), ToTimeSpan(Interlocked.Read(ref _sourceHashTicks)),
@@ -274,8 +235,9 @@ internal sealed class CopyTelemetry
         {
             SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
             SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
+            SourceRead5sBytesPerSecond = sourceSustained.FiveSecondsBytesPerSecond,
+            SourceRead10sBytesPerSecond = sourceSustained.TenSecondsBytesPerSecond,
             DeviceSchedulers = devices,
-            PipelineGovernor = pipeline,
             DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),
             DirectSourceReadOperations = Interlocked.Read(ref _directSourceReadOperations),
             DirectSourceFallbacks = Volatile.Read(ref _directSourceFallbacks),
@@ -283,18 +245,10 @@ internal sealed class CopyTelemetry
             DirectDestinationWriteBytes = Interlocked.Read(ref _directDestinationWriteBytes),
             DirectDestinationWriteOperations = Interlocked.Read(ref _directDestinationWriteOperations),
             DirectDestinationFallbacks = Volatile.Read(ref _directDestinationFallbacks),
-            VerificationReadBudgetBytes = Interlocked.Read(ref _verificationReadBudgetBytes),
-            PeakVerificationReadBytes = Interlocked.Read(ref _peakVerificationReadBytes),
-            BranchReplayWriteBytes = Interlocked.Read(ref _branchReplayWriteBytes),
-            BranchReplayWriteTime = ToTimeSpan(Interlocked.Read(ref _branchReplayWriteTicks)),
-            BranchReplayReadBytes = Interlocked.Read(ref _branchReplayReadBytes),
-            BranchReplayReadTime = ToTimeSpan(Interlocked.Read(ref _branchReplayReadTicks)),
-            BranchReplaySegments = Interlocked.Read(ref _branchReplaySegments),
             CurrentTransferBytes = Volatile.Read(ref _currentTransferBytes),
             MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
             MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
             RecentIoRecoveryEvents = _ioRecoveryEvents.ToArray(),
-            BranchFlows = _branchFlowSnapshot?.Invoke() ?? [],
         };
     }
 

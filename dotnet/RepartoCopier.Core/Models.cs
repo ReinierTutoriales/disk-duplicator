@@ -15,8 +15,7 @@ public enum DestinationPhase
 public sealed record CopyOptions(
     bool Verify = false,
     bool SkipSame = true,
-    bool KeepGoing = false,
-    bool EnableReplay = true);
+    bool KeepGoing = false);
 
 public sealed record DestinationSnapshot(
     string Label,
