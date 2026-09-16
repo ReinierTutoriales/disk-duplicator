@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/extremecopy_baseline_migration.py'
+      - 'tools/extremecopy_migration_hotfix.py'
       - '.github/workflows/extremecopy-baseline-migration.yml'
 
 permissions:
@@ -22,7 +23,9 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Apply shared FAN-OUT baseline migration
         shell: pwsh
-        run: python tools/extremecopy_baseline_migration.py
+        run: |
+          python tools/extremecopy_migration_hotfix.py
+          python tools/extremecopy_baseline_migration.py
       - name: Architecture guards
         shell: pwsh
         run: |
@@ -48,7 +51,7 @@ jobs:
       - name: Remove migration infrastructure and commit green product
         shell: pwsh
         run: |
-          git rm tools/extremecopy_baseline_migration.py .github/workflows/extremecopy-baseline-migration.yml
+          git rm tools/extremecopy_baseline_migration.py tools/extremecopy_migration_hotfix.py .github/workflows/extremecopy-baseline-migration.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
