@@ -1,0 +1,57 @@
+name: Compact WinUI migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/compact_ui_migration.py'
+      - '.github/workflows/compact-ui-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Apply compact UI migration
+        run: python tools/compact_ui_migration.py
+      - name: UI architecture guards
+        shell: pwsh
+        run: |
+          $xaml = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml -Raw
+          $code = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
+          foreach ($token in @('ProgressList','RunningDestinationTitle')) {
+            if ($xaml.Contains($token)) { throw "Per-destination running UI remains: $token" }
+          }
+          foreach ($token in @('ProgressRow','_progressRows')) {
+            if ($code.Contains($token)) { throw "Per-destination running model remains: $token" }
+          }
+          if (-not $xaml.Contains('x:Name="OverallProgressBar"')) { throw 'Overall progress bar missing' }
+          if (-not $code.Contains('SizeInt32(960, 620)')) { throw 'Compact default window size missing' }
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+      - name: Publish self-contained x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+      - name: Commit green product only
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
+          git rm -f tools/compact_ui_migration.py .github/workflows/compact-ui-migration.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dotnet/RepartoCopier.WinUI
+          git commit -m 'ui: compact RepartoCopier around one overall progress view'
+          git push origin HEAD:main
