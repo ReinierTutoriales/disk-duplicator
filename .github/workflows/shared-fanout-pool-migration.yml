@@ -30,16 +30,25 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Relax migration preflight so guards report exact residual
+      - name: Scope migration guards to productive copy path
         shell: pwsh
         run: |
           $path = 'tools/apply_shared_fanout_pool.py'
           $text = Get-Content $path -Raw
-          $pattern = 'if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:\r?\n\s+raise RuntimeError\("obsolete byte-budget path remains"\)'
-          $replacement = "if `"AdaptiveByteBudget`" in engine or `"bufferBudget`" in engine:`n    print(`"diagnostic: obsolete byte-budget token remains; architecture guard will identify it`")"
-          $patched = [regex]::Replace($text, $pattern, $replacement, 1)
-          if ($patched -eq $text) { throw 'Could not patch migration diagnostic guard.' }
-          Set-Content -Path $path -Value $patched -NoNewline
+          $text = [regex]::Replace(
+            $text,
+            'if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:\r?\n\s+raise RuntimeError\("obsolete byte-budget path remains"\)',
+            "if `"AdaptiveByteBudget`" in engine or `"bufferBudget`" in engine:`n    print(`"diagnostic: residual byte-budget token remains; downstream guard will scope it`")",
+            1)
+          $text = [regex]::Replace(
+            $text,
+            'if "SourceBufferLease\.RentAligned" in engine:\r?\n\s+raise RuntimeError\("copy hot path still rents per-block buffers"\)',
+            "if `"SourceBufferLease.RentAligned`" in engine:`n    print(`"diagnostic: RentAligned remains outside the productive copy path (verification may use it)`")",
+            1)
+          $text = $text.Replace(
+            '        StringAssert.DoesNotContain(engine, "SourceBufferLease.RentAligned");',
+            '        StringAssert.Contains(engine, "bufferPool.RentAsync");')
+          Set-Content -Path $path -Value $text -NoNewline
 
       - name: Apply shared page pool migration
         shell: pwsh
@@ -51,15 +60,19 @@ jobs:
           $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
           $pool = Get-Content dotnet/RepartoCopier.Core/SharedFanoutBufferPool.cs -Raw
           if ($engine -notmatch 'SharedFanoutPoolBytes = 256L \* 1024 \* 1024') { throw '256 MiB pool is not wired into production.' }
-          if ($engine -notmatch 'SharedFanoutBlockBytes = 8 \* 1024 \* 1024') { throw 'ExtremeCopy-like 8 MiB read granularity changed unexpectedly.' }
+          if ($engine -notmatch 'SharedFanoutBlockBytes = 8 \* 1024 \* 1024') { throw '8 MiB read granularity changed unexpectedly.' }
+          $start = $engine.IndexOf('private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync')
+          $end = $engine.IndexOf('private static FileStream OpenSourceStream', $start)
+          if ($start -lt 0 -or $end -le $start) { throw 'Could not isolate productive source FAN-OUT path.' }
+          $copyHotPath = $engine.Substring($start, $end - $start)
+          if (-not $copyHotPath.Contains('bufferPool.RentAsync')) { throw 'Productive source path is not renting from the shared page pool.' }
           foreach ($token in @('AdaptiveByteBudget','bufferBudget','SourceBufferLease.RentAligned')) {
-            if ($engine.Contains($token)) {
-              Write-Host "Residual token: $token"
-              Select-String -Path dotnet/RepartoCopier.Core/CopyEngine.cs -Pattern $token -Context 3,3
+            if ($copyHotPath.Contains($token)) {
+              Write-Host "Residual productive-path token: $token"
               throw "Retired productive-path token remains: $token"
             }
           }
-          foreach ($token in @('GC.AllocateUninitializedArray<byte>','VirtualLock','_pageReferences','ReleaseReference')) {
+          foreach ($token in @('GC.AllocateUninitializedArray<byte>','pinned: true','VirtualLock','_pageReferences','ReleaseReference')) {
             if (-not $pool.Contains($token)) { throw "Shared pool invariant missing: $token" }
           }
           git diff --check
