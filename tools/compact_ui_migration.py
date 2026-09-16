@@ -30,7 +30,7 @@ xaml = replace_once(xaml, 'Text="Nueva copia" FontSize="29"', 'Text="Nueva copia
 xaml = xaml.replace('Style="{StaticResource SurfaceCardStyle}" Padding="18,16"', 'Style="{StaticResource SurfaceCardStyle}" Padding="14,12"', 2)
 xaml = replace_once(xaml, 'MaxHeight="204"', 'MaxHeight="132"', 'destination list height')
 xaml = replace_once(xaml, 'MinHeight="42"', 'MinHeight="36"', 'destination item minheight')
-xaml = replace_once(xaml, '<Grid MinHeight="42" Padding="10,3"', '<Grid MinHeight="36" Padding="9,2"', 'destination item grid')
+xaml = replace_once(xaml, '<Grid MinHeight="36" Padding="10,3"', '<Grid MinHeight="36" Padding="9,2"', 'destination item grid')
 xaml = replace_once(xaml, 'Height="44" MinWidth="152"', 'Height="40" MinWidth="138"', 'start button size')
 
 # Running view becomes one compact job-level dashboard: no per-disk progress cards.
