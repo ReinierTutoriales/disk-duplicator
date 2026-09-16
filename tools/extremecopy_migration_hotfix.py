@@ -6,5 +6,10 @@ new = """engine = engine.replace(\n'''        AdaptiveByteBudget bufferBudget,\n
 if old not in s:
     raise RuntimeError('signature matcher block not found')
 s = s.replace(old, new, 1)
+old_guard = "all_cs = '\\n'.join(p.read_text(encoding='utf-8', errors='ignore') for p in (ROOT / 'dotnet').rglob('*.cs'))"
+new_guard = "all_cs = '\\n'.join(p.read_text(encoding='utf-8', errors='ignore') for base in (CORE, UI) for p in base.rglob('*.cs'))"
+if old_guard not in s:
+    raise RuntimeError('product guard block not found')
+s = s.replace(old_guard, new_guard, 1)
 p.write_text(s, encoding='utf-8')
-print('migration matcher fixed')
+print('migration matcher and product-only guards fixed')
