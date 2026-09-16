@@ -117,6 +117,16 @@ jobs:
           }
           '@ | Set-Content dotnet/RepartoCopier.Core.Tests/WinUiCompactProgressContractTests.cs -NoNewline
 
+      - name: Align sustained-rate architecture contract
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core.Tests/SustainedDestinationRateArchitectureTests.cs'
+          $text = Get-Content $path -Raw
+          $old = 'Assert.AreEqual(2, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));'
+          $new = 'Assert.AreEqual(3, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));'
+          if (-not $text.Contains($old)) { throw 'Old sustained-rate contract was not found.' }
+          Set-Content -Path $path -Value ($text.Replace($old, $new)) -NoNewline
+
       - name: Architecture guards
         shell: pwsh
         run: |
