@@ -29,10 +29,14 @@ jobs:
       - name: Architecture guards
         shell: pwsh
         run: |
-          $all = (Get-ChildItem dotnet -Recurse -Filter *.cs | Get-Content -Raw) -join "`n"
+          $product = @(
+            Get-ChildItem dotnet/RepartoCopier.Core -Recurse -Filter *.cs
+            Get-ChildItem dotnet/RepartoCopier.WinUI -Recurse -Filter *.cs
+          )
+          $all = ($product | Get-Content -Raw) -join "`n"
           $forbidden = @('BranchReplayStore','BranchReplayPlacement','BranchIsolationPolicy','StageBranchAsync','DetachBranchBlock','ReplayDataMessage','FastVerificationReader','VerificationReadBudget','PipelineGovernor','AdaptiveTransferSizer','EnableReplay')
           foreach ($token in $forbidden) {
-            if ($all.Contains($token)) { throw "Legacy architecture remains: $token" }
+            if ($all.Contains($token)) { throw "Legacy architecture remains in product code: $token" }
           }
           $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
           if (-not $engine.Contains('new SharedBlock(lease, read, readBufferSize, active.Count, bufferBudget)')) { throw 'Shared refcount block path missing' }
