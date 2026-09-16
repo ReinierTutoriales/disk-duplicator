@@ -12,6 +12,7 @@
 - El tamaño global de transferencia deja de reducirse por el QD máximo de una sola rama y deja de promediar una rama lenta con las rápidas para decidir bytes por operación.
 - `CopyJob.DiagnosticsSnapshot()` expone `BranchFlows` con cola de entrada, payload pendiente, pico de payload, backlog físico, I/O outstanding, QD actual y disponibilidad de replay.
 - Contratos de arquitectura actualizados para impedir la reaparición de replay inline, del gate temporal retirado y de pending writes sin ventana de admisión.
+- El corte se valida en el workflow permanente de Windows con suite Core Release, build WinUI x64 y publish self-contained antes de pasar a pruebas físicas.
 
 ## v2.1.0 — 2026-09-15
 
