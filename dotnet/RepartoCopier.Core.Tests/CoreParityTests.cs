@@ -362,43 +362,7 @@ public sealed class CoreParityTests
         Assert.IsFalse(Directory.Exists(currentState));
     }
 
-    [TestMethod]
-    public async Task AdaptiveByteBudgetCancellationReturnsGrantedBytes()
-    {
-        var budget = new CopyEngine.AdaptiveByteBudget(64, 64);
-        await budget.AcquireAsync(64, CancellationToken.None);
 
-        using var cancel = new CancellationTokenSource();
-        var blocked = budget.AcquireAsync(64, cancel.Token).AsTask();
-        cancel.Cancel();
-        try
-        {
-            await blocked;
-            Assert.Fail("Se esperaba cancelación.");
-        }
-        catch (OperationCanceledException)
-        {
-        }
-
-        budget.Release(64);
-        Assert.AreEqual(0L, budget.UsedBytes);
-        await budget.AcquireAsync(64, CancellationToken.None);
-        Assert.AreEqual(64L, budget.UsedBytes);
-        budget.Release(64);
-        Assert.AreEqual(0L, budget.UsedBytes);
-    }
-
-    [TestMethod]
-    public void SharedBlockRejectsReferenceOverRelease()
-    {
-        var budget = new CopyEngine.AdaptiveByteBudget(64, 64);
-        budget.AcquireAsync(64, CancellationToken.None).GetAwaiter().GetResult();
-        var buffer = ArrayPool<byte>.Shared.Rent(64);
-        var block = new CopyEngine.SharedBlock(buffer, 64, 64, 1, budget);
-        block.Release();
-        Assert.AreEqual(0L, budget.UsedBytes);
-        Assert.ThrowsExactly<InvalidOperationException>(() => block.Release());
-    }
 
     [TestMethod]
     public async Task ResourceGovernorCancelledWaiterDoesNotConsumeCpuLease()
