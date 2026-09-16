@@ -68,16 +68,15 @@ public sealed class SharedFanoutArchitectureTests
     }
 
     [TestMethod]
-    public void VerificationUsesCoordinatedDestinationReadsAgainstCopyTimeCrc()
+    public void VerificationUsesStreamingSourceAndDestinationCrcComparison()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("Task.WhenAll(reads)", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("FastCrc32C.Compute(target.Buffer!.Memory.Span[..block.Length])", StringComparison.Ordinal));
-        var start = engine.IndexOf("private static async Task VerifyDestinationsAsync", StringComparison.Ordinal);
-        var end = engine.IndexOf("private static async Task<bool[][]> BuildVerifiedSkipMasksAsync", start, StringComparison.Ordinal);
-        Assert.IsTrue(start >= 0 && end > start);
-        var verify = engine[start..end];
-        Assert.IsFalse(verify.Contains("entry.SourcePath", StringComparison.Ordinal), "Verify no debe releer el origen.");
+        Assert.IsTrue(engine.Contains("var sourceCrc = FastCrc32C.Compute", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("var destinationCrc = FastCrc32C.Compute", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("destinationCrc != sourceCrc", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("VerificationPlan", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("VerificationBlock", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
