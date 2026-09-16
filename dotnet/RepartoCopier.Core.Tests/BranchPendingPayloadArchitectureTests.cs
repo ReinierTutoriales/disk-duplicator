@@ -49,6 +49,25 @@ public sealed class BranchPendingPayloadArchitectureTests
         Assert.IsTrue(engine.Contains("DeviceScheduler.ExplorationQueueDepth", StringComparison.Ordinal));
     }
 
+    [TestMethod]
+    public void SupersededTimedReplayGateCannotReturn()
+    {
+        var root = FindRepositoryRoot();
+        Assert.IsFalse(File.Exists(Path.Combine(root, "dotnet", "RepartoCopier.Core", "BranchReplayGate.cs")));
+
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsFalse(engine.Contains("ReplayGate", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void OneDestinationQueueDepthCannotShrinkGlobalSourceBlockSize()
+    {
+        var root = FindRepositoryRoot();
+        var sizer = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "AdaptiveTransferSizer.cs"));
+        Assert.IsFalse(sizer.Contains("devices.Max", StringComparison.Ordinal));
+        Assert.IsTrue(sizer.Contains("largestMeasuredBytesPerOperation", StringComparison.Ordinal));
+    }
+
     private static string FindRepositoryRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
