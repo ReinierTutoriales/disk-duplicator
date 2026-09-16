@@ -1,7 +1,19 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
 
 namespace RepartoCopier.Core;
+
+public sealed record IoRecoveryEvent(
+    DateTimeOffset Timestamp,
+    string Phase,
+    string Path,
+    string Mode,
+    int NativeErrorCode,
+    int QueueDepth,
+    int RetryCount,
+    long Offset,
+    bool Recovered);
 
 public enum VerificationBottleneckKind
 {
@@ -84,6 +96,7 @@ public sealed record CopyDiagnosticsSnapshot(
     public int CurrentTransferBytes { get; init; }
     public int MinimumTransferBytes { get; init; }
     public int MaximumTransferBytes { get; init; }
+    public IReadOnlyList<IoRecoveryEvent> RecentIoRecoveryEvents { get; init; } = [];
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -110,6 +123,7 @@ internal sealed class CopyTelemetry
 {
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly SlidingByteRateWindow _writeRate = new();
+    private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
     private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
@@ -150,6 +164,28 @@ internal sealed class CopyTelemetry
         if (operations > 0) Interlocked.Add(ref _directDestinationWriteOperations, operations);
     }
     internal void RecordDirectDestinationFallback() => Interlocked.Increment(ref _directDestinationFallbacks);
+    internal void RecordIoRecovery(
+        string phase,
+        string path,
+        string mode,
+        int nativeErrorCode,
+        int queueDepth,
+        int retryCount,
+        long offset,
+        bool recovered)
+    {
+        _ioRecoveryEvents.Enqueue(new IoRecoveryEvent(
+            DateTimeOffset.UtcNow,
+            phase,
+            path,
+            mode,
+            nativeErrorCode,
+            Math.Max(1, queueDepth),
+            Math.Max(0, retryCount),
+            offset,
+            recovered));
+        while (_ioRecoveryEvents.Count > 128 && _ioRecoveryEvents.TryDequeue(out _)) { }
+    }
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
     internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
@@ -249,6 +285,7 @@ internal sealed class CopyTelemetry
             CurrentTransferBytes = Volatile.Read(ref _currentTransferBytes),
             MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
             MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
+            RecentIoRecoveryEvents = _ioRecoveryEvents.ToArray(),
         };
     }
 
