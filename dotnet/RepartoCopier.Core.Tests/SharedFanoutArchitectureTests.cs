@@ -9,7 +9,7 @@ public sealed class SharedFanoutArchitectureTests
     public void FanoutUsesOneSharedBlockAndOneQueuePerDestination()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
-        Assert.IsTrue(engine.Contains("new SharedBlock(lease, read, readBufferSize, active.Count, bufferBudget)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("new SharedBlock(lease, read)", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("worker.Channel.Writer.TryWrite(message)", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("Ingress", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("StageBranchAsync", StringComparison.Ordinal));
@@ -26,7 +26,7 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsFalse(File.Exists(Path.Combine(core, "BranchIsolationPolicy.cs")));
         var engine = File.ReadAllText(Path.Combine(core, "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("SharedFanoutPoolBytes", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("bufferBudget.AcquireAsync", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("bufferPool.RentAsync", StringComparison.Ordinal));
     }
 
     [TestMethod]

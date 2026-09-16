@@ -93,7 +93,7 @@ public static class CopyEngine
 {
 
     private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
-    private const long SharedFanoutPoolBytes = 64L * 1024 * 1024;
+    private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -278,7 +278,7 @@ public static class CopyEngine
         var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
-        var bufferBudget = new AdaptiveByteBudget(SharedFanoutPoolBytes, SharedFanoutPoolBytes);
+        using var bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -318,7 +318,7 @@ public static class CopyEngine
                     skipMasks,
                     expectedHashes,
                     job,
-                    bufferBudget,
+                    bufferPool,
                     deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -398,7 +398,7 @@ public static class CopyEngine
         bool[][] skipMasks,
         Dictionary<string, byte[]> expectedHashes,
         CopyJob job,
-        AdaptiveByteBudget bufferBudget,
+        SharedFanoutBufferPool bufferPool,
         DeviceScheduler? sharedSourceScheduler)
     {
         var token = job.Token;
@@ -435,7 +435,7 @@ public static class CopyEngine
                     active,
                     readBufferSize,
                     transferAlignment,
-                    bufferBudget,
+                    bufferPool,
                     job,
                     sharedSourceScheduler).ConfigureAwait(false);
                 if (sourceResult is null)
@@ -469,7 +469,7 @@ public static class CopyEngine
         List<DestinationWorker> active,
         int readBufferSize,
         int transferAlignment,
-        AdaptiveByteBudget bufferBudget,
+        SharedFanoutBufferPool bufferPool,
         CopyJob job,
         DeviceScheduler? sharedSourceScheduler)
     {
@@ -486,16 +486,20 @@ public static class CopyEngine
             {
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
-                var budgetStarted = Stopwatch.GetTimestamp();
-                await bufferBudget.AcquireAsync(readBufferSize, job.Token).ConfigureAwait(false);
-                var budgetElapsed = Stopwatch.GetElapsedTime(budgetStarted);
-                job.Telemetry.RecordBufferWait(budgetElapsed);
-                job.Telemetry.ObserveBuffer(bufferBudget.UsedBytes, bufferBudget.TargetBytes);
+                active.RemoveAll(worker => !worker.IsActive);
+                if (active.Count == 0)
+                    return null;
 
-                SourceBufferLease? lease = SourceBufferLease.RentAligned(
+                var reservedReferences = active.Count;
+                var poolStarted = Stopwatch.GetTimestamp();
+                SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
                     readBufferSize,
-                    transferAlignment);
-                var budgetOwned = true;
+                    transferAlignment,
+                    reservedReferences,
+                    job.Token).ConfigureAwait(false);
+                job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
+                job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+
                 int read;
                 try
                 {
@@ -511,7 +515,7 @@ public static class CopyEngine
                         {
                             try
                             {
-                                read = await direct.ReadAsync(lease, readBufferSize, totalRead, job.Token).ConfigureAwait(false);
+                                read = await direct.ReadAsync(lease.Buffer, readBufferSize, totalRead, job.Token).ConfigureAwait(false);
                                 job.Telemetry.RecordDirectSourceRead(read);
                             }
                             catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
@@ -544,12 +548,17 @@ public static class CopyEngine
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
                     job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
                     active.RemoveAll(worker => !worker.IsActive);
+                    var releasedBeforeDelivery = reservedReferences - active.Count;
+                    for (var released = 0; released < releasedBeforeDelivery; released++)
+                        lease.ReleaseReference();
                     if (active.Count == 0)
+                    {
+                        lease = null;
                         return null;
+                    }
 
-                    var block = new SharedBlock(lease, read, readBufferSize, active.Count, bufferBudget);
+                    var block = new SharedBlock(lease, read);
                     lease = null;
-                    budgetOwned = false;
                     var deliveryStarted = Stopwatch.GetTimestamp();
                     await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
                     var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
@@ -561,8 +570,6 @@ public static class CopyEngine
                 finally
                 {
                     lease?.Dispose();
-                    if (budgetOwned)
-                        bufferBudget.Release(readBufferSize);
                 }
             }
 
@@ -1780,43 +1787,30 @@ public static class CopyEngine
 
     internal sealed class SharedBlock
     {
-        private SourceBufferLease? _buffer;
-        private int _references;
-        private readonly int _reservedBytes;
-        private readonly AdaptiveByteBudget? _budget;
+        private SharedFanoutBufferPool.Lease? _lease;
 
-        public SharedBlock(byte[] buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
-            : this(SourceBufferLease.OwnPooled(buffer, reservedBytes), length, reservedBytes, references, budget)
+        internal SharedBlock(SharedFanoutBufferPool.Lease lease, int length)
         {
-        }
-
-        internal SharedBlock(SourceBufferLease buffer, int length, int reservedBytes, int references, AdaptiveByteBudget budget)
-        {
-            _buffer = buffer;
+            ArgumentNullException.ThrowIfNull(lease);
+            if (length <= 0 || length > lease.Memory.Length)
+                throw new ArgumentOutOfRangeException(nameof(length));
+            _lease = lease;
             Length = length;
-            _reservedBytes = reservedBytes;
-            _references = references;
-            _budget = budget;
         }
-
 
         public int Length { get; }
-        public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
+        public ReadOnlyMemory<byte> Memory =>
+            (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
+
         internal bool IsAlignedFor(int alignment) =>
-            (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
+            (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
 
         public void Release()
         {
-            var remaining = Interlocked.Decrement(ref _references);
-            if (remaining > 0)
-                return;
-            if (remaining < 0)
-                throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
-            var buffer = Interlocked.Exchange(ref _buffer, null)
-                ?? throw new InvalidOperationException("SharedBlock perdió su buffer antes de la última liberación.");
-            buffer.Dispose();
-            if (_budget is not null && _reservedBytes > 0)
-                _budget.Release(_reservedBytes);
+            var lease = Volatile.Read(ref _lease)
+                ?? throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
+            if (lease.ReleaseReference())
+                Interlocked.CompareExchange(ref _lease, null, lease);
         }
     }
 
@@ -1985,198 +1979,6 @@ public static class CopyEngine
                 var owner = Interlocked.Exchange(ref _owner, null);
                 owner?.ReleaseCpuWork();
             }
-        }
-    }
-
-    internal sealed class AdaptiveByteBudget
-    {
-        private readonly object _gate = new();
-        private readonly Queue<Waiter> _waiters = new();
-        private readonly Func<long, long> _capacityProvider;
-        private readonly bool _usesSystemCapacity;
-        private long _targetBytes;
-        private long _usedBytes;
-
-        internal long UsedBytes
-        {
-            get { lock (_gate) return _usedBytes; }
-        }
-
-        internal long TargetBytes
-        {
-            get { lock (_gate) return _targetBytes; }
-        }
-
-        internal AdaptiveByteBudget(long initialBytes, long maximumBytes)
-            : this(initialBytes, _ => maximumBytes, usesSystemCapacity: false)
-        {
-            if (maximumBytes <= 0 || initialBytes <= 0 || initialBytes > maximumBytes)
-                throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-        }
-
-        private AdaptiveByteBudget(
-            long initialBytes,
-            Func<long, long> capacityProvider,
-            bool usesSystemCapacity)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialBytes);
-            _capacityProvider = capacityProvider ?? throw new ArgumentNullException(nameof(capacityProvider));
-            _usesSystemCapacity = usesSystemCapacity;
-            _targetBytes = initialBytes;
-        }
-
-        public static AdaptiveByteBudget CreateForSystem()
-        {
-            var progressQuantum = Math.Max(1, Environment.SystemPageSize);
-            var safeNow = MemoryPressureCapacity.GetSafeTotalBytes(0, progressQuantum);
-            var initial = Math.Max((long)progressQuantum, Math.Min(SharedFanoutPoolBytes, safeNow));
-            return new AdaptiveByteBudget(initial, _ => 0, usesSystemCapacity: true);
-        }
-
-        internal int GetAdmissibleConcurrency(int bytesPerBlock)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerBlock);
-            lock (_gate)
-            {
-                var capacity = CurrentSafeCapacityLocked(bytesPerBlock);
-                var blocks = Math.Max(1L, capacity / bytesPerBlock);
-                return (int)Math.Min(int.MaxValue, blocks);
-            }
-        }
-
-        public ValueTask AcquireAsync(int bytes, CancellationToken token)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-            lock (_gate)
-            {
-                if (_waiters.Count == 0 && TryAcquireLocked(bytes))
-                    return ValueTask.CompletedTask;
-
-                var waiter = new Waiter(bytes);
-                _waiters.Enqueue(waiter);
-                return new ValueTask(WaitAsync(waiter, token));
-            }
-        }
-
-        public void Release(int bytes)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
-            List<Waiter>? ready = null;
-            lock (_gate)
-            {
-                if (_usedBytes < bytes)
-                    throw new InvalidOperationException("Se intentó liberar más memoria FAN-OUT de la reservada.");
-                _usedBytes -= bytes;
-                ready = PumpWaitersLocked();
-            }
-            Complete(ready);
-        }
-
-        private async Task WaitAsync(Waiter waiter, CancellationToken token)
-        {
-            try
-            {
-                await waiter.Completion.Task.WaitAsync(token).ConfigureAwait(false);
-            }
-            catch
-            {
-                List<Waiter>? ready = null;
-                lock (_gate)
-                {
-                    if (waiter.Granted)
-                    {
-                        waiter.Granted = false;
-                        if (_usedBytes < waiter.Bytes)
-                            throw new InvalidOperationException("Contabilidad de memoria inválida durante cancelación.");
-                        _usedBytes -= waiter.Bytes;
-                    }
-                    else
-                    {
-                        waiter.Cancelled = true;
-                    }
-                    ready = PumpWaitersLocked();
-                }
-                Complete(ready);
-                throw;
-            }
-        }
-
-        private bool TryAcquireLocked(int bytes)
-        {
-            var safeCapacity = CurrentSafeCapacityLocked(bytes);
-            var effectiveTarget = Math.Min(_targetBytes, safeCapacity);
-            if (_usedBytes + bytes <= effectiveTarget)
-            {
-                _usedBytes += bytes;
-                return true;
-            }
-
-            if (TryGrowLocked(bytes, safeCapacity) && _usedBytes + bytes <= _targetBytes)
-            {
-                _usedBytes += bytes;
-                return true;
-            }
-            return false;
-        }
-
-        private bool TryGrowLocked(int bytes, long safeCapacity)
-        {
-            if (_usedBytes + bytes > safeCapacity || _targetBytes >= safeCapacity)
-                return false;
-
-            var doubled = _targetBytes >= long.MaxValue / 2
-                ? long.MaxValue
-                : _targetBytes * 2;
-            var requestedTarget = Math.Max(doubled, _usedBytes + bytes);
-            var next = Math.Min(requestedTarget, safeCapacity);
-            if (next <= _targetBytes)
-                return false;
-            _targetBytes = next;
-            return true;
-        }
-
-        private long CurrentSafeCapacityLocked(int minimumProgressBytes)
-        {
-            var capacity = _usesSystemCapacity
-                ? MemoryPressureCapacity.GetSafeTotalBytes(_usedBytes, minimumProgressBytes)
-                : _capacityProvider(_usedBytes);
-            return Math.Max(_usedBytes, capacity);
-        }
-
-        private List<Waiter>? PumpWaitersLocked()
-        {
-            List<Waiter>? ready = null;
-            while (_waiters.Count > 0)
-            {
-                var waiter = _waiters.Peek();
-                if (waiter.Cancelled)
-                {
-                    _waiters.Dequeue();
-                    continue;
-                }
-                if (!TryAcquireLocked(waiter.Bytes))
-                    break;
-                _waiters.Dequeue();
-                waiter.Granted = true;
-                (ready ??= []).Add(waiter);
-            }
-            return ready;
-        }
-
-        private static void Complete(List<Waiter>? ready)
-        {
-            if (ready is null)
-                return;
-            foreach (var waiter in ready)
-                waiter.Completion.TrySetResult();
-        }
-
-        private sealed class Waiter(int bytes)
-        {
-            public int Bytes { get; } = bytes;
-            public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            public bool Cancelled { get; set; }
-            public bool Granted { get; set; }
         }
     }
 

@@ -178,14 +178,28 @@ internal sealed class SourceBufferLease : IDisposable
     private GCHandle _pin;
     private readonly int _offset;
     private readonly int _capacity;
+    private readonly bool _ownsArray;
+    private readonly bool _ownsPin;
+    private readonly IntPtr _externalPointer;
 
-    private SourceBufferLease(byte[] array, int offset, int capacity, GCHandle pin, bool pinned)
+    private SourceBufferLease(
+        byte[] array,
+        int offset,
+        int capacity,
+        GCHandle pin,
+        bool pinned,
+        bool ownsArray = true,
+        bool ownsPin = true,
+        IntPtr externalPointer = default)
     {
         _array = array;
         _offset = offset;
         _capacity = capacity;
         _pin = pin;
         IsPinned = pinned;
+        _ownsArray = ownsArray;
+        _ownsPin = ownsPin;
+        _externalPointer = externalPointer;
     }
 
     internal bool IsPinned { get; }
@@ -207,8 +221,12 @@ internal sealed class SourceBufferLease : IDisposable
     {
         get
         {
-            if (!IsPinned || !_pin.IsAllocated)
+            if (!IsPinned)
                 throw new InvalidOperationException("El buffer no está fijado; no existe un puntero estable para I/O directo.");
+            if (_externalPointer != IntPtr.Zero)
+                return _externalPointer;
+            if (!_pin.IsAllocated)
+                throw new InvalidOperationException("El buffer fijado perdió su handle de pin.");
             return IntPtr.Add(_pin.AddrOfPinnedObject(), _offset);
         }
     }
@@ -251,6 +269,24 @@ internal sealed class SourceBufferLease : IDisposable
         return new SourceBufferLease(array, offset, capacity, pin, pinned: true);
     }
 
+    internal static SourceBufferLease BorrowPinned(byte[] array, int offset, int capacity, IntPtr pointer)
+    {
+        ArgumentNullException.ThrowIfNull(array);
+        if (offset < 0 || capacity <= 0 || offset + capacity > array.Length)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        if (pointer == IntPtr.Zero)
+            throw new ArgumentOutOfRangeException(nameof(pointer));
+        return new SourceBufferLease(
+            array,
+            offset,
+            capacity,
+            default,
+            pinned: true,
+            ownsArray: false,
+            ownsPin: false,
+            externalPointer: pointer);
+    }
+
     internal static SourceBufferLease OwnPooled(byte[] array, int capacity)
     {
         ArgumentNullException.ThrowIfNull(array);
@@ -262,7 +298,7 @@ internal sealed class SourceBufferLease : IDisposable
     {
         var array = Interlocked.Exchange(ref _array, null);
         if (array is null) return;
-        if (_pin.IsAllocated) _pin.Free();
-        ArrayPool<byte>.Shared.Return(array);
+        if (_ownsPin && _pin.IsAllocated) _pin.Free();
+        if (_ownsArray) ArrayPool<byte>.Shared.Return(array);
     }
 }
