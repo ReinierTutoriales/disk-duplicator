@@ -26,14 +26,28 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(960, 620));
+        AppWindow.Resize(new SizeInt32(840, 520));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
+        ConfigureNativeWindowChrome();
 
         ApplySavedTheme();
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
         TryLoadLaunchSource();
+    }
+
+    private void ConfigureNativeWindowChrome()
+    {
+        try
+        {
+            var titleBar = AppWindow.TitleBar;
+            titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+            titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+            titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(24, 128, 128, 128);
+            titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 128, 128, 128);
+        }
+        catch { }
     }
 
     private void ApplySavedTheme()
@@ -270,8 +284,13 @@ public sealed partial class MainWindow : Window
         double percent;
         if (verifying)
         {
-            var verifyTotal = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifyBytesTotal));
-            var verified = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifiedBytes));
+            var verifyActive = snapshots
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .ToArray();
+            var verifyTotal = snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max();
+            var verified = verifyActive.Length == 0
+                ? snapshots.Select(item => item.VerifiedBytes).DefaultIfEmpty(0UL).Max()
+                : verifyActive.Min(item => item.VerifiedBytes);
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
             SpeedMetricText.Text = paused ? "0.0 B/s" : "—";
@@ -284,8 +303,13 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Total));
-            var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Written));
+            var active = snapshots
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .ToArray();
+            var total = snapshots.Select(item => item.Total).DefaultIfEmpty(0UL).Max();
+            var written = active.Length == 0
+                ? snapshots.Select(item => item.Written).DefaultIfEmpty(0UL).Max()
+                : active.Min(item => item.Written);
             var diagnostics = _job.DiagnosticsSnapshot();
             var speed = paused ? 0d : diagnostics.SourceRead5sBytesPerSecond;
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
