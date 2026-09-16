@@ -26,6 +26,14 @@ jobs:
       - name: Apply adaptive recovery cut
         run: python .github/scripts/io_recovery_migration.py
 
+      - name: Fix generated Windows path literal
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core.Tests/IoRecoveryArchitectureTests.cs'
+          $text = Get-Content $path -Raw
+          $text = $text.Replace('"D:\x.bin"', '@"D:\x.bin"')
+          Set-Content -Path $path -Value $text -Encoding utf8
+
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
 
