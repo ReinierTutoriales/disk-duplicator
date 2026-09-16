@@ -54,6 +54,15 @@ jobs:
         shell: pwsh
         run: python tools/apply_shared_fanout_pool.py
 
+      - name: Canonicalize productive pool parameter wiring
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core/CopyEngine.cs'
+          $engine = Get-Content $path -Raw
+          $engine = $engine.Replace('AdaptiveByteBudget bufferBudget', 'SharedFanoutBufferPool bufferPool')
+          $engine = $engine.Replace('bufferBudget', 'bufferPool')
+          Set-Content -Path $path -Value $engine -NoNewline
+
       - name: Architecture guards
         shell: pwsh
         run: |
