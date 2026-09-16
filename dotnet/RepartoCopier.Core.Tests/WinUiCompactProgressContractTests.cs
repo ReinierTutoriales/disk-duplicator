@@ -26,9 +26,9 @@ public sealed class WinUiCompactProgressContractTests
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
 
-        Assert.IsTrue(code.Contains("SizeInt32(960, 620)", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("MaxWidth=\"980\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("MaxHeight=\"132\"", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("SizeInt32(840, 520)", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("MaxWidth=\"820\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("MaxHeight=\"108\"", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
