@@ -92,8 +92,8 @@ public sealed class ProductionFastPathTests
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
-        Assert.AreEqual((long)payloadSize, metrics.VerifyReadBytes);
-        Assert.AreEqual((long)payloadSize, metrics.VerifyCrc32CBytes);
+        Assert.AreEqual((long)payloadSize * 2, metrics.VerifyReadBytes);
+        Assert.AreEqual((long)payloadSize * 2, metrics.VerifyCrc32CBytes);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
     }
 

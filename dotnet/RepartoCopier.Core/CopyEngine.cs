@@ -94,6 +94,7 @@ public static class CopyEngine
 
     private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
     private const long SharedFanoutPoolBytes = 64L * 1024 * 1024;
+    private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
     public static CopyJob Start(CopyPlan plan, CopyOptions? options = null)
@@ -352,7 +353,8 @@ public static class CopyEngine
                 var verifyPhaseStarted = Stopwatch.GetTimestamp();
                 try
                 {
-                    await VerifyDestinationsAsync(copy, workers, progress, job).ConfigureAwait(false);
+                    await VerifyDestinationsAsync(
+                        copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -781,8 +783,6 @@ public static class CopyEngine
                             }
 
                             var offset = current.ReserveWriteOffset(chunkData.Block.Length);
-                            current.VerificationBlocks.Add(
-                                new VerificationBlock(chunkData.Block.Length, chunkData.Block.VerificationCrc32C));
                             current.PendingWrites.Add(
                                 WriteBlockAtOffsetAsync(worker, current, chunkData.Block, offset, job));
                             dataOwnedByWriter = false;
@@ -1216,8 +1216,7 @@ public static class CopyEngine
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
         job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
-        worker.VerificationPlans[PathKey(current.Entry.RelativePath)] =
-            new VerificationPlan(current.Entry.Size, current.VerificationBlocks.ToArray());
+        worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
         worker.Progress.MarkDone();
     }
 
@@ -1225,14 +1224,15 @@ public static class CopyEngine
         PreparedCopy copy,
         DestinationWorker[] workers,
         DestinationProgress[] progress,
-        CopyJob job)
+        CopyJob job,
+        DeviceScheduler? sharedSourceScheduler)
     {
         for (var slot = 0; slot < workers.Length; slot++)
         {
             if (!workers[slot].IsActive)
                 continue;
             var entries = copy.Files
-                .Where(entry => workers[slot].VerificationPlans.ContainsKey(PathKey(entry.RelativePath)))
+                .Where(entry => workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             var bytes = entries.Aggregate<FileEntry, ulong>(0, (sum, entry) => checked(sum + (ulong)entry.Size));
             progress[slot].SetVerifyWork(bytes, (ulong)entries.Length);
@@ -1246,15 +1246,22 @@ public static class CopyEngine
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
             var slots = Enumerable.Range(0, workers.Length)
-                .Where(slot => workers[slot].IsActive && workers[slot].VerificationPlans.ContainsKey(PathKey(entry.RelativePath)))
+                .Where(slot => workers[slot].IsActive && workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             if (slots.Length == 0)
                 continue;
 
-            var plan = workers[slots[0]].VerificationPlans[PathKey(entry.RelativePath)];
-            var targets = new List<CoordinatedVerifyTarget>(slots.Length);
+            ValidateSourceSnapshot(entry);
+            var targets = new List<CoordinatedVerifyTarget>(slots.Length + 1);
             try
             {
+                targets.Add(new CoordinatedVerifyTarget(
+                    slot: -1,
+                    path: entry.SourcePath,
+                    device: copy.SourceDevice,
+                    scheduler: sharedSourceScheduler,
+                    progress: null));
+
                 foreach (var slot in slots)
                 {
                     progress[slot].SetLastFile(entry.RelativePath);
@@ -1272,61 +1279,81 @@ public static class CopyEngine
                         continue;
                     }
                     targets.Add(new CoordinatedVerifyTarget(
-                        slot, destination, copy.DestinationDevices[slot], workers[slot].DeviceScheduler, progress[slot]));
+                        slot,
+                        destination,
+                        copy.DestinationDevices[slot],
+                        workers[slot].DeviceScheduler,
+                        progress[slot]));
                 }
 
-                if (targets.Count == 0)
+                if (targets.Count <= 1)
                     continue;
 
+                var perStreamBytes = SelectVerificationChunkBytes(targets);
                 foreach (var target in targets)
-                    target.Open(plan.Blocks.Count == 0 ? 4096 : plan.Blocks.Max(block => block.Length));
+                    target.Open(perStreamBytes);
 
                 long offset = 0;
-                foreach (var block in plan.Blocks)
+                while (offset < entry.Size)
                 {
                     job.Token.ThrowIfCancellationRequested();
                     await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
-                    var activeTargets = targets.Where(target => workers[target.Slot].IsActive).ToArray();
-                    if (activeTargets.Length == 0)
+                    var activeTargets = targets
+                        .Where(target => target.IsSource || workers[target.Slot].IsActive)
+                        .ToArray();
+                    if (activeTargets.Length <= 1)
                         break;
 
+                    var expectedBytes = (int)Math.Min(perStreamBytes, entry.Size - offset);
                     var reads = activeTargets
-                        .Select(target => ReadVerifyTargetAsync(target, block.Length, offset, job))
+                        .Select(target => ReadVerifyTargetAsync(target, expectedBytes, offset, job))
                         .ToArray();
                     var results = await Task.WhenAll(reads).ConfigureAwait(false);
+
+                    var sourceIndex = Array.FindIndex(activeTargets, target => target.IsSource);
+                    if (sourceIndex < 0 || results[sourceIndex] < expectedBytes)
+                        throw new IOException($"Lectura incompleta del origen durante verificación: {entry.SourcePath}");
+
+                    var crcStarted = Stopwatch.GetTimestamp();
+                    var sourceCrc = FastCrc32C.Compute(activeTargets[sourceIndex].Buffer!.Memory.Span[..expectedBytes]);
+                    job.Telemetry.RecordVerifyCrc32C(expectedBytes, Stopwatch.GetElapsedTime(crcStarted));
+
                     for (var index = 0; index < activeTargets.Length; index++)
                     {
                         var target = activeTargets[index];
-                        var read = results[index];
-                        if (read < block.Length)
+                        if (target.IsSource)
+                            continue;
+                        if (results[index] < expectedBytes)
                         {
                             workers[target.Slot].Fail($"Lectura incompleta durante verificación: {target.Path}");
                             continue;
                         }
 
-                        var crcStarted = Stopwatch.GetTimestamp();
-                        var actual = FastCrc32C.Compute(target.Buffer!.Memory.Span[..block.Length]);
-                        job.Telemetry.RecordVerifyCrc32C(block.Length, Stopwatch.GetElapsedTime(crcStarted));
-                        if (actual != block.Crc32C)
+                        crcStarted = Stopwatch.GetTimestamp();
+                        var destinationCrc = FastCrc32C.Compute(target.Buffer!.Memory.Span[..expectedBytes]);
+                        job.Telemetry.RecordVerifyCrc32C(expectedBytes, Stopwatch.GetElapsedTime(crcStarted));
+                        if (destinationCrc != sourceCrc)
                         {
                             workers[target.Slot].Fail($"CRC32C no coincide durante verificación: {target.Path}");
                             continue;
                         }
-                        target.Progress.AddVerified(block.Length);
+                        target.Progress!.AddVerified(expectedBytes);
                     }
-                    offset = checked(offset + block.Length);
+
+                    offset = checked(offset + expectedBytes);
                 }
 
-                if (offset != plan.Length)
+                ValidateSourceSnapshot(entry);
+                if (offset != entry.Size)
                 {
-                    foreach (var target in targets.Where(target => workers[target.Slot].IsActive))
+                    foreach (var target in targets.Where(target => !target.IsSource && workers[target.Slot].IsActive))
                         workers[target.Slot].Fail($"Verificación incompleta: {target.Path}");
                 }
                 else
                 {
-                    foreach (var target in targets.Where(target => workers[target.Slot].IsActive))
-                        target.Progress.MarkVerifyFileDone();
+                    foreach (var target in targets.Where(target => !target.IsSource && workers[target.Slot].IsActive))
+                        target.Progress!.MarkVerifyFileDone();
                 }
             }
             finally
@@ -1337,20 +1364,35 @@ public static class CopyEngine
         }
     }
 
+    private static int SelectVerificationChunkBytes(IReadOnlyList<CoordinatedVerifyTarget> targets)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        if (targets.Count == 0)
+            throw new ArgumentOutOfRangeException(nameof(targets));
+
+        var alignment = targets
+            .Select(target => Math.Max(1, DirectIoSourceReader.RequiredAlignment(target.Device)))
+            .Max();
+        var raw = Math.Max(alignment, VerificationWorkspaceBytes / targets.Count);
+        var aligned = raw - (raw % alignment);
+        return Math.Max(alignment, aligned);
+    }
+
     private static async Task<int> ReadVerifyTargetAsync(
         CoordinatedVerifyTarget target,
         int expectedBytes,
         long offset,
         CopyJob job)
     {
-        var retries = 0;
-        var lastCode = 0;
-        while (true)
+        var requestBytes = target.Direct is null
+            ? expectedBytes
+            : AlignUp(expectedBytes, target.Direct.Alignment);
+
+        IDisposable? io = null;
+        if (target.Scheduler is not null)
+            io = await target.Scheduler.AcquireIoAsync(requestBytes, job.Token).ConfigureAwait(false);
+        using (io)
         {
-            var requestBytes = target.Direct is null
-                ? expectedBytes
-                : AlignUp(expectedBytes, target.Direct.Alignment);
-            using var io = await target.Scheduler.AcquireIoAsync(requestBytes, job.Token).ConfigureAwait(false);
             var started = Stopwatch.GetTimestamp();
             try
             {
@@ -1359,37 +1401,42 @@ public static class CopyEngine
                 {
                     try
                     {
-                        read = await target.Direct.ReadAsync(target.Buffer!, requestBytes, offset, job.Token).ConfigureAwait(false);
+                        read = await target.Direct.ReadAsync(
+                            target.Buffer!, requestBytes, offset, job.Token).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
                     {
                         target.SwitchToBuffered();
-                        continue;
+                        return await ReadVerifyTargetAsync(target, expectedBytes, offset, job).ConfigureAwait(false);
                     }
                 }
                 else
                 {
                     read = await RandomAccess.ReadAsync(
-                        target.BufferedHandle!, target.Buffer!.Memory[..expectedBytes], offset, job.Token).ConfigureAwait(false);
+                        target.BufferedHandle!,
+                        target.Buffer!.Memory[..expectedBytes],
+                        offset,
+                        job.Token).ConfigureAwait(false);
                 }
-
                 job.Telemetry.RecordVerifyRead(expectedBytes, Stopwatch.GetElapsedTime(started));
-                if (retries > 0)
-                    job.Telemetry.RecordIoRecovery("verify-read", target.Path,
-                        target.Direct is null ? "buffered" : "direct", lastCode,
-                        target.Scheduler.CurrentQueueDepth, retries, offset, recovered: true);
                 return read;
             }
-            catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+            catch (Exception ex) when (
+                target.Scheduler is not null &&
+                TransientIoErrorClassifier.IsTransient(ex) &&
+                target.Scheduler.RecordTransientFailure())
             {
-                lastCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
-                retries++;
-                target.Progress.AddRetry();
-                job.Telemetry.RecordIoRecovery("verify-read", target.Path,
-                    target.Direct is null ? "buffered" : "direct", lastCode,
-                    target.Scheduler.CurrentQueueDepth, retries, offset, recovered: false);
-                if (!target.Scheduler.RecordTransientFailure())
-                    throw;
+                target.Progress?.AddRetry();
+                job.Telemetry.RecordIoRecovery(
+                    "verify-read",
+                    target.Path,
+                    target.Direct is null ? "buffered" : "direct",
+                    TransientIoErrorClassifier.GetNativeCodeOrZero(ex),
+                    target.Scheduler.CurrentQueueDepth,
+                    retryCount: 1,
+                    offset,
+                    recovered: false);
+                return await ReadVerifyTargetAsync(target, expectedBytes, offset, job).ConfigureAwait(false);
             }
         }
     }
@@ -1406,8 +1453,8 @@ public static class CopyEngine
             int slot,
             string path,
             StorageDeviceInfo device,
-            DeviceScheduler scheduler,
-            DestinationProgress progress)
+            DeviceScheduler? scheduler,
+            DestinationProgress? progress)
         {
             Slot = slot;
             Path = path;
@@ -1416,11 +1463,12 @@ public static class CopyEngine
             Progress = progress;
         }
 
+        internal bool IsSource => Slot < 0;
         internal int Slot { get; }
         internal string Path { get; }
         internal StorageDeviceInfo Device { get; }
-        internal DeviceScheduler Scheduler { get; }
-        internal DestinationProgress Progress { get; }
+        internal DeviceScheduler? Scheduler { get; }
+        internal DestinationProgress? Progress { get; }
         internal DirectIoSourceReader.OverlappedSession? Direct { get; private set; }
         internal Microsoft.Win32.SafeHandles.SafeFileHandle? BufferedHandle { get; private set; }
         internal SourceBufferLease? Buffer { get; private set; }
@@ -1432,10 +1480,16 @@ public static class CopyEngine
             if (DirectIoSourceReader.TryOpenOverlappedForVerification(Path, Device, directCapacity, out var direct))
             {
                 Direct = direct;
-                Buffer = SourceBufferLease.RentAligned(directCapacity, Math.Max(Environment.SystemPageSize, alignment));
+                Buffer = SourceBufferLease.RentAligned(
+                    directCapacity,
+                    Math.Max(Environment.SystemPageSize, alignment));
                 return;
             }
-            BufferedHandle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            BufferedHandle = File.OpenHandle(
+                Path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             Buffer = SourceBufferLease.RentBuffered(Math.Max(1, maximumBlockBytes));
         }
@@ -1444,7 +1498,11 @@ public static class CopyEngine
         {
             Direct?.Dispose();
             Direct = null;
-            BufferedHandle ??= File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            BufferedHandle ??= File.OpenHandle(
+                Path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
         }
 
@@ -1736,24 +1794,13 @@ public static class CopyEngine
         {
             _buffer = buffer;
             Length = length;
-            VerificationCrc32C = FastCrc32C.Compute(buffer.Memory.Span[..length]);
             _reservedBytes = reservedBytes;
             _references = references;
             _budget = budget;
         }
 
-        internal SharedBlock(SourceBufferLease buffer, int length, uint verificationCrc32)
-        {
-            _buffer = buffer;
-            Length = length;
-            VerificationCrc32C = verificationCrc32;
-            _reservedBytes = 0;
-            _references = 1;
-            _budget = null;
-        }
 
         public int Length { get; }
-        public uint VerificationCrc32C { get; }
         public ReadOnlyMemory<byte> Memory => (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
         internal bool IsAlignedFor(int alignment) =>
             (_buffer ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
@@ -2135,7 +2182,7 @@ public static class CopyEngine
 
     private sealed class DestinationWorker
     {
-        public Dictionary<string, VerificationPlan> VerificationPlans { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
         private long _pendingPayloadBytes;
@@ -2265,7 +2312,6 @@ public static class CopyEngine
         private long _copied;
         private int _directFallbackRequested;
 
-        public List<VerificationBlock> VerificationBlocks { get; } = [];
         public List<Task<PendingWriteResult>> PendingWrites { get; } = [];
         public FileEntry Entry { get; } = entry;
         public string DestinationPath { get; } = destinationPath;
