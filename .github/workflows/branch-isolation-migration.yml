@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/branch_isolation_migration.py'
+      - 'tools/branch_isolation_test_fix.py'
       - '.github/workflows/branch-isolation-migration.yml'
 
 permissions:
@@ -22,7 +23,9 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Apply branch isolation migration
         shell: pwsh
-        run: python tools/branch_isolation_migration.py
+        run: |
+          python tools/branch_isolation_migration.py
+          python tools/branch_isolation_test_fix.py
       - name: Assert superseded paths are gone
         shell: pwsh
         run: |
@@ -35,6 +38,8 @@ jobs:
           $deliver = $engine.Substring($deliverStart, $stageStart - $deliverStart)
           if ($deliver -match 'SpillAsync') { throw 'Replay I/O remains inline in producer delivery' }
           if ($engine -notmatch 'EnsureWriteWindowAsync') { throw 'Adaptive write admission missing' }
+          $tests = Get-ChildItem 'dotnet/RepartoCopier.Core.Tests' -Filter '*.cs' | Get-Content -Raw
+          if ($tests -match 'BranchReplayGate') { throw 'Retired BranchReplayGate test remains' }
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
       - name: Test core Release
@@ -48,7 +53,7 @@ jobs:
       - name: Remove migration infrastructure and commit green product
         shell: pwsh
         run: |
-          git rm tools/branch_isolation_migration.py .github/workflows/branch-isolation-migration.yml
+          git rm tools/branch_isolation_migration.py tools/branch_isolation_test_fix.py .github/workflows/branch-isolation-migration.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add dotnet/RepartoCopier.Core dotnet/RepartoCopier.Core.Tests
