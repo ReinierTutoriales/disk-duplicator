@@ -14,6 +14,7 @@ public sealed class VerificationStreamingArchitectureTests
         Assert.IsFalse(engine.Contains("VerificationBlock", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationPlans", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationCrc32C", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("FastCrc32C.Compute(buffer.Memory.Span[..length])", StringComparison.Ordinal));
     }
 
     [TestMethod]
