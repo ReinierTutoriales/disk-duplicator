@@ -66,6 +66,21 @@ jobs:
           $engine = $engine.Replace('bufferBudget', 'bufferPool')
           Set-Content -Path $path -Value $engine -NoNewline
 
+      - name: Align existing FAN-OUT architecture contracts
+        shell: pwsh
+        run: |
+          $path = 'dotnet/RepartoCopier.Core.Tests/SharedFanoutArchitectureTests.cs'
+          $tests = Get-Content $path -Raw
+          $oldBlock = 'new SharedBlock(lease, read, readBufferSize, active.Count, bufferBudget)'
+          $newBlock = 'new SharedBlock(lease, read)'
+          $oldBackpressure = 'bufferBudget.AcquireAsync'
+          $newBackpressure = 'bufferPool.RentAsync'
+          if (-not $tests.Contains($oldBlock)) { throw 'Old SharedBlock contract was not found.' }
+          if (-not $tests.Contains($oldBackpressure)) { throw 'Old budget backpressure contract was not found.' }
+          $tests = $tests.Replace($oldBlock, $newBlock)
+          $tests = $tests.Replace($oldBackpressure, $newBackpressure)
+          Set-Content -Path $path -Value $tests -NoNewline
+
       - name: Architecture guards
         shell: pwsh
         run: |
@@ -79,10 +94,7 @@ jobs:
           $copyHotPath = $engine.Substring($start, $end - $start)
           if (-not $copyHotPath.Contains('bufferPool.RentAsync')) { throw 'Productive source path is not renting from the shared page pool.' }
           foreach ($token in @('AdaptiveByteBudget','bufferBudget','SourceBufferLease.RentAligned')) {
-            if ($copyHotPath.Contains($token)) {
-              Write-Host "Residual productive-path token: $token"
-              throw "Retired productive-path token remains: $token"
-            }
+            if ($copyHotPath.Contains($token)) { throw "Retired productive-path token remains: $token" }
           }
           foreach ($token in @('GC.AllocateUninitializedArray<byte>','pinned: true','VirtualLock','_pageReferences','ReleaseReference')) {
             if (-not $pool.Contains($token)) { throw "Shared pool invariant missing: $token" }
@@ -110,6 +122,8 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm -f tools/apply_shared_fanout_pool.py tools/shared_fanout_pool_migration.py .github/workflows/shared-fanout-pool-migration.yml
+          git clean -fd artifact
           git add -A
+          git diff --cached --check
           git commit -m 'perf: adopt 256 MiB page-referenced FAN-OUT pool'
           git push origin HEAD:main
