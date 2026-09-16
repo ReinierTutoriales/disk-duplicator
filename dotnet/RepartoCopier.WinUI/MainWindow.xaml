@@ -32,12 +32,12 @@
         </Grid.Resources>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="78" />
+            <RowDefinition Height="60" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="42" />
+            <RowDefinition Height="34" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="30,0,156,0" Background="Transparent">
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="22,0,148,0" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
@@ -46,8 +46,8 @@
             </Grid.ColumnDefinitions>
 
             <Image x:Name="LogoImage"
-                   Width="48"
-                   Height="48"
+                   Width="36"
+                   Height="36"
                    Margin="3"
                    Source="ms-appx:///Assets/AppLogo.png"
                    Stretch="Uniform"
@@ -55,15 +55,15 @@
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center" />
 
-            <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center" Spacing="2">
-                <TextBlock Text="RepartoCopier" FontSize="21" FontWeight="SemiBold" />
-                <TextBlock Text="Copias rápidas y seguras" Opacity="0.66" FontSize="13" />
+            <StackPanel Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center" Spacing="2">
+                <TextBlock Text="RepartoCopier" FontSize="18" FontWeight="SemiBold" />
+                <TextBlock Text="Copia FAN-OUT para Windows" Opacity="0.62" FontSize="11" />
             </StackPanel>
 
             <Button x:Name="AppMenuButton"
                     Grid.Column="3"
-                    Width="48"
-                    Height="44"
+                    Width="40"
+                    Height="36"
                     Padding="0"
                     VerticalAlignment="Center"
                     HorizontalAlignment="Right"
@@ -100,7 +100,7 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="1" Margin="34,8,34,18" MaxWidth="1380" HorizontalAlignment="Stretch">
+        <Grid Grid.Row="1" Margin="22,6,22,12" MaxWidth="980" HorizontalAlignment="Stretch">
             <InfoBar x:Name="ErrorBar"
                      VerticalAlignment="Top"
                      Margin="0,0,0,10"
@@ -109,7 +109,7 @@
                      IsClosable="True"
                      Canvas.ZIndex="10" />
 
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="16" MaxWidth="900" HorizontalAlignment="Center">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="11" MaxWidth="800" HorizontalAlignment="Center">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -118,11 +118,11 @@
                 </Grid.RowDefinitions>
 
                 <StackPanel Spacing="4" Margin="0,0,0,2">
-                    <TextBlock Text="Nueva copia" FontSize="29" FontWeight="SemiBold" />
+                    <TextBlock Text="Nueva copia" FontSize="24" FontWeight="SemiBold" />
                     <TextBlock Text="Elige qué quieres copiar y dónde quieres guardarlo." Opacity="0.68" FontSize="14" />
                 </StackPanel>
 
-                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="18,16">
+                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="14,12">
                     <Grid RowSpacing="10">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -152,7 +152,7 @@
                     </Grid>
                 </Border>
 
-                <Border Grid.Row="2" Style="{StaticResource SurfaceCardStyle}" Padding="18,16">
+                <Border Grid.Row="2" Style="{StaticResource SurfaceCardStyle}" Padding="14,12">
                     <Grid RowSpacing="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -180,7 +180,7 @@
                             </StackPanel>
                         </Grid>
 
-                        <ListView x:Name="DestinationList" Grid.Row="1" SelectionMode="None" MaxHeight="204" Padding="0" IsTabStop="False">
+                        <ListView x:Name="DestinationList" Grid.Row="1" SelectionMode="None" MaxHeight="132" Padding="0" IsTabStop="False">
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -192,7 +192,7 @@
                             </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid MinHeight="42" Padding="10,3" ColumnSpacing="10">
+                                    <Grid MinHeight="36" Padding="9,2" ColumnSpacing="10">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
@@ -220,7 +220,7 @@
                         <CheckBox x:Name="SkipSameCheck" Content="Omitir archivos iguales" />
                         <CheckBox x:Name="KeepGoingCheck" Content="Continuar si un destino falla" />
                     </StackPanel>
-                    <Button x:Name="StartButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Height="44" MinWidth="152" CornerRadius="8" Click="Start_Click">
+                    <Button x:Name="StartButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}" Height="40" MinWidth="138" CornerRadius="8" Click="Start_Click">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon Glyph="&#xE768;" FontSize="14" />
                             <TextBlock Text="Iniciar copia" />
@@ -233,11 +233,10 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <Border Style="{StaticResource SurfaceCardStyle}" Padding="18,16">
+                <Border Style="{StaticResource SurfaceCardStyle}" Padding="14,12">
                     <Grid ColumnSpacing="18">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
@@ -245,13 +244,13 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
 
-                        <Border Width="64" Height="64" CornerRadius="12" Background="{ThemeResource ControlFillColorDefaultBrush}" VerticalAlignment="Center">
-                            <FontIcon x:Name="OperationIcon" Glyph="&#xE8A5;" FontSize="30" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        <Border Width="48" Height="48" CornerRadius="10" Background="{ThemeResource ControlFillColorDefaultBrush}" VerticalAlignment="Center">
+                            <FontIcon x:Name="OperationIcon" Glyph="&#xE8A5;" FontSize="23" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
 
-                        <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center" MinWidth="330">
+                        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center" MinWidth="250">
                             <TextBlock x:Name="OperationTitleText" Text="Copiando..." FontSize="14" Opacity="0.88" />
-                            <TextBlock x:Name="CurrentFileText" Text="Preparando..." FontSize="25" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                            <TextBlock x:Name="CurrentFileText" Text="Preparando..." FontSize="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxLines="1" />
                             <TextBlock x:Name="CurrentPathText" Opacity="0.62" FontSize="12" TextTrimming="CharacterEllipsis" MaxLines="1" />
                         </StackPanel>
 
@@ -280,7 +279,7 @@
                     </Grid>
                 </Border>
 
-                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="18,14">
+                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="14,10">
                     <Grid RowSpacing="7">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -296,68 +295,20 @@
                     </Grid>
                 </Border>
 
-                <Grid Grid.Row="2" RowSpacing="8">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
-                    <TextBlock x:Name="RunningDestinationTitle" Text="Destinos" FontSize="17" FontWeight="SemiBold" Margin="2,2,0,0" />
-                    <ListView x:Name="ProgressList" Grid.Row="1" SelectionMode="None" Padding="0" IsTabStop="False">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="Margin" Value="0,0,0,5" />
-                                <Setter Property="MinHeight" Value="58" />
-                                <Setter Property="CornerRadius" Value="9" />
-                            </Style>
-                        </ListView.ItemContainerStyle>
-                        <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <Border Padding="11,8" CornerRadius="9" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                                    <Grid ColumnSpacing="11">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="190" />
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="54" />
-                                            <ColumnDefinition Width="94" />
-                                            <ColumnDefinition Width="128" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <Border Width="38" Height="38" CornerRadius="8" Background="{ThemeResource ControlFillColorDefaultBrush}" VerticalAlignment="Center">
-                                            <FontIcon Glyph="&#xEDA2;" FontSize="15" Opacity="0.85" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                        </Border>
-                                        <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                                        <ProgressBar Grid.Column="2" Height="6" Minimum="0" Maximum="100" Value="{Binding Percent}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="3" Text="{Binding PercentText}" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                                        <TextBlock Grid.Column="4" Text="{Binding Speed}" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right" />
-                                        <StackPanel Grid.Column="5" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding StatusGlyph}" FontSize="11" Foreground="{Binding StatusBrush}" VerticalAlignment="Center" />
-                                            <TextBlock Text="{Binding PhaseText}" FontSize="12" VerticalAlignment="Center" />
-                                        </StackPanel>
-                                        <Button Grid.Column="6" Width="34" Height="34" Padding="0" CornerRadius="7" ToolTipService.ToolTip="Detalles" IsHitTestVisible="False"><FontIcon Glyph="&#xE712;" FontSize="16"/></Button>
-                                    </Grid>
-                                </Border>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
-                </Grid>
-
-                <Grid Grid.Row="3" Margin="2,2" ColumnSpacing="10">
+                <Grid Grid.Row="2" Margin="2,2" ColumnSpacing="10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="PauseButton" Height="40" MinWidth="145" IsEnabled="False" CornerRadius="7" Click="Pause_Click">
+                    <Button x:Name="PauseButton" Height="36" MinWidth="116" IsEnabled="False" CornerRadius="7" Click="Pause_Click">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon x:Name="PauseIcon" Glyph="&#xE769;" />
                             <TextBlock x:Name="PauseButtonText" Text="Pausar" />
                         </StackPanel>
                     </Button>
-                    <Button x:Name="CancelButton" Grid.Column="1" Height="40" MinWidth="145" IsEnabled="False" CornerRadius="7" Click="Cancel_Click">
+                    <Button x:Name="CancelButton" Grid.Column="1" Height="36" MinWidth="116" IsEnabled="False" CornerRadius="7" Click="Cancel_Click">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon Glyph="&#xE711;" />
                             <TextBlock Text="Cancelar" />
