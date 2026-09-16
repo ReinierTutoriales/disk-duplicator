@@ -30,6 +30,22 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Relax migration preflight so guards report exact residual
+        shell: pwsh
+        run: |
+          $path = 'tools/apply_shared_fanout_pool.py'
+          $text = Get-Content $path -Raw
+          $old = @'
+if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:
+    raise RuntimeError("obsolete byte-budget path remains")
+'@
+          $new = @'
+if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:
+    print("diagnostic: obsolete byte-budget token remains; architecture guard will identify it")
+'@
+          if (-not $text.Contains($old)) { throw 'Could not patch migration diagnostic guard.' }
+          Set-Content -Path $path -Value ($text.Replace($old, $new)) -NoNewline
+
       - name: Apply shared page pool migration
         shell: pwsh
         run: python tools/apply_shared_fanout_pool.py
@@ -42,7 +58,11 @@ jobs:
           if ($engine -notmatch 'SharedFanoutPoolBytes = 256L \* 1024 \* 1024') { throw '256 MiB pool is not wired into production.' }
           if ($engine -notmatch 'SharedFanoutBlockBytes = 8 \* 1024 \* 1024') { throw 'ExtremeCopy-like 8 MiB read granularity changed unexpectedly.' }
           foreach ($token in @('AdaptiveByteBudget','bufferBudget','SourceBufferLease.RentAligned')) {
-            if ($engine.Contains($token)) { throw "Retired productive-path token remains: $token" }
+            if ($engine.Contains($token)) {
+              Write-Host "Residual token: $token"
+              Select-String -Path dotnet/RepartoCopier.Core/CopyEngine.cs -Pattern $token -Context 3,3
+              throw "Retired productive-path token remains: $token"
+            }
           }
           foreach ($token in @('GC.AllocateUninitializedArray<byte>','VirtualLock','_pageReferences','ReleaseReference')) {
             if (-not $pool.Contains($token)) { throw "Shared pool invariant missing: $token" }
