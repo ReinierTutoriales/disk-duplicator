@@ -278,7 +278,7 @@ public static class CopyEngine
         var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         using var resources = new ResourceGovernor();
-        using var bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
+        SharedFanoutBufferPool? bufferPool = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -304,6 +304,7 @@ public static class CopyEngine
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
+            var activeBufferPool = bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job))
                 .ToArray();
@@ -318,7 +319,7 @@ public static class CopyEngine
                     skipMasks,
                     expectedHashes,
                     job,
-                    bufferPool,
+                    activeBufferPool,
                     deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
             }
             catch (Exception ex)
@@ -347,6 +348,11 @@ public static class CopyEngine
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
+
+            // COPY owns the large 256 MiB page pool. Verification deliberately does not.
+            // Once every writer drained, release that pinned/locked region before VERIFY.
+            activeBufferPool.Dispose();
+            bufferPool = null;
 
             if (options.Verify && !token.IsCancellationRequested)
             {
@@ -387,6 +393,7 @@ public static class CopyEngine
                 worker.Channel.Writer.TryComplete();
                 DrainAndRelease(worker.Channel.Reader, worker);
             }
+            bufferPool?.Dispose();
             copy.ReleaseStateLeases();
         }
     }
@@ -1296,9 +1303,10 @@ public static class CopyEngine
                 if (targets.Count <= 1)
                     continue;
 
-                var perStreamBytes = SelectVerificationChunkBytes(targets);
-                foreach (var target in targets)
-                    target.Open(perStreamBytes);
+                using var workspace = new VerificationWorkspace(targets);
+                var perStreamBytes = workspace.PerStreamBytes;
+                for (var index = 0; index < targets.Count; index++)
+                    targets[index].Open(workspace.RentSlice(index));
 
                 long offset = 0;
                 while (offset < entry.Size)
@@ -1348,6 +1356,8 @@ public static class CopyEngine
                         target.Progress!.AddVerified(expectedBytes);
                     }
 
+                    // Source-equivalent progress: one logical chunk, regardless of destination count.
+                    job.Telemetry.RecordVerifyLogicalBytes(expectedBytes);
                     offset = checked(offset + expectedBytes);
                 }
 
@@ -1369,20 +1379,6 @@ public static class CopyEngine
                     target.Dispose();
             }
         }
-    }
-
-    private static int SelectVerificationChunkBytes(IReadOnlyList<CoordinatedVerifyTarget> targets)
-    {
-        ArgumentNullException.ThrowIfNull(targets);
-        if (targets.Count == 0)
-            throw new ArgumentOutOfRangeException(nameof(targets));
-
-        var alignment = targets
-            .Select(target => Math.Max(1, DirectIoSourceReader.RequiredAlignment(target.Device)))
-            .Max();
-        var raw = Math.Max(alignment, VerificationWorkspaceBytes / targets.Count);
-        var aligned = raw - (raw % alignment);
-        return Math.Max(alignment, aligned);
     }
 
     private static async Task<int> ReadVerifyTargetAsync(
@@ -1454,6 +1450,50 @@ public static class CopyEngine
         return remainder == 0 ? value : checked(value + alignment - remainder);
     }
 
+    private sealed class VerificationWorkspace : IDisposable
+    {
+        private readonly byte[] _buffer;
+        private readonly int _baseOffset;
+        private readonly int _streamCount;
+        private int _disposed;
+
+        internal VerificationWorkspace(IReadOnlyList<CoordinatedVerifyTarget> targets)
+        {
+            ArgumentNullException.ThrowIfNull(targets);
+            if (targets.Count <= 1)
+                throw new ArgumentOutOfRangeException(nameof(targets));
+
+            var alignment = targets
+                .Select(target => Math.Max(Environment.SystemPageSize, DirectIoSourceReader.RequiredAlignment(target.Device)))
+                .Max();
+            var rawPerStream = VerificationWorkspaceBytes / targets.Count;
+            PerStreamBytes = rawPerStream - rawPerStream % alignment;
+            if (PerStreamBytes < alignment)
+                throw new IOException("Demasiados destinos para el workspace fijo de verificación.");
+
+            _streamCount = targets.Count;
+            _buffer = GC.AllocateUninitializedArray<byte>(checked(VerificationWorkspaceBytes + alignment), pinned: true);
+            var rawPointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, 0).ToInt64();
+            var remainder = rawPointer % alignment;
+            var alignedPointer = remainder == 0 ? rawPointer : checked(rawPointer + alignment - remainder);
+            _baseOffset = checked((int)(alignedPointer - rawPointer));
+        }
+
+        internal int PerStreamBytes { get; }
+
+        internal SourceBufferLease RentSlice(int index)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            if ((uint)index >= (uint)_streamCount)
+                throw new ArgumentOutOfRangeException(nameof(index));
+            var offset = checked(_baseOffset + index * PerStreamBytes);
+            var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, offset);
+            return SourceBufferLease.BorrowPinned(_buffer, offset, PerStreamBytes, pointer);
+        }
+
+        public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
+    }
+
     private sealed class CoordinatedVerifyTarget : IDisposable
     {
         internal CoordinatedVerifyTarget(
@@ -1480,16 +1520,13 @@ public static class CopyEngine
         internal Microsoft.Win32.SafeHandles.SafeFileHandle? BufferedHandle { get; private set; }
         internal SourceBufferLease? Buffer { get; private set; }
 
-        internal void Open(int maximumBlockBytes)
+        internal void Open(SourceBufferLease buffer)
         {
-            var alignment = Math.Max(1, DirectIoSourceReader.RequiredAlignment(Device));
-            var directCapacity = AlignUp(Math.Max(1, maximumBlockBytes), Math.Max(1, alignment));
-            if (DirectIoSourceReader.TryOpenOverlappedForVerification(Path, Device, directCapacity, out var direct))
+            ArgumentNullException.ThrowIfNull(buffer);
+            Buffer = buffer;
+            if (DirectIoSourceReader.TryOpenOverlappedForVerification(Path, Device, buffer.Capacity, out var direct))
             {
                 Direct = direct;
-                Buffer = SourceBufferLease.RentAligned(
-                    directCapacity,
-                    Math.Max(Environment.SystemPageSize, alignment));
                 return;
             }
             BufferedHandle = File.OpenHandle(
@@ -1498,7 +1535,6 @@ public static class CopyEngine
                 FileAccess.Read,
                 FileShare.Read,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            Buffer = SourceBufferLease.RentBuffered(Math.Max(1, maximumBlockBytes));
         }
 
         internal void SwitchToBuffered()

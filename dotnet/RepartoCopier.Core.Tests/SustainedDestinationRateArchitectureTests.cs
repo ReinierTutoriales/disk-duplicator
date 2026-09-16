@@ -16,7 +16,7 @@ public sealed class SustainedDestinationRateArchitectureTests
             .Select(field => field.FieldType)
             .ToArray();
         CollectionAssert.Contains(telemetryFieldTypes, typeof(SlidingByteRateWindow));
-        Assert.AreEqual(2, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));
+        Assert.AreEqual(3, telemetryFieldTypes.Count(type => type == typeof(SlidingByteRateWindow)));
 
         var legacyTelemetryFields = telemetryFields.Select(field => field.Name).ToArray();
         CollectionAssert.DoesNotContain(legacyTelemetryFields, "_rateGate");

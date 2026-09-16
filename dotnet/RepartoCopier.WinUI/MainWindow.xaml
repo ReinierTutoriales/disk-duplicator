@@ -10,14 +10,14 @@
     <Grid x:Name="Root" Background="Transparent">
         <Grid.Resources>
             <Style x:Key="SurfaceCardStyle" TargetType="Border">
-                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+                <Setter Property="Background" Value="{ThemeResource LayerFillColorDefaultBrush}" />
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="CornerRadius" Value="8" />
             </Style>
             <Style x:Key="CompactButtonStyle" TargetType="Button">
-                <Setter Property="Height" Value="34" />
-                <Setter Property="MinWidth" Value="76" />
+                <Setter Property="Height" Value="32" />
+                <Setter Property="MinWidth" Value="70" />
                 <Setter Property="Padding" Value="11,0" />
                 <Setter Property="CornerRadius" Value="6" />
             </Style>
@@ -32,25 +32,22 @@
         </Grid.Resources>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="48" />
+            <RowDefinition Height="36" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="28" />
+            <RowDefinition Height="26" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="14,0,142,0" Background="Transparent">
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="12,0,138,0" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <Image x:Name="LogoImage" Width="28" Height="28" Source="ms-appx:///Assets/AppLogo.png"
+            <Image x:Name="LogoImage" Width="22" Height="22" Source="ms-appx:///Assets/AppLogo.png"
                    Stretch="Uniform" VerticalAlignment="Center" />
-            <StackPanel Grid.Column="1" Margin="9,0,0,0" VerticalAlignment="Center" Spacing="0">
-                <TextBlock Text="RepartoCopier" FontSize="15" FontWeight="SemiBold" />
-                <TextBlock Text="FAN-OUT" Opacity="0.56" FontSize="10" />
-            </StackPanel>
-            <Button x:Name="AppMenuButton" Grid.Column="3" Width="34" Height="32" Padding="0"
+            <TextBlock x:Name="TitleBarText" Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" Text="RepartoCopier" FontSize="13" FontWeight="SemiBold" />
+            <Button x:Name="AppMenuButton" Grid.Column="3" Width="30" Height="28" Padding="0"
                     VerticalAlignment="Center" HorizontalAlignment="Right" CornerRadius="6"
                     ToolTipService.ToolTip="Menú">
                 <FontIcon Glyph="&#xE700;" FontSize="16" />
@@ -84,11 +81,11 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="1" Margin="14,4,14,10" MaxWidth="820" HorizontalAlignment="Stretch">
+        <Grid Grid.Row="1" Margin="12,2,12,8" MaxWidth="780" HorizontalAlignment="Stretch">
             <InfoBar x:Name="ErrorBar" VerticalAlignment="Top" Margin="0,0,0,8" IsOpen="False"
                      Severity="Error" IsClosable="True" Canvas.ZIndex="10" />
 
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="8" MaxWidth="720" HorizontalAlignment="Center">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="8" MaxWidth="680" HorizontalAlignment="Center">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -98,7 +95,7 @@
                 <Grid Margin="2,0,2,2">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                     <StackPanel Spacing="1">
-                        <TextBlock Text="Nueva copia" FontSize="20" FontWeight="SemiBold" />
+                        <TextBlock Text="Nueva copia" FontSize="18" FontWeight="SemiBold" />
                         <TextBlock Text="Un origen · varios destinos" Opacity="0.62" FontSize="11" />
                     </StackPanel>
                     <Button x:Name="StartButton" Grid.Column="1" Style="{StaticResource AccentButtonStyle}"
@@ -107,8 +104,8 @@
                     </Button>
                 </Grid>
 
-                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="12">
-                    <Grid RowSpacing="10">
+                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="10">
+                    <Grid RowSpacing="8">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -119,7 +116,7 @@
 
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                            <TextBox x:Name="SourcePathBox" Height="36" PlaceholderText="Archivo o carpeta de origen" IsReadOnly="True" CornerRadius="6" />
+                            <TextBox x:Name="SourcePathBox" Height="34" PlaceholderText="Archivo o carpeta de origen" IsReadOnly="True" CornerRadius="6" />
                             <Button Grid.Column="1" Style="{StaticResource CompactButtonStyle}" Click="PickSourceFile_Click" ToolTipService.ToolTip="Elegir archivo">
                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8A5;" FontSize="13"/><TextBlock Text="Archivo"/></StackPanel>
                             </Button>
@@ -147,26 +144,40 @@
 
                         <Rectangle Grid.Row="2" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-                        <ListView x:Name="DestinationList" Grid.Row="3" SelectionMode="None" MaxHeight="108" Padding="0" IsTabStop="False">
+                        <ListView x:Name="DestinationList" Grid.Row="3" SelectionMode="None" Height="50" MaxHeight="50"
+                                  Padding="0" IsTabStop="False"
+                                  ScrollViewer.HorizontalScrollMode="Enabled"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                  ScrollViewer.VerticalScrollMode="Disabled"
+                                  ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                            <ListView.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <ItemsStackPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ListView.ItemsPanel>
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
-                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                     <Setter Property="Padding" Value="0"/>
-                                    <Setter Property="Margin" Value="0"/>
-                                    <Setter Property="MinHeight" Value="32"/>
-                                    <Setter Property="CornerRadius" Value="5"/>
+                                    <Setter Property="Margin" Value="0,0,6,0"/>
+                                    <Setter Property="MinHeight" Value="42"/>
+                                    <Setter Property="CornerRadius" Value="6"/>
                                 </Style>
                             </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Grid MinHeight="30" Padding="7,1" ColumnSpacing="8">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                        <FontIcon Glyph="&#xEDA2;" FontSize="13" Opacity="0.65" VerticalAlignment="Center"/>
-                                        <TextBlock Grid.Column="1" Text="{Binding Path}" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                        <Button Grid.Column="2" Width="26" Height="26" Padding="0" CornerRadius="5" Tag="{Binding Path}" Click="RemoveDestination_Click" ToolTipService.ToolTip="Quitar">
-                                            <FontIcon Glyph="&#xE711;" FontSize="10"/>
-                                        </Button>
-                                    </Grid>
+                                    <Border Width="158" Height="42" Padding="8,0" CornerRadius="6"
+                                            Background="{ThemeResource ControlFillColorDefaultBrush}"
+                                            BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
+                                            ToolTipService.ToolTip="{Binding Path}">
+                                        <Grid ColumnSpacing="7">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <FontIcon Glyph="&#xEDA2;" FontSize="13" Opacity="0.68" VerticalAlignment="Center"/>
+                                            <TextBlock Grid.Column="1" Text="{Binding Path}" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                            <Button Grid.Column="2" Width="24" Height="24" Padding="0" CornerRadius="5" Tag="{Binding Path}" Click="RemoveDestination_Click" ToolTipService.ToolTip="Quitar">
+                                                <FontIcon Glyph="&#xE711;" FontSize="10"/>
+                                            </Button>
+                                        </Grid>
+                                    </Border>
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
@@ -184,8 +195,8 @@
                 <TextBlock Grid.Row="2" Margin="2,0" Text="La copia usa un único flujo FAN-OUT compartido para todos los destinos." Opacity="0.52" FontSize="10" />
             </Grid>
 
-            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="8" MaxWidth="760" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Border Style="{StaticResource SurfaceCardStyle}" Padding="14,12">
+            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="8" MaxWidth="700" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Border Style="{StaticResource SurfaceCardStyle}" Padding="12,10">
                     <Grid RowSpacing="11">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 

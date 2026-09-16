@@ -65,6 +65,8 @@ public sealed record CopyDiagnosticsSnapshot(
     public double SustainedWrite10sBytesPerSecond { get; init; }
     public double SourceRead5sBytesPerSecond { get; init; }
     public double SourceRead10sBytesPerSecond { get; init; }
+    public double VerifyLogical5sBytesPerSecond { get; init; }
+    public double VerifyLogical10sBytesPerSecond { get; init; }
     public IReadOnlyList<DeviceIoSnapshot> DeviceSchedulers { get; init; } = [];
     public long DirectSourceReadBytes { get; init; }
     public long DirectSourceReadOperations { get; init; }
@@ -104,6 +106,7 @@ internal sealed class CopyTelemetry
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly SlidingByteRateWindow _writeRate = new();
     private readonly SlidingByteRateWindow _sourceReadRate = new();
+    private readonly SlidingByteRateWindow _verifyLogicalRate = new();
     private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
     private long _sourceReadBytes, _sourceReadTicks;
@@ -191,6 +194,7 @@ internal sealed class CopyTelemetry
     }
 
     internal void RecordVerifyRead(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyReadBytes, bytes); AddTicks(ref _verifyReadTicks, elapsed); }
+    internal void RecordVerifyLogicalBytes(int bytes) { if (bytes > 0) _verifyLogicalRate.Record(bytes); }
     internal void RecordVerifyCrc32C(int bytes, TimeSpan elapsed) { AddBytes(ref _verifyCrc32CBytes, bytes); AddTicks(ref _verifyCrc32CTicks, elapsed); }
     internal void RecordTransferSize(int bytes)
     {
@@ -212,6 +216,7 @@ internal sealed class CopyTelemetry
     {
         var sustained = _writeRate.Snapshot();
         var sourceSustained = _sourceReadRate.Snapshot();
+        var verifySustained = _verifyLogicalRate.Snapshot();
 
         var devices = _deviceSchedulers?
             .Select(item => item.Snapshot())
@@ -237,6 +242,8 @@ internal sealed class CopyTelemetry
             SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
             SourceRead5sBytesPerSecond = sourceSustained.FiveSecondsBytesPerSecond,
             SourceRead10sBytesPerSecond = sourceSustained.TenSecondsBytesPerSecond,
+            VerifyLogical5sBytesPerSecond = verifySustained.FiveSecondsBytesPerSecond,
+            VerifyLogical10sBytesPerSecond = verifySustained.TenSecondsBytesPerSecond,
             DeviceSchedulers = devices,
             DirectSourceReadBytes = Interlocked.Read(ref _directSourceReadBytes),
             DirectSourceReadOperations = Interlocked.Read(ref _directSourceReadOperations),
