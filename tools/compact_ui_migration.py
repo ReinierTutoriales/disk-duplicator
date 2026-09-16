@@ -51,8 +51,16 @@ if section_start < 0 or controls_start < 0:
     raise RuntimeError('running destination section markers not found')
 xaml = xaml[:section_start] + xaml[controls_start:]
 xaml = replace_once(xaml, '<Grid Grid.Row="3" Margin="2,2"', '<Grid Grid.Row="2" Margin="2,2"', 'running controls row')
-xaml = replace_once(xaml, 'Height="40" MinWidth="145"', 'Height="36" MinWidth="116"', 'pause size')
-xaml = replace_once(xaml, 'Grid.Column="1" Height="40" MinWidth="145"', 'Grid.Column="1" Height="36" MinWidth="116"', 'cancel size')
+xaml = replace_once(
+    xaml,
+    '<Button x:Name="PauseButton" Height="40" MinWidth="145"',
+    '<Button x:Name="PauseButton" Height="36" MinWidth="116"',
+    'pause size')
+xaml = replace_once(
+    xaml,
+    '<Button x:Name="CancelButton" Grid.Column="1" Height="40" MinWidth="145"',
+    '<Button x:Name="CancelButton" Grid.Column="1" Height="36" MinWidth="116"',
+    'cancel size')
 
 XAML.write_text(xaml, encoding='utf-8')
 
