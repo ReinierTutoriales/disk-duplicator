@@ -55,9 +55,11 @@ jobs:
       - name: Remove migration infrastructure and commit green product
         shell: pwsh
         run: |
-          git rm tools/extremecopy_baseline_migration.py tools/extremecopy_migration_hotfix.py .github/workflows/extremecopy-baseline-migration.yml
+          if (Test-Path artifact) { Remove-Item artifact -Recurse -Force }
+          git rm -f tools/extremecopy_baseline_migration.py tools/extremecopy_migration_hotfix.py .github/workflows/extremecopy-baseline-migration.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
+          git status --short
           git commit -m 'perf: rebuild copier around shared FAN-OUT pool'
           git push origin HEAD:main
