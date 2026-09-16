@@ -97,6 +97,7 @@ public sealed record CopyDiagnosticsSnapshot(
     public int MinimumTransferBytes { get; init; }
     public int MaximumTransferBytes { get; init; }
     public IReadOnlyList<IoRecoveryEvent> RecentIoRecoveryEvents { get; init; } = [];
+    public IReadOnlyList<BranchFlowSnapshot> BranchFlows { get; init; } = [];
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -126,6 +127,7 @@ internal sealed class CopyTelemetry
     private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
     private Func<PipelineGovernorSnapshot>? _pipelineGovernorSnapshot;
+    private Func<IReadOnlyList<BranchFlowSnapshot>>? _branchFlowSnapshot;
     private long _sourceReadBytes, _sourceReadTicks;
     private long _directSourceReadBytes, _directSourceReadOperations;
     private int _directSourceFallbacks;
@@ -152,6 +154,12 @@ internal sealed class CopyTelemetry
     {
         ArgumentNullException.ThrowIfNull(snapshotProvider);
         _pipelineGovernorSnapshot = snapshotProvider;
+    }
+
+    internal void AttachBranchFlows(Func<IReadOnlyList<BranchFlowSnapshot>> snapshotProvider)
+    {
+        ArgumentNullException.ThrowIfNull(snapshotProvider);
+        _branchFlowSnapshot = snapshotProvider;
     }
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceReadBytes, bytes); AddTicks(ref _sourceReadTicks, elapsed); }
@@ -286,6 +294,7 @@ internal sealed class CopyTelemetry
             MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
             MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
             RecentIoRecoveryEvents = _ioRecoveryEvents.ToArray(),
+            BranchFlows = _branchFlowSnapshot?.Invoke() ?? [],
         };
     }
 

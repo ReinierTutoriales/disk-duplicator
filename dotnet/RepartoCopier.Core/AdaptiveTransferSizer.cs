@@ -38,17 +38,15 @@ internal static class AdaptiveTransferSizer
         var headroom = Math.Max(
             (long)requiredAlignment,
             Math.Max(0L, bufferTargetBytes - bufferUsedBytes));
-        var maximumQd = devices.Count == 0
-            ? 1
-            : devices.Max(item => Math.Max(1, item.CurrentQueueDepth));
-        var residentBlocks = checked(
-            Math.Max(currentPrefetchLimit, maximumQd) + Math.Max(0, activeDestinations - 1));
+        // A source block exists once regardless of destination count. Branch-local
+        // staging detaches lagging consumers, so one destination's QD must not shrink
+        // the global source transfer size for every other destination.
+        var residentBlocks = checked(Math.Max(1, currentPrefetchLimit) + 1);
         var memoryBound = Math.Max(
             (long)requiredAlignment,
             headroom / Math.Max(1, residentBlocks));
 
-        double measuredBytesPerOperation = 0;
-        var measuredCount = 0;
+        double largestMeasuredBytesPerOperation = 0;
         foreach (var device in devices)
         {
             if (device.BestThroughputBytesPerSecond <= 0 ||
@@ -62,16 +60,13 @@ internal static class AdaptiveTransferSizer
                 (device.BestAverageLatencyMilliseconds / 1000.0) / qd;
             if (!double.IsFinite(bytes) || bytes <= 0)
                 continue;
-            measuredBytesPerOperation += bytes;
-            measuredCount++;
+            largestMeasuredBytesPerOperation = Math.Max(largestMeasuredBytesPerOperation, bytes);
         }
 
         long candidate = memoryBound;
-        if (measuredCount > 0)
+        if (largestMeasuredBytesPerOperation > 0)
         {
-            var measured = (long)Math.Max(
-                requiredAlignment,
-                measuredBytesPerOperation / measuredCount);
+            var measured = (long)Math.Max(requiredAlignment, largestMeasuredBytesPerOperation);
             candidate = Math.Min(memoryBound, measured);
         }
 

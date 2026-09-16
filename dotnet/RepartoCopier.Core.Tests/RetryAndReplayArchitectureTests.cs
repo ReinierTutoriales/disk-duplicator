@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using RepartoCopier.Core;
@@ -78,33 +77,12 @@ public sealed class RetryAndReplayArchitectureTests
     }
 
     [TestMethod]
-    public void ReplayGateRequiresSustainedHighBacklogAndHystereticLowExit()
+    public void BranchIsolationReplacesTimedReplayGateWithQueueWindowFeedback()
     {
-        var gate = new BranchReplayGate(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
-        var frequency = Stopwatch.Frequency;
-        static long At(long origin, TimeSpan elapsed) => origin + (long)(elapsed.TotalSeconds * Stopwatch.Frequency);
-        var t0 = frequency;
-
-        Assert.IsFalse(gate.ShouldReplay(1000, 1000, t0));
-        Assert.IsFalse(gate.ShouldReplay(1000, 1000, At(t0, TimeSpan.FromMilliseconds(50))));
-        Assert.IsTrue(gate.ShouldReplay(1000, 1000, At(t0, TimeSpan.FromMilliseconds(110))));
-        Assert.IsTrue(gate.IsActive);
-
-        Assert.IsTrue(gate.ShouldReplay(400, 1000, At(t0, TimeSpan.FromMilliseconds(120))));
-        Assert.IsTrue(gate.ShouldReplay(400, 1000, At(t0, TimeSpan.FromMilliseconds(180))));
-        Assert.IsFalse(gate.ShouldReplay(400, 1000, At(t0, TimeSpan.FromMilliseconds(230))));
-        Assert.IsFalse(gate.IsActive);
-    }
-
-    [TestMethod]
-    public void ReplayGateRejectsOneSampleSpike()
-    {
-        var gate = new BranchReplayGate(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100));
-        var t0 = Stopwatch.Frequency;
-        Assert.IsFalse(gate.ShouldReplay(1000, 1000, t0));
-        Assert.IsFalse(gate.ShouldReplay(100, 1000, t0 + Stopwatch.Frequency / 20));
-        Assert.IsFalse(gate.ShouldReplay(1000, 1000, t0 + Stopwatch.Frequency / 10));
-        Assert.IsFalse(gate.IsActive);
+        var target = BranchIsolationPolicy.SharedRetentionTargetBytes(4 * 1024 * 1024, 8, 256L * 1024 * 1024);
+        Assert.AreEqual(32L * 1024 * 1024, target);
+        Assert.IsFalse(BranchIsolationPolicy.ShouldDetach(target, 4 * 1024 * 1024, 8, 256L * 1024 * 1024));
+        Assert.IsTrue(BranchIsolationPolicy.ShouldDetach(target + 1, 4 * 1024 * 1024, 8, 256L * 1024 * 1024));
     }
 
     private static StorageDeviceInfo Device(string root, uint? physicalDeviceNumber) =>
