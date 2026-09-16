@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/streaming_verify_migration.py'
+      - 'tools/streaming_verify_test_hotfix.py'
       - '.github/workflows/streaming-verify-migration.yml'
 
 permissions:
@@ -21,7 +22,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - name: Apply streaming verification migration
-        run: python tools/streaming_verify_migration.py
+        run: |
+          python tools/streaming_verify_migration.py
+          python tools/streaming_verify_test_hotfix.py
       - name: Architecture guards
         shell: pwsh
         run: |
@@ -48,7 +51,7 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item -Recurse -Force artifact -ErrorAction SilentlyContinue
-          git rm -f tools/streaming_verify_migration.py .github/workflows/streaming-verify-migration.yml
+          git rm -f tools/streaming_verify_migration.py tools/streaming_verify_test_hotfix.py .github/workflows/streaming-verify-migration.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add dotnet/RepartoCopier.Core dotnet/RepartoCopier.Core.Tests
