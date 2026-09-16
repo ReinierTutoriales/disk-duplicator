@@ -35,14 +35,8 @@ jobs:
         run: |
           $path = 'tools/apply_shared_fanout_pool.py'
           $text = Get-Content $path -Raw
-          $old = @'
-if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:
-    raise RuntimeError("obsolete byte-budget path remains")
-'@
-          $new = @'
-if "AdaptiveByteBudget" in engine or "bufferBudget" in engine:
-    print("diagnostic: obsolete byte-budget token remains; architecture guard will identify it")
-'@
+          $old = "if `"AdaptiveByteBudget`" in engine or `"bufferBudget`" in engine:`n    raise RuntimeError(`"obsolete byte-budget path remains`")"
+          $new = "if `"AdaptiveByteBudget`" in engine or `"bufferBudget`" in engine:`n    print(`"diagnostic: obsolete byte-budget token remains; architecture guard will identify it`")"
           if (-not $text.Contains($old)) { throw 'Could not patch migration diagnostic guard.' }
           Set-Content -Path $path -Value ($text.Replace($old, $new)) -NoNewline
 
