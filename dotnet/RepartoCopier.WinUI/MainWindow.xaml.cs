@@ -26,7 +26,7 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(840, 520));
+        AppWindow.Resize(new SizeInt32(800, 460));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();
@@ -34,6 +34,7 @@ public sealed partial class MainWindow : Window
         ApplySavedTheme();
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
+        Activated += MainWindow_Activated;
         TryLoadLaunchSource();
     }
 
@@ -48,6 +49,14 @@ public sealed partial class MainWindow : Window
             titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 128, 128, 128);
         }
         catch { }
+    }
+
+    private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
+    {
+        var active = args.WindowActivationState != WindowActivationState.Deactivated;
+        TitleBarText.Opacity = active ? 1.0 : 0.58;
+        LogoImage.Opacity = active ? 1.0 : 0.58;
+        AppMenuButton.Opacity = active ? 1.0 : 0.72;
     }
 
     private void ApplySavedTheme()
@@ -293,8 +302,13 @@ public sealed partial class MainWindow : Window
                 : verifyActive.Min(item => item.VerifiedBytes);
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
-            SpeedMetricText.Text = paused ? "0.0 B/s" : "—";
-            RemainingMetricText.Text = "--:--:--";
+            var diagnostics = _job.DiagnosticsSnapshot();
+            var speed = paused ? 0d : diagnostics.VerifyLogical5sBytesPerSecond;
+            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
+            var remaining = verifyTotal > verified ? verifyTotal - verified : 0;
+            RemainingMetricText.Text = !paused && speed > 1
+                ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
+                : "--:--:--";
             if (!_job.IsPaused)
             {
                 OperationTitleText.Text = "Comprobando integridad...";

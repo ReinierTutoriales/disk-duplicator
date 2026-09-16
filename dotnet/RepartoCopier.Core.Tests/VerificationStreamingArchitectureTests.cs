@@ -6,26 +6,28 @@ namespace RepartoCopier.Core.Tests;
 public sealed class VerificationStreamingArchitectureTests
 {
     [TestMethod]
-    public void VerifyUsesFixedWorkspaceAndNoPerBlockHistory()
+    public void VerifyUsesOneFixedContiguousWorkspaceAndNoPerTargetRentals()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("VerificationWorkspaceBytes = 8 * 1024 * 1024", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("sealed class VerificationWorkspace", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("GC.AllocateUninitializedArray<byte>", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("SourceBufferLease.BorrowPinned", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("targets[index].Open(workspace.RentSlice(index))", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationPlan", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationBlock", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationPlans", StringComparison.Ordinal));
-        Assert.IsFalse(engine.Contains("VerificationCrc32C", StringComparison.Ordinal));
-        Assert.IsFalse(engine.Contains("FastCrc32C.Compute(buffer.Memory.Span[..length])", StringComparison.Ordinal));
     }
 
     [TestMethod]
-    public void VerifyReadsSourceAndDestinationsAtSameOffsetAndComparesImmediately()
+    public void VerifyReadsSourceAndDestinationsTogetherAndComparesImmediately()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("Task.WhenAll(reads)", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("var sourceCrc = FastCrc32C.Compute", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("var destinationCrc = FastCrc32C.Compute", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("destinationCrc != sourceCrc", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("entry.SourcePath", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("RecordVerifyLogicalBytes(expectedBytes)", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
