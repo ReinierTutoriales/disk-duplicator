@@ -1,0 +1,94 @@
+name: Verify profile persistence migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-profile-migration.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Persist verification setting in profiles
+        shell: pwsh
+        run: |
+          $profilePath = 'dotnet/RepartoCopier.WinUI/CopyProfile.cs'
+          $profile = Get-Content $profilePath -Raw
+          $old = @'
+              bool ContinueOnError,
+              bool ShutdownWhenFinished)
+          {
+          '@
+          $new = @'
+              bool ContinueOnError,
+              bool ShutdownWhenFinished,
+              bool VerifyAfterCopy = true)
+          {
+          '@
+          if (-not $profile.Contains($old)) { throw 'CopyProfile constructor anchor missing' }
+          $profile = $profile.Replace($old, $new)
+          Set-Content -Path $profilePath -Value $profile -Encoding utf8
+
+          $uiPath = 'dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs'
+          $ui = Get-Content $uiPath -Raw
+          $loadOld = @'
+                      ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
+                      StatusText.Text = "Configuración cargada";
+          '@
+          $loadNew = @'
+                      ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
+                      VerifyCheck.IsChecked = profile.VerifyAfterCopy;
+                      StatusText.Text = "Configuración cargada";
+          '@
+          if (-not $ui.Contains($loadOld)) { throw 'Profile load anchor missing' }
+          $ui = $ui.Replace($loadOld, $loadNew)
+
+          $saveOld = @'
+                          KeepGoingCheck.IsChecked == true,
+                          ShutdownCheck.IsChecked == true);
+          '@
+          $saveNew = @'
+                          KeepGoingCheck.IsChecked == true,
+                          ShutdownCheck.IsChecked == true,
+                          VerifyCheck.IsChecked == true);
+          '@
+          if (-not $ui.Contains($saveOld)) { throw 'Profile save anchor missing' }
+          $ui = $ui.Replace($saveOld, $saveNew)
+          Set-Content -Path $uiPath -Value $ui -Encoding utf8
+
+          Remove-Item '.github/workflows/verify-profile-migration.yml'
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Commit green profile persistence
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(winui): persist optional verification in copy profiles"
+          git push origin HEAD:main
