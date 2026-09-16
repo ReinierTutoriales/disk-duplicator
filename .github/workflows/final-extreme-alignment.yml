@@ -1,0 +1,83 @@
+name: Final Extreme alignment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/finalize_extreme_alignment.py'
+      - '.github/workflows/final-extreme-alignment.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: final-extreme-alignment-main
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Apply final engine and UI cut
+        shell: pwsh
+        run: python tools/finalize_extreme_alignment.py
+
+      - name: Architecture guards
+        shell: pwsh
+        run: |
+          $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
+          $telemetry = Get-Content dotnet/RepartoCopier.Core/CopyTelemetry.cs -Raw
+          $xaml = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml -Raw
+          $ui = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
+          if ($engine -notmatch 'SharedFanoutPoolBytes = 256L \* 1024 \* 1024') { throw '256 MiB FAN-OUT pool missing.' }
+          if ($engine -notmatch 'VerificationWorkspaceBytes = 8 \* 1024 \* 1024') { throw 'Fixed verify workspace missing.' }
+          if ($engine -notmatch 'activeBufferPool\.Dispose\(\);[\s\S]*if \(options\.Verify') { throw 'Large COPY pool is not released before VERIFY.' }
+          foreach ($token in @('VerificationPlan','VerificationBlock','VerificationPlans','VerificationCrc32C')) {
+            if ($engine.Contains($token)) { throw "Retired verify history token remains: $token" }
+          }
+          foreach ($token in @('sealed class VerificationWorkspace','GC.AllocateUninitializedArray<byte>','SourceBufferLease.BorrowPinned','Task.WhenAll(reads)','RecordVerifyLogicalBytes(expectedBytes)')) {
+            if (-not $engine.Contains($token)) { throw "Verify invariant missing: $token" }
+          }
+          if (-not $telemetry.Contains('VerifyLogical5sBytesPerSecond')) { throw 'Verify rolling speed telemetry missing.' }
+          if (-not $xaml.Contains('<ItemsStackPanel Orientation="Horizontal" />')) { throw 'Destinations are not horizontal.' }
+          if (-not $xaml.Contains('LayerFillColorDefaultBrush')) { throw 'Windows 11 Mica content layer missing.' }
+          if (-not $ui.Contains('SizeInt32(800, 460)')) { throw 'Compact window footprint missing.' }
+          if (-not $ui.Contains('Activated += MainWindow_Activated')) { throw 'Inactive title bar integration missing.' }
+          git diff --check
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Publish self-contained x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+
+      - name: Commit final product cut and remove migration scaffolding
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f tools/finalize_extreme_alignment.py .github/workflows/final-extreme-alignment.yml
+          git clean -fd artifact
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: finalize streaming verify and compact Windows 11 UI'
+          git push origin HEAD:main
