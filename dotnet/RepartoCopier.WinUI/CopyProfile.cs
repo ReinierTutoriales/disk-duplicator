@@ -8,7 +8,8 @@ public sealed record CopyProfile(
     IReadOnlyList<string> Destinations,
     bool SkipExisting,
     bool ContinueOnError,
-    bool ShutdownWhenFinished)
+    bool ShutdownWhenFinished,
+    bool VerifyAfterCopy = true)
 {
     public const int CurrentVersion = 1;
 }
@@ -36,3 +37,4 @@ internal static class CopyProfileSerializer
         return profile;
     }
 }
+

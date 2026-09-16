@@ -355,6 +355,7 @@ public sealed partial class MainWindow : Window
             SkipSameCheck.IsChecked = profile.SkipExisting;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
+            VerifyCheck.IsChecked = profile.VerifyAfterCopy;
             StatusText.Text = "Configuración cargada";
             ShowPreparationView();
         }
@@ -371,7 +372,8 @@ public sealed partial class MainWindow : Window
                 _destinations.Select(item => item.Path).ToArray(),
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true,
-                ShutdownCheck.IsChecked == true);
+                ShutdownCheck.IsChecked == true,
+                VerifyCheck.IsChecked == true);
             var picker = new FileSavePicker(AppWindow.Id)
             {
                 Title = "Guardar copia",
@@ -735,3 +737,4 @@ public sealed partial class MainWindow : Window
         }
     }
 }
+
