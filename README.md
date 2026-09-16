@@ -34,11 +34,11 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Rendimiento
 
-El hot path usa FAN-OUT con una sola lectura del origen y `SharedBlock` para las ramas que mantienen el ritmo. Cada destino dispone de staging propio: cuando una rama excede su ventana de retención derivada del QD físico, se desacopla del `SharedBlock`; si existe un dispositivo temporal físicamente independiente demostrado, el spill de replay ocurre dentro de la etapa de esa rama, nunca inline en el productor. Si replay no está disponible, la rama recibe un buffer propio. Así, una cola individual no actúa como backpressure directo del productor; la admisión global queda gobernada por memoria, cancelación y fallos reales.
+El hot path FAN-OUT sigue un modelo shared-buffer deliberadamente simple: una lectura física del origen entra en un pool acotado de bloques alineados y el mismo bloque, con conteo de referencias, se entrega a una cola ligera por destino. Cada writer libera su referencia al completar la escritura; cuando el pool se llena, el lector espera espacio. No existen replay/spool, staging por rama ni copias privadas del payload en el camino normal.
 
-La cantidad de escrituras pendientes por destino también está acotada por una ventana adaptativa ligada al `DeviceScheduler`, y el backlog físico se mantiene contabilizado hasta que el payload de esa rama termina realmente. El tamaño de transferencia del origen ya no se reduce por el QD máximo de una única rama lenta. Source, destinos y verificación usan Direct I/O `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED` cuando la topología/alineación lo permiten, con fallback buffered seguro.
+La verificación opcional reutiliza los CRC32C calculados mientras el origen ya estaba en memoria. Después de copiar, todos los destinos avanzan coordinadamente bloque a bloque: una lectura outstanding por destino, CRC32C inmediato, comparación y reutilización del buffer. El origen no se vuelve a leer durante Verify.
 
-La telemetría de `CopyJob.DiagnosticsSnapshot()` expone lectura del origen, presión del pipeline, schedulers físicos, recuperación de I/O y flujo por rama (`BranchFlows`) para localizar el cuello real antes de modificar parámetros. La hoja de ruta vigente está en `docs/FANOUT-PERFORMANCE-ROADMAP.md`.
+La telemetría mantiene lectura física del origen, escrituras, recuperación de I/O, Direct I/O y tiempos de copy/verify para que el cuello de botella sea medible.
 
 ## Compilar
 

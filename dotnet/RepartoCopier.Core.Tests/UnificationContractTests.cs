@@ -279,39 +279,6 @@ public sealed class UnificationContractTests
         CollectionAssert.DoesNotContain(sourceFields, "MaximumSupportedAlignment");
     }
     [TestMethod]
-    public void AdaptiveTransferSizingReplacesFixedReadBands()
-    {
-        var assembly = typeof(CopyEngine).Assembly;
-        Assert.IsNotNull(assembly.GetType("RepartoCopier.Core.AdaptiveTransferSizer"));
-        Assert.IsNull(typeof(CopyEngine).GetMethod(
-            "ReadBufferSizeFor",
-            BindingFlags.Static | BindingFlags.NonPublic));
-        var fields = typeof(CopyEngine)
-            .GetFields(BindingFlags.Static | BindingFlags.NonPublic)
-            .Select(field => field.Name)
-            .ToArray();
-        CollectionAssert.DoesNotContain(fields, "BlockSize");
-        CollectionAssert.DoesNotContain(fields, "SmallBufferSize");
-        CollectionAssert.DoesNotContain(fields, "MediumBufferSize");
-        CollectionAssert.DoesNotContain(fields, "LargeBufferSize");
-    }
-    [TestMethod]
-    public void SlowBranchReplayIsARealProductionPath()
-    {
-        var assembly = typeof(CopyEngine).Assembly;
-        Assert.IsNotNull(assembly.GetType("RepartoCopier.Core.BranchReplayStore"));
-        var replayMessage = typeof(CopyEngine).GetNestedType("ReplayDataMessage", BindingFlags.NonPublic);
-        Assert.IsNotNull(replayMessage);
-        var worker = typeof(CopyEngine).GetNestedType("DestinationWorker", BindingFlags.NonPublic);
-        Assert.IsNotNull(worker);
-        Assert.IsNotNull(worker.GetProperty("ReplayStore", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public));
-        var engineMethods = typeof(CopyEngine)
-            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-            .Select(method => method.Name)
-            .ToArray();
-        CollectionAssert.Contains(engineMethods, "WriteReplayBlockAtOffsetAsync");
-    }
-    [TestMethod]
     public void DestinationBranchTracksPayloadUntilItsSharedReferenceIsActuallyReleased()
     {
         var worker = typeof(CopyEngine).GetNestedType("DestinationWorker", BindingFlags.NonPublic);

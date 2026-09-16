@@ -298,9 +298,8 @@ public sealed partial class MainWindow : Window
         {
             var total = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Total));
             var written = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.Written));
-            var speed = paused
-                ? 0d
-                : snapshots.Aggregate<DestinationSnapshot, double>(0d, (sum, item) => sum + item.RecentBytesPerSecond);
+            var diagnostics = _job.DiagnosticsSnapshot();
+            var speed = paused ? 0d : diagnostics.SourceRead5sBytesPerSecond;
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
             OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
             SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);

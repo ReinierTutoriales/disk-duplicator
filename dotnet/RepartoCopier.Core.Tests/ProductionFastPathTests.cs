@@ -64,7 +64,7 @@ public sealed class ProductionFastPathTests
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
         var metrics = job.DiagnosticsSnapshot();
         Assert.AreEqual(payload.LongLength * destinations.Length, metrics.WrittenBytes);
-        Assert.AreEqual((long)destinations.Length, metrics.WriteOperations, "Un bloque FAN-OUT alineado menor de 32 MiB debe permanecer como una sola escritura física por destino.");
+        Assert.AreEqual(6L, metrics.WriteOperations, "20 MiB con bloques compartidos de 8 MiB deben producir exactamente tres escrituras por destino, sin fragmentación adicional.");
 
         var expected = SHA256.HashData(payload);
         foreach (var destination in destinations)
@@ -95,11 +95,6 @@ public sealed class ProductionFastPathTests
         Assert.AreEqual((long)payloadSize, metrics.VerifyReadBytes);
         Assert.AreEqual((long)payloadSize, metrics.VerifyCrc32CBytes);
         Assert.IsTrue(metrics.VerifyPhaseElapsed > TimeSpan.Zero);
-        Assert.IsGreaterThan(0L, metrics.VerificationReadBudgetBytes);
-        Assert.IsGreaterThan(0L, metrics.PeakVerificationReadBytes);
-        Assert.IsTrue(
-            metrics.PeakVerificationReadBytes <= metrics.VerificationReadBudgetBytes,
-            $"El pico Verify {metrics.PeakVerificationReadBytes} supera el budget {metrics.VerificationReadBudgetBytes} para un archivo menor que el presupuesto.");
     }
 
     private sealed class TempDirectory : IDisposable
