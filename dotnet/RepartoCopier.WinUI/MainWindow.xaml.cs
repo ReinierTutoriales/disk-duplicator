@@ -1,7 +1,5 @@
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -18,7 +16,6 @@ public sealed partial class MainWindow : Window
     private const string LicenseUrl = "https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE";
 
     private readonly ObservableCollection<DestinationRow> _destinations = [];
-    private readonly ObservableCollection<ProgressRow> _progressRows = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
     private CopyJob? _job;
     private DateTimeOffset? _copyStartedAt;
@@ -27,10 +24,9 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         DestinationList.ItemsSource = _destinations;
-        ProgressList.ItemsSource = _progressRows;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(1180, 760));
+        AppWindow.Resize(new SizeInt32(960, 620));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
 
@@ -170,9 +166,6 @@ public sealed partial class MainWindow : Window
             CancelButton.IsEnabled = true;
             StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
             OperationTitleText.Text = "Copiando...";
-            _progressRows.Clear();
-            foreach (var snapshot in _job.Snapshot()) _progressRows.Add(new ProgressRow(snapshot));
-            RunningDestinationTitle.Text = $"Destinos ({_progressRows.Count})";
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
         }
@@ -273,11 +266,6 @@ public sealed partial class MainWindow : Window
         if (_job is null) return;
         var snapshots = _job.Snapshot();
         var paused = _job.IsPaused;
-        while (_progressRows.Count < snapshots.Count)
-            _progressRows.Add(new ProgressRow(snapshots[_progressRows.Count], paused));
-        for (var index = 0; index < snapshots.Count; index++)
-            _progressRows[index].Update(snapshots[index], paused);
-
         var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
         double percent;
         if (verifying)
@@ -661,79 +649,4 @@ public sealed partial class MainWindow : Window
 
     public sealed record DestinationRow(string Path);
 
-    public sealed class ProgressRow : INotifyPropertyChanged
-    {
-        private string _label = string.Empty;
-        private string _phaseText = string.Empty;
-        private string _statusGlyph = "●";
-        private Brush _statusBrush = ResolveBrush("SystemFillColorNeutralBrush");
-        private string _detail = string.Empty;
-        private string _speed = string.Empty;
-        private string _percentText = string.Empty;
-        private double _percent;
-
-        public ProgressRow(DestinationSnapshot snapshot, bool paused = false) => Update(snapshot, paused);
-
-        public string Label { get => _label; private set => Set(ref _label, value); }
-        public string PhaseText { get => _phaseText; private set => Set(ref _phaseText, value); }
-        public string StatusGlyph { get => _statusGlyph; private set => Set(ref _statusGlyph, value); }
-        public Brush StatusBrush { get => _statusBrush; private set => Set(ref _statusBrush, value); }
-        public string Detail { get => _detail; private set => Set(ref _detail, value); }
-        public string Speed { get => _speed; private set => Set(ref _speed, value); }
-        public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
-        public double Percent { get => _percent; private set => Set(ref _percent, value); }
-        public event PropertyChangedEventHandler? PropertyChanged;
-
-        public void Update(DestinationSnapshot snapshot, bool paused = false)
-        {
-            Label = snapshot.Label;
-            PhaseText = snapshot.Phase switch
-            {
-                DestinationPhase.Idle => "Preparando",
-                DestinationPhase.Copying => "Copiando",
-                DestinationPhase.Verifying => "Comprobando",
-                DestinationPhase.Done => "Completado",
-                DestinationPhase.Failed => "Error",
-                DestinationPhase.Cancelled => "Cancelado",
-                _ => "Procesando",
-            };
-            StatusGlyph = snapshot.Phase switch
-            {
-                DestinationPhase.Done => "✓",
-                DestinationPhase.Failed => "!",
-                DestinationPhase.Cancelled => "×",
-                _ => "●",
-            };
-            StatusBrush = snapshot.Phase switch
-            {
-                DestinationPhase.Copying or DestinationPhase.Verifying => ResolveBrush("AccentFillColorDefaultBrush"),
-                DestinationPhase.Done => ResolveBrush("SystemFillColorSuccessBrush"),
-                DestinationPhase.Failed => ResolveBrush("SystemFillColorCriticalBrush"),
-                _ => ResolveBrush("SystemFillColorNeutralBrush"),
-            };
-
-            var verifyProgress = snapshot.Phase == DestinationPhase.Verifying ||
-                (snapshot.Phase == DestinationPhase.Failed && snapshot.VerifyBytesTotal > 0);
-            Percent = snapshot.Phase == DestinationPhase.Done
-                ? 100
-                : verifyProgress
-                    ? snapshot.VerifyFraction * 100.0
-                    : snapshot.CopyFraction * 100.0;
-            PercentText = $"{Percent:0}%";
-            Detail = snapshot.Error ?? (snapshot.LastFile.Length == 0 ? $"{snapshot.FilesDone}/{snapshot.FilesTotal} archivo(s)" : snapshot.LastFile);
-            Speed = paused
-                ? "0.0 B/s"
-                : snapshot.Phase == DestinationPhase.Verifying
-                    ? "—"
-                    : Throughput.Format(snapshot.RecentBytesPerSecond);
-        }
-
-        private void Set<T>(ref T field, T value, [CallerMemberName] string? property = null)
-        {
-            if (EqualityComparer<T>.Default.Equals(field, value)) return;
-            field = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
-        }
-    }
 }
-
