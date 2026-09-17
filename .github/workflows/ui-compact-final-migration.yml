@@ -31,21 +31,26 @@ jobs:
       - name: Align legacy architecture contracts
         shell: pwsh
         run: |
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
           $sourceTests = 'dotnet/RepartoCopier.Core.Tests/DirectIoSourceReaderTests.cs'
           $text = Get-Content $sourceTests -Raw
           $text = $text.Replace('Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));', 'Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, alignment));')
-          Set-Content -Path $sourceTests -Value $text -Encoding utf8NoBOM
+          $text = $text.TrimEnd("`r", "`n") + "`n"
+          [System.IO.File]::WriteAllText((Resolve-Path $sourceTests), $text, $utf8NoBom)
 
           $perfTests = 'dotnet/RepartoCopier.Core.Tests/PerformanceFreedomArchitectureTests.cs'
           $text = Get-Content $perfTests -Raw
           $text = $text.Replace('public void DirectWriteEligibilityHasNoArtificialSizeFloor()', 'public void DirectWriteEligibilityUsesExtremeStyleSmallFileRule()')
           $text = $text.Replace('Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));', 'Assert.IsFalse(DirectIoDestinationWriter.IsEligible(device, 1));')
-          Set-Content -Path $perfTests -Value $text -Encoding utf8NoBOM
+          $text = $text.TrimEnd("`r", "`n") + "`n"
+          [System.IO.File]::WriteAllText((Resolve-Path $perfTests), $text, $utf8NoBom)
 
           $extremeTests = 'dotnet/RepartoCopier.Core.Tests/ExtremeStyleIoArchitectureTests.cs'
           $text = Get-Content $extremeTests -Raw
           $text = $text.Replace('Assert.IsFalse(engine.Contains("FileOptions.Asynchronous | FileOptions.SequentialScan", StringComparison.Ordinal));', 'Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));')
-          Set-Content -Path $extremeTests -Value $text -Encoding utf8NoBOM
+          $text = $text.TrimEnd("`r", "`n") + "`n"
+          [System.IO.File]::WriteAllText((Resolve-Path $extremeTests), $text, $utf8NoBom)
       - name: Architecture guards
         shell: pwsh
         run: |
