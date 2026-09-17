@@ -1,0 +1,62 @@
+name: Final compact WinUI migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ui_compact_final_migration.py'
+      - '.github/workflows/ui-compact-final-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: final-compact-ui-main
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Apply migration
+        run: python tools/ui_compact_final_migration.py
+      - name: UI architecture guards
+        shell: pwsh
+        run: |
+          $xaml = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml -Raw
+          $code = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
+          if ($xaml.Contains('VerifyCheck') -or $code.Contains('VerifyCheck')) { throw 'Verification toggle still exposed.' }
+          if (-not $code.Contains('Verify: true')) { throw 'Verification is not permanently enabled.' }
+          if (-not $xaml.Contains('Width="86" Height="34" Padding="5,0,3,0"')) { throw 'Dense destination chip missing.' }
+          if (-not $xaml.Contains('Width="20" Height="20" Padding="0"')) { throw 'Dense remove affordance missing.' }
+          if (-not $code.Contains('SizeInt32(740, 340)')) { throw 'Maximum compact window size missing.' }
+          git diff --check
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+      - name: Publish self-contained x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+      - name: Commit product and remove migration scaffolding
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f tools/ui_compact_final_migration.py .github/workflows/ui-compact-final-migration.yml
+          git clean -fd artifact
+          git add -A
+          git diff --cached --check
+          git commit -m 'ui: maximize compact WinUI destination layout'
+          git push origin HEAD:main
