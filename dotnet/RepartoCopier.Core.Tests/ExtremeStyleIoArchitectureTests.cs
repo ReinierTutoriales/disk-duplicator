@@ -58,6 +58,15 @@ public sealed class ExtremeStyleIoArchitectureTests
     }
 
     [TestMethod]
+    public void DirectDestinationEligibilityKeepsExtremeStyleSmallFileRule()
+    {
+        var root = FindRepositoryRoot();
+        var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
+        Assert.IsTrue(direct.Contains("fileSize >= 64L * 1024 || fileSize % alignment == 0", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public void RecoverableIoHasNoFixedThreeFailureCutoffAndVerifyRetryIsIterative()
     {
         var root = FindRepositoryRoot();
@@ -67,6 +76,14 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsFalse(engine.Contains("RecordTransientFailure", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("DelayTransientRetryAsync", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("return await ReadVerifyTargetAsync", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void TemporaryMigrationScaffoldingIsAbsentFromFinalTree()
+    {
+        var root = FindRepositoryRoot();
+        Assert.IsFalse(File.Exists(Path.Combine(root, "tools", "ui_compact_final_migration.py")));
+        Assert.IsFalse(File.Exists(Path.Combine(root, ".github", "workflows", "ui-compact-final-migration.yml")));
     }
 
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
