@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using System.Threading;
 
 namespace RepartoCopier.Core;
 
@@ -22,72 +22,41 @@ public sealed record DeviceIoSnapshot(
     long PeakQueuedBytes,
     DeviceIdentityConfidence IdentityConfidence = DeviceIdentityConfidence.Unknown)
 {
-    public double BacklogPressure => BacklogTargetBytes <= 0
-        ? 0
-        : Math.Max(0, (double)QueuedBytes / BacklogTargetBytes);
+    public double BacklogPressure => BacklogTargetBytes <= 0 ? 0 : Math.Max(0, (double)QueuedBytes / BacklogTargetBytes);
 }
 
 /// <summary>
-/// Adaptive physical-I/O scheduler shared by every destination on the same
-/// physical device. Hardware profiles choose only the starting queue depth.
-/// Sustained demand causes multiplicative exploration; measured aggregate
-/// throughput and latency decide whether the explored depth is retained or the
-/// scheduler returns to the best observed operating point.
+/// Fixed one-I/O gate per physical device. There is deliberately no queue-depth
+/// exploration, throughput probing, multiplicative growth, or latency tuning.
+/// This mirrors ExtremeCopy's stable synchronous destination model while the
+/// shared 256 MiB FAN-OUT pool provides the buffering/backpressure window.
 /// </summary>
 internal sealed class DeviceScheduler : IDisposable
 {
-    private readonly object _ioGate = new();
-    private readonly Queue<IoWaiter> _ioWaiters = new();
+    private readonly object _gate = new();
+    private readonly Queue<IoWaiter> _waiters = new();
     private readonly object _backlogGate = new();
-    private readonly int _initialQueueDepth;
-
-    private int _currentQueueDepth;
-    private int _minimumObservedQueueDepth;
-    private int _maximumObservedQueueDepth;
-    private int _bestObservedQueueDepth;
-    private int _queueDepthUpshifts;
-    private int _queueDepthDownshifts;
-    private string _lastQueueDepthDecision = "initial";
     private int _outstandingIo;
     private int _peakOutstandingIo;
-
-    private long _sampleStartedTimestamp;
-    private long _sampleBytes;
-    private long _sampleLatencyStopwatchTicks;
-    private int _sampleCompletions;
-    private int _samplePeakObservedConcurrency;
-    private bool _sampleSawDemand;
-    private double _bestThroughputBytesPerSecond;
-    private double _bestAverageLatencySeconds = double.PositiveInfinity;
-
+    private int _transientFailuresSinceSuccess;
     private long _queuedBytes;
     private long _peakQueuedBytes;
     private bool _disposed;
 
-    internal DeviceScheduler(
-        string deviceId,
-        int initialQueueDepth,
-        long backlogTargetBytes,
-        DeviceIdentityConfidence identityConfidence = DeviceIdentityConfidence.Unknown)
+    internal DeviceScheduler(string deviceId, int initialQueueDepth, long backlogTargetBytes, DeviceIdentityConfidence identityConfidence = DeviceIdentityConfidence.Unknown)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialQueueDepth);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(backlogTargetBytes);
-
         DeviceId = deviceId;
-        _initialQueueDepth = initialQueueDepth;
-        _currentQueueDepth = initialQueueDepth;
-        _minimumObservedQueueDepth = initialQueueDepth;
-        _maximumObservedQueueDepth = initialQueueDepth;
-        _bestObservedQueueDepth = initialQueueDepth;
         BacklogTargetBytes = backlogTargetBytes;
         IdentityConfidence = identityConfidence;
     }
 
     public string DeviceId { get; }
-    public int InitialQueueDepth => _initialQueueDepth;
-    public int CurrentQueueDepth => Volatile.Read(ref _currentQueueDepth);
-    public int ExplorationQueueDepth => NextExplorationDepth(CurrentQueueDepth);
+    public int InitialQueueDepth => 1;
+    public int CurrentQueueDepth => 1;
+    public int ExplorationQueueDepth => 1;
     public long BacklogTargetBytes { get; }
     public DeviceIdentityConfidence IdentityConfidence { get; }
     public int OutstandingIo => Volatile.Read(ref _outstandingIo);
@@ -95,46 +64,22 @@ internal sealed class DeviceScheduler : IDisposable
     public long QueuedBytes => Interlocked.Read(ref _queuedBytes);
     public long PeakQueuedBytes => Interlocked.Read(ref _peakQueuedBytes);
 
-    public DeviceIoSnapshot Snapshot()
-    {
-        lock (_ioGate)
-        {
-            return new DeviceIoSnapshot(
-                DeviceId,
-                _initialQueueDepth,
-                _currentQueueDepth,
-                NextExplorationDepth(_currentQueueDepth),
-                _outstandingIo,
-                _peakOutstandingIo,
-                _minimumObservedQueueDepth,
-                _maximumObservedQueueDepth,
-                _bestObservedQueueDepth,
-                _queueDepthUpshifts,
-                _queueDepthDownshifts,
-                _lastQueueDepthDecision,
-                _bestThroughputBytesPerSecond,
-                double.IsFinite(_bestAverageLatencySeconds) ? _bestAverageLatencySeconds * 1000.0 : 0.0,
-                BacklogTargetBytes,
-                QueuedBytes,
-                PeakQueuedBytes,
-                IdentityConfidence);
-        }
-    }
+    public DeviceIoSnapshot Snapshot() => new(
+        DeviceId, 1, 1, 1, OutstandingIo, PeakOutstandingIo,
+        1, 1, 1, 0, 0, "fixed:extreme-style", 0, 0,
+        BacklogTargetBytes, QueuedBytes, PeakQueuedBytes, IdentityConfidence);
 
     public ValueTask<IoLease> AcquireIoAsync(int bytes, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
         token.ThrowIfCancellationRequested();
-
-        lock (_ioGate)
+        lock (_gate)
         {
             ThrowIfDisposed();
-            if (_outstandingIo < _currentQueueDepth && _ioWaiters.Count == 0)
+            if (_outstandingIo == 0 && _waiters.Count == 0)
                 return ValueTask.FromResult(GrantLeaseLocked(bytes));
-
-            _sampleSawDemand = true;
             var waiter = new IoWaiter(bytes);
-            _ioWaiters.Enqueue(waiter);
+            _waiters.Enqueue(waiter);
             waiter.Cancellation = token.Register(static state =>
             {
                 var pair = ((DeviceScheduler Owner, IoWaiter Waiter, CancellationToken Token))state!;
@@ -146,26 +91,11 @@ internal sealed class DeviceScheduler : IDisposable
 
     internal bool RecordTransientFailure()
     {
-        lock (_ioGate)
+        lock (_gate)
         {
             ThrowIfDisposed();
-            var previous = _currentQueueDepth;
-            var bestKnown = Math.Max(1, Math.Min(_bestObservedQueueDepth, previous));
-            var next = bestKnown < previous ? bestKnown : Math.Max(1, previous / 2);
-
-            ResetSampleLocked();
-            if (next >= previous)
-            {
-                _lastQueueDepthDecision = "hold:transient-at-minimum";
-                return false;
-            }
-
-            _currentQueueDepth = next;
-            _queueDepthDownshifts++;
-            _lastQueueDepthDecision = "decrease:transient-failure";
-            if (next < _minimumObservedQueueDepth)
-                _minimumObservedQueueDepth = next;
-            return true;
+            _transientFailuresSinceSuccess++;
+            return _transientFailuresSinceSuccess <= 3;
         }
     }
 
@@ -175,7 +105,8 @@ internal sealed class DeviceScheduler : IDisposable
         lock (_backlogGate)
         {
             ThrowIfDisposed();
-            ReserveBacklogLocked(bytes);
+            var queued = Interlocked.Add(ref _queuedBytes, bytes);
+            UpdateMax(ref _peakQueuedBytes, queued);
         }
     }
 
@@ -185,216 +116,67 @@ internal sealed class DeviceScheduler : IDisposable
         lock (_backlogGate)
         {
             var remaining = Interlocked.Read(ref _queuedBytes) - bytes;
-            if (remaining < 0)
-                throw new InvalidOperationException("La cola física intentó liberar más bytes de los reservados.");
+            if (remaining < 0) throw new InvalidOperationException("La cola física intentó liberar más bytes de los reservados.");
             Interlocked.Exchange(ref _queuedBytes, remaining);
         }
     }
 
     private IoLease GrantLeaseLocked(int bytes)
     {
-        var outstanding = ++_outstandingIo;
-        if (outstanding > _peakOutstandingIo)
-            _peakOutstandingIo = outstanding;
-        return new IoLease(this, bytes, Stopwatch.GetTimestamp());
+        _outstandingIo = 1;
+        if (_peakOutstandingIo < 1) _peakOutstandingIo = 1;
+        return new IoLease(this, bytes);
     }
 
     private void CancelWaiter(IoWaiter waiter, CancellationToken token)
     {
-        lock (_ioGate)
+        lock (_gate)
         {
-            if (waiter.Granted || waiter.Cancelled)
-                return;
+            if (waiter.Granted || waiter.Cancelled) return;
             waiter.Cancelled = true;
             waiter.Completion.TrySetCanceled(token);
         }
     }
 
-    private void ReleaseIo(int bytes, long startedTimestamp)
+    private void ReleaseIo()
     {
-        List<(IoWaiter Waiter, IoLease Lease)>? ready = null;
-        lock (_ioGate)
+        IoWaiter? ready = null;
+        IoLease? lease = null;
+        lock (_gate)
         {
-            var outstanding = --_outstandingIo;
-            if (outstanding < 0)
+            if (_outstandingIo != 1) throw new InvalidOperationException("La contabilidad de I/O físico quedó inválida.");
+            _outstandingIo = 0;
+            _transientFailuresSinceSuccess = 0;
+            while (_waiters.Count > 0)
             {
-                ++_outstandingIo;
-                throw new InvalidOperationException("La contabilidad de I/O físico quedó negativa.");
+                var candidate = _waiters.Dequeue();
+                if (candidate.Cancelled)
+                {
+                    candidate.Cancellation.Dispose();
+                    continue;
+                }
+                candidate.Granted = true;
+                ready = candidate;
+                lease = GrantLeaseLocked(candidate.Bytes);
+                break;
             }
-
-            RecordCompletionLocked(bytes, startedTimestamp);
-            ready = PumpIoWaitersLocked();
         }
-
-        if (ready is null)
-            return;
-        foreach (var item in ready)
+        if (ready is not null)
         {
-            item.Waiter.Cancellation.Dispose();
-            item.Waiter.Completion.TrySetResult(item.Lease);
+            ready.Cancellation.Dispose();
+            ready.Completion.TrySetResult(lease!);
         }
-    }
-
-    private List<(IoWaiter Waiter, IoLease Lease)>? PumpIoWaitersLocked()
-    {
-        List<(IoWaiter, IoLease)>? ready = null;
-        while (_outstandingIo < _currentQueueDepth && _ioWaiters.Count > 0)
-        {
-            var waiter = _ioWaiters.Dequeue();
-            if (waiter.Cancelled)
-            {
-                waiter.Cancellation.Dispose();
-                continue;
-            }
-
-            waiter.Granted = true;
-            (ready ??= []).Add((waiter, GrantLeaseLocked(waiter.Bytes)));
-        }
-        return ready;
-    }
-
-    private void RecordCompletionLocked(int bytes, long startedTimestamp)
-    {
-        var now = Stopwatch.GetTimestamp();
-        if (_sampleStartedTimestamp == 0 || startedTimestamp < _sampleStartedTimestamp)
-            _sampleStartedTimestamp = startedTimestamp;
-        _sampleBytes = checked(_sampleBytes + bytes);
-        _sampleLatencyStopwatchTicks = checked(_sampleLatencyStopwatchTicks + Math.Max(1, now - startedTimestamp));
-        _sampleCompletions++;
-        // One completed operation plus the operations that are still outstanding
-        // describe the concurrency this sample actually exercised. Requiring one
-        // observed wave gives throughput/latency feedback without delaying QD
-        // exploration behind an arbitrary completion-count floor or ceiling.
-        _samplePeakObservedConcurrency = Math.Max(
-            _samplePeakObservedConcurrency,
-            checked(_outstandingIo + 1));
-        if (_ioWaiters.Count > 0 || _outstandingIo >= _currentQueueDepth)
-            _sampleSawDemand = true;
-
-        var observedWaveCompletions = Math.Max(1, _samplePeakObservedConcurrency);
-        if (_sampleCompletions < observedWaveCompletions)
-            return;
-
-        var elapsedTicks = Math.Max(1, now - _sampleStartedTimestamp);
-        var throughput = _sampleBytes * (double)Stopwatch.Frequency / elapsedTicks;
-        var averageLatency = _sampleLatencyStopwatchTicks /
-            ((double)Stopwatch.Frequency * Math.Max(1, _sampleCompletions));
-        var sawDemand = _sampleSawDemand;
-        ResetSampleLocked();
-
-        if (!sawDemand)
-        {
-            _lastQueueDepthDecision = "hold:no-demand";
-            return;
-        }
-
-        if (_bestThroughputBytesPerSecond <= 0)
-        {
-            ObserveBestLocked(throughput, averageLatency);
-            UpshiftLocked("increase:baseline-demand");
-            return;
-        }
-
-        if (_currentQueueDepth > _bestObservedQueueDepth)
-        {
-            var throughputRatio = throughput / _bestThroughputBytesPerSecond;
-            var latencyRatio = averageLatency / Math.Max(double.Epsilon, _bestAverageLatencySeconds);
-
-            if (throughputRatio >= 1.01 || (throughputRatio >= 0.995 && latencyRatio <= 1.10))
-            {
-                ObserveBestLocked(throughput, averageLatency);
-                UpshiftLocked("increase:throughput");
-                return;
-            }
-
-            if (throughputRatio < 0.97 || latencyRatio > 1.35)
-            {
-                DownshiftToBestLocked("decrease:regression");
-                return;
-            }
-
-            // Ambiguous but competitive result: keep exploring rather than
-            // freezing at a conservative hardware-class number.
-            ObserveBestLocked(Math.Max(throughput, _bestThroughputBytesPerSecond),
-                Math.Min(averageLatency, _bestAverageLatencySeconds));
-            UpshiftLocked("increase:competitive");
-            return;
-        }
-
-        if (throughput >= _bestThroughputBytesPerSecond * 0.995)
-            ObserveBestLocked(Math.Max(throughput, _bestThroughputBytesPerSecond),
-                Math.Min(averageLatency, _bestAverageLatencySeconds));
-        UpshiftLocked("increase:demand");
-    }
-
-    private void ObserveBestLocked(double throughput, double averageLatency)
-    {
-        _bestObservedQueueDepth = _currentQueueDepth;
-        _bestThroughputBytesPerSecond = throughput;
-        _bestAverageLatencySeconds = averageLatency;
-    }
-
-    private void UpshiftLocked(string reason)
-    {
-        var next = NextExplorationDepth(_currentQueueDepth);
-        if (next <= _currentQueueDepth)
-        {
-            _lastQueueDepthDecision = "hold:integer-limit";
-            return;
-        }
-        _currentQueueDepth = next;
-        _queueDepthUpshifts++;
-        _lastQueueDepthDecision = reason;
-        if (next > _maximumObservedQueueDepth)
-            _maximumObservedQueueDepth = next;
-    }
-
-    private void DownshiftToBestLocked(string reason)
-    {
-        var next = Math.Max(1, _bestObservedQueueDepth);
-        if (next >= _currentQueueDepth)
-        {
-            _lastQueueDepthDecision = "hold:best-current";
-            return;
-        }
-        _currentQueueDepth = next;
-        _queueDepthDownshifts++;
-        _lastQueueDepthDecision = reason;
-        if (next < _minimumObservedQueueDepth)
-            _minimumObservedQueueDepth = next;
-    }
-
-    private void ResetSampleLocked()
-    {
-        _sampleStartedTimestamp = 0;
-        _sampleBytes = 0;
-        _sampleLatencyStopwatchTicks = 0;
-        _sampleCompletions = 0;
-        _samplePeakObservedConcurrency = 0;
-        _sampleSawDemand = false;
-    }
-
-    private static int NextExplorationDepth(int current) =>
-        current >= int.MaxValue / 2 ? int.MaxValue : Math.Max(current + 1, current * 2);
-
-    private void ReserveBacklogLocked(int bytes)
-    {
-        var queued = Interlocked.Add(ref _queuedBytes, bytes);
-        UpdateMax(ref _peakQueuedBytes, queued);
     }
 
     public void Dispose()
     {
         List<IoWaiter>? cancelled = null;
-        lock (_ioGate)
+        lock (_gate)
         {
-            if (_disposed)
-                return;
+            if (_disposed) return;
             _disposed = true;
-            while (_ioWaiters.Count > 0)
-                (cancelled ??= []).Add(_ioWaiters.Dequeue());
+            while (_waiters.Count > 0) (cancelled ??= []).Add(_waiters.Dequeue());
         }
-
         if (cancelled is not null)
         {
             foreach (var waiter in cancelled)
@@ -414,8 +196,7 @@ internal sealed class DeviceScheduler : IDisposable
         while (value > current)
         {
             var observed = Interlocked.CompareExchange(ref target, value, current);
-            if (observed == current)
-                return;
+            if (observed == current) return;
             current = observed;
         }
     }
@@ -423,8 +204,7 @@ internal sealed class DeviceScheduler : IDisposable
     private sealed class IoWaiter(int bytes)
     {
         public int Bytes { get; } = bytes;
-        public TaskCompletionSource<IoLease> Completion { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<IoLease> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationTokenRegistration Cancellation { get; set; }
         public bool Granted { get; set; }
         public bool Cancelled { get; set; }
@@ -433,31 +213,15 @@ internal sealed class DeviceScheduler : IDisposable
     internal sealed class IoLease : IDisposable
     {
         private DeviceScheduler? _owner;
-        private readonly int _bytes;
-        private readonly long _startedTimestamp;
-
-        internal IoLease(DeviceScheduler owner, int bytes, long startedTimestamp)
-        {
-            _owner = owner;
-            _bytes = bytes;
-            _startedTimestamp = startedTimestamp;
-        }
-
-        public void Dispose()
-        {
-            var owner = Interlocked.Exchange(ref _owner, null);
-            owner?.ReleaseIo(_bytes, _startedTimestamp);
-        }
+        internal IoLease(DeviceScheduler owner, int bytes) { _owner = owner; }
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseIo();
     }
 }
 
 internal sealed class DeviceSchedulerMap : IDisposable
 {
     private readonly Dictionary<string, DeviceScheduler> _schedulers;
-
-    private DeviceSchedulerMap(
-        Dictionary<string, DeviceScheduler> schedulers,
-        DeviceScheduler? sharedSourceScheduler)
+    private DeviceSchedulerMap(Dictionary<string, DeviceScheduler> schedulers, DeviceScheduler? sharedSourceScheduler)
     {
         _schedulers = schedulers;
         SharedSourceScheduler = sharedSourceScheduler;
@@ -465,59 +229,33 @@ internal sealed class DeviceSchedulerMap : IDisposable
 
     public IReadOnlyCollection<DeviceScheduler> Schedulers => _schedulers.Values;
     public DeviceScheduler? SharedSourceScheduler { get; }
+    public IReadOnlyList<DeviceIoSnapshot> Snapshot() => _schedulers.Values.Select(item => item.Snapshot()).OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase).ToArray();
+    public DeviceScheduler For(StorageDeviceInfo device) => _schedulers.TryGetValue(device.PhysicalDeviceId, out var scheduler) ? scheduler : throw new KeyNotFoundException($"No existe scheduler para {device.PhysicalDeviceId}.");
 
-    public IReadOnlyList<DeviceIoSnapshot> Snapshot() =>
-        _schedulers.Values
-            .Select(item => item.Snapshot())
-            .OrderBy(item => item.DeviceId, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-    public DeviceScheduler For(StorageDeviceInfo device) =>
-        _schedulers.TryGetValue(device.PhysicalDeviceId, out var scheduler)
-            ? scheduler
-            : throw new KeyNotFoundException($"No existe scheduler para {device.PhysicalDeviceId}.");
-
-    public static DeviceSchedulerMap Create(
-        StorageDeviceInfo? source,
-        IEnumerable<StorageDeviceInfo> destinations)
+    public static DeviceSchedulerMap Create(StorageDeviceInfo? source, IEnumerable<StorageDeviceInfo> destinations)
     {
         ArgumentNullException.ThrowIfNull(destinations);
-        var destinationArray = destinations.ToArray();
-        var groups = destinationArray.GroupBy(item => item.PhysicalDeviceId, StringComparer.OrdinalIgnoreCase);
+        var groups = destinations.ToArray().GroupBy(item => item.PhysicalDeviceId, StringComparer.OrdinalIgnoreCase);
         var schedulers = new Dictionary<string, DeviceScheduler>(StringComparer.OrdinalIgnoreCase);
         DeviceScheduler? sharedSourceScheduler = null;
-
         foreach (var group in groups)
         {
-            var materializedGroup = group.ToArray();
-            var profiles = materializedGroup.Select(StorageIoProfile.For).ToArray();
-            var initialDepth = profiles.Min(profile => profile.InitialQueueDepth);
+            var devices = group.ToArray();
+            var profiles = devices.Select(StorageIoProfile.For).ToArray();
             var backlogTarget = profiles.Min(profile => profile.DeviceBacklogTargetBytes);
-            var confidence = (DeviceIdentityConfidence)materializedGroup
-                .Min(item => (int)StorageDeviceIdentity.ConfidenceFor(item));
-
-            // Sharing source/destination on one physical disk starts cautiously
-            // to avoid immediate seek thrash, but it is not a permanent QD1 cap.
-            var sharesSource = source is not null && SharesPhysicalDevice(source, materializedGroup[0]);
-            if (sharesSource)
-                initialDepth = 1;
-
-            var scheduler = new DeviceScheduler(group.Key, initialDepth, backlogTarget, confidence);
+            var confidence = (DeviceIdentityConfidence)devices.Min(item => (int)StorageDeviceIdentity.ConfidenceFor(item));
+            var scheduler = new DeviceScheduler(group.Key, 1, backlogTarget, confidence);
             schedulers.Add(group.Key, scheduler);
-            if (sharesSource)
-                sharedSourceScheduler = scheduler;
+            if (source is not null && SharesPhysicalDevice(source, devices[0])) sharedSourceScheduler = scheduler;
         }
-
         return new DeviceSchedulerMap(schedulers, sharedSourceScheduler);
     }
 
-    internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) =>
-        StorageDeviceIdentity.SamePhysicalDevice(left, right);
+    internal static bool SharesPhysicalDevice(StorageDeviceInfo left, StorageDeviceInfo right) => StorageDeviceIdentity.SamePhysicalDevice(left, right);
 
     public void Dispose()
     {
-        foreach (var scheduler in _schedulers.Values)
-            scheduler.Dispose();
+        foreach (var scheduler in _schedulers.Values) scheduler.Dispose();
         _schedulers.Clear();
     }
 }

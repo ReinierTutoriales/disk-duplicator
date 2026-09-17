@@ -6,64 +6,38 @@ namespace RepartoCopier.Core.Tests;
 public sealed class WinUiCompactProgressContractTests
 {
     [TestMethod]
-    public void RunningViewUsesOnlyOverallJobProgress()
+    public void RunningViewUsesOneThickOverallProgressBarAndNoPerDiskRows()
     {
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(xaml.Contains("OverallProgressBar", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("x:Name=\"OverallProgressBar\" Height=\"10\" MinHeight=\"10\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("x:Key=\"ProgressBarTrackHeight\">10", StringComparison.Ordinal));
         Assert.IsFalse(xaml.Contains("ProgressList", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("_progressRows", StringComparison.Ordinal));
     }
 
     [TestMethod]
-    public void PreparationViewIsCompactAndDestinationsAreHorizontal()
+    public void WindowUsesOfficialCompactDensityAndNativeTitleBar()
     {
         var root = FindRepositoryRoot();
+        var app = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "App.xaml"));
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(code.Contains("SizeInt32(800, 460)", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("MaxWidth", StringComparison.Ordinal) && xaml.Contains("780", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("DestinationList", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("ItemsStackPanel Orientation", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("HorizontalScrollMode", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Header=\"Opciones\"", StringComparison.Ordinal));
+        Assert.IsTrue(app.Contains("Microsoft.UI.Xaml/DensityStyles/Compact.xaml", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("<TitleBar x:Name=\"AppTitleBar\"", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("SizeInt32(760, 400)", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("VerticalAlignment=\"Top\" Margin=\"0,10,0,0\"", StringComparison.Ordinal));
     }
 
     [TestMethod]
-    public void WindowUsesWindows11MicaLayeringAndInactiveTitleState()
-    {
-        var root = FindRepositoryRoot();
-        var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
-        var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(xaml.Contains("LayerFillColorDefaultBrush", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("ExtendsContentIntoTitleBar = true", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("SetTitleBar(AppTitleBar)", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("SystemBackdrop = new MicaBackdrop()", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("Activated += MainWindow_Activated", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("WindowActivationState.Deactivated", StringComparison.Ordinal));
-    }
-
-    [TestMethod]
-    public void VerifyShowsRealSourceEquivalentSpeedAndEta()
+    public void CopySpeedUsesTheSameLogicalCompletionProgressAsTheBar()
     {
         var root = FindRepositoryRoot();
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        var telemetry = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyTelemetry.cs"));
-        Assert.IsTrue(code.Contains("diagnostics.VerifyLogical5sBytesPerSecond", StringComparison.Ordinal));
-        Assert.IsTrue(telemetry.Contains("VerifyLogical5sBytesPerSecond", StringComparison.Ordinal));
-        Assert.IsTrue(telemetry.Contains("_verifyLogicalRate", StringComparison.Ordinal));
-    }
-
-    [TestMethod]
-    public void OverallProgressUsesLogicalJobBytesNotAggregateDestinationBytes()
-    {
-        var root = FindRepositoryRoot();
-        var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(code.Contains("snapshots.Select(item => item.Total).DefaultIfEmpty(0UL).Max()", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("_copyProgressRate.Observe(written)", StringComparison.Ordinal));
+        Assert.IsFalse(code.Contains("diagnostics.SourceRead5sBytesPerSecond", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("active.Min(item => item.Written)", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max()", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("verifyActive.Min(item => item.VerifiedBytes)", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
