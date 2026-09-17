@@ -26,13 +26,15 @@ public sealed class IoRecoveryArchitectureTests
     }
 
     [TestMethod]
-    public void TransientFailuresConvergeNaturallyToQueueDepthOne()
+    public void TransientFailuresNeverIncreaseOrDecreaseFixedQueueDepthOne()
     {
         using var scheduler = new DeviceScheduler("synthetic", 8, 64L * 1024 * 1024);
+
+        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
         Assert.IsTrue(scheduler.RecordTransientFailure());
-        Assert.AreEqual(4, scheduler.CurrentQueueDepth);
+        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
         Assert.IsTrue(scheduler.RecordTransientFailure());
-        Assert.AreEqual(2, scheduler.CurrentQueueDepth);
+        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
         Assert.IsTrue(scheduler.RecordTransientFailure());
         Assert.AreEqual(1, scheduler.CurrentQueueDepth);
         Assert.IsFalse(scheduler.RecordTransientFailure());
@@ -43,16 +45,14 @@ public sealed class IoRecoveryArchitectureTests
     public void DiagnosticsExposeRecoveryContext()
     {
         var telemetry = new CopyTelemetry();
-        telemetry.RecordIoRecovery("verify-read", @"D:\x.bin", "direct", 121, 16, 1, 4096, false);
+        telemetry.RecordIoRecovery("verify-read", @"D:\x.bin", "direct", 121, 1, 1, 4096, false);
         var item = telemetry.Snapshot().RecentIoRecoveryEvents.Single();
         Assert.AreEqual("verify-read", item.Phase);
         Assert.AreEqual("direct", item.Mode);
         Assert.AreEqual(121, item.NativeErrorCode);
-        Assert.AreEqual(16, item.QueueDepth);
+        Assert.AreEqual(1, item.QueueDepth);
         Assert.AreEqual(1, item.RetryCount);
         Assert.AreEqual(4096L, item.Offset);
         Assert.IsFalse(item.Recovered);
     }
-
 }
-
