@@ -16,7 +16,7 @@ public sealed partial class MainWindow : Window
     private const string LicenseUrl = "https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE";
 
     private readonly ObservableCollection<DestinationRow> _destinations = [];
-    private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
+    private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private CopyJob? _job;
     private DateTimeOffset? _copyStartedAt;
     private readonly LogicalProgressRate _copyProgressRate = new();
@@ -27,7 +27,7 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(740, 340));
+        AppWindow.Resize(new SizeInt32(720, 320));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();

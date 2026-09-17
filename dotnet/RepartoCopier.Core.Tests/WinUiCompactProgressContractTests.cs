@@ -26,8 +26,8 @@ public sealed class WinUiCompactProgressContractTests
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
         Assert.IsTrue(app.Contains("Microsoft.UI.Xaml/DensityStyles/Compact.xaml", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("<TitleBar x:Name=\"AppTitleBar\"", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("SizeInt32(740, 340)", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("VerticalAlignment=\"Top\" Margin=\"0,6,0,0\"", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("SizeInt32(720, 320)", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("VerticalAlignment=\"Top\" Margin=\"0,4,0,0\"", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -46,12 +46,14 @@ public sealed class WinUiCompactProgressContractTests
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(xaml.Contains("Width=\"86\" Height=\"34\" Padding=\"5,0,3,0\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Width=\"20\" Height=\"20\" Padding=\"0\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Margin\" Value=\"0,0,3,0\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("MinWidth=\"56\" MaxWidth=\"148\" Height=\"30\" Padding=\"5,0,2,0\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("Width=\"18\" Height=\"18\" Padding=\"0\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("Margin\" Value=\"0,0,2,0\"", StringComparison.Ordinal));
         Assert.IsFalse(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("VerifyCheck", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("Verify: true", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("Interval = TimeSpan.FromMilliseconds(250)", StringComparison.Ordinal));
+        Assert.IsFalse(xaml.Contains("Width=\"86\"", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
