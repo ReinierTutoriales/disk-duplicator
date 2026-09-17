@@ -40,16 +40,25 @@ jobs:
           $ui = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
           $sched = Get-Content dotnet/RepartoCopier.Core/DeviceScheduler.cs -Raw
           $profiles = Get-Content dotnet/RepartoCopier.Core/StorageIoProfile.cs -Raw
+          $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
           if (-not $app.Contains('Microsoft.UI.Xaml/DensityStyles/Compact.xaml')) { throw 'Official WinUI compact density missing.' }
           if (-not $xaml.Contains('<TitleBar x:Name="AppTitleBar"')) { throw 'Windows App SDK TitleBar control missing.' }
           if (-not $xaml.Contains('ProgressBarTrackHeight">10')) { throw 'Thick progress track missing.' }
-          if (-not $xaml.Contains('VerticalAlignment="Top" Margin="0,14,0,0"')) { throw 'Running surface still wastes vertical space.' }
+          if (-not $xaml.Contains('VerticalAlignment="Top" Margin="0,10,0,0"')) { throw 'Running surface still wastes vertical space.' }
           if (-not $ui.Contains('SizeInt32(760, 400)')) { throw 'Compact window size missing.' }
           if (-not $ui.Contains('_copyProgressRate.Observe(written)')) { throw 'Logical copy-rate estimator missing.' }
           if ($ui.Contains('diagnostics.SourceRead5sBytesPerSecond')) { throw 'UI still mixes source rate with destination completion.' }
-          if (-not $sched.Contains('_maximumQueueDepth')) { throw 'QD ceiling missing.' }
-          if (-not $profiles.Contains('MaximumQueueDepth')) { throw 'Device profile QD ceiling missing.' }
-          if (-not $profiles.Contains('StorageProfileKind.SataSsd, 8, SataSsdBacklog, 8')) { throw 'SATA profile is not bounded.' }
+          foreach ($retired in @('UpshiftLocked','DownshiftToBestLocked','_bestThroughputBytesPerSecond','_samplePeakObservedConcurrency','increase:baseline-demand')) {
+            if ($sched.Contains($retired)) { throw "Adaptive QD complexity remains: $retired" }
+          }
+          if (-not $sched.Contains('public int CurrentQueueDepth => 1;')) { throw 'Physical I/O is not fixed at QD1.' }
+          if (-not $sched.Contains('public int ExplorationQueueDepth => 1;')) { throw 'Exploration QD was not removed.' }
+          if (-not $sched.Contains('fixed:extreme-style')) { throw 'Extreme-style scheduler contract missing.' }
+          if ($profiles -match 'SataSsd,\s*(?:[2-9]|[1-9][0-9]+),') { throw 'SATA still requests concurrent physical writes.' }
+          if ($profiles -match 'UsbSsd,\s*(?:[2-9]|[1-9][0-9]+),') { throw 'USB still requests concurrent physical writes.' }
+          if ($profiles -match 'Nvme,\s*(?:[2-9]|[1-9][0-9]+),') { throw 'NVMe profile escaped fixed-flow architecture.' }
+          if (-not $engine.Contains('SharedFanoutPoolBytes = 256L * 1024 * 1024')) { throw '256 MiB shared pool changed unexpectedly.' }
+          if (-not $engine.Contains('worker.Channel.Writer.TryWrite(message)')) { throw 'Shared FAN-OUT delivery changed unexpectedly.' }
           git diff --check
 
       - name: Restore core tests
@@ -76,5 +85,5 @@ jobs:
           git clean -fd artifact
           git add -A
           git diff --cached --check
-          git commit -m 'ui: adopt native compact WinUI shell and stabilize copy throughput'
+          git commit -m 'perf: simplify copy I/O to Extreme-style fixed flow'
           git push origin HEAD:main
