@@ -2,14 +2,18 @@
 
 ## Unreleased — main
 
-- Hot path FAN-OUT reconstruido sobre un pool compartido con refcount: una lectura del origen, el mismo bloque para todos los destinos y una única cola ligera por writer.
-- Eliminados ReplayStore, placement de replay, aislamiento por copia privada, staging por rama, PipelineGovernor y AdaptiveTransferSizer del camino productivo.
-- Backpressure simplificado: cuando el pool compartido se llena, el lector espera a que los writers liberen referencias; no se escribe I/O temporal adicional.
-- Verificación rediseñada como lectura coordinada de todos los destinos contra los CRC32C obtenidos durante la copia; no vuelve a leer el origen y no crea pipelines QD independientes por destino.
-- Velocidad global de la UI representa ahora la tasa física de lectura del origen en ventana de 5 s, no la suma lógica de escrituras de destinos.
-- Se conservan Direct I/O seguro, recuperación transitoria, atomic commit, recovery, SkipSame, cancelación y telemetría.
-- Contratos y pruebas de arquitectura antiguos eliminados junto con sus implementaciones sin consumidor.
+## v2.1.1 — 2026-09-16
 
+- FAN-OUT productivo simplificado al modelo compartido: una lectura del origen, bloques de 8 MiB con refcount y pool activo de 256 MiB para todos los destinos.
+- Eliminadas del camino productivo las capas de replay, staging por rama, aislamiento por copia privada y exploración adaptativa de queue depth.
+- Escritura por destino alineada con el enfoque estable de ExtremeCopy: una operación física en vuelo por dispositivo, `SEQUENTIAL_SCAN`, `NO_BUFFERING` cuando es elegible y fallback buffered seguro; la ruta de destino ya no usa `OVERLAPPED`.
+- Recuperación de I/O transitorio sin el corte arbitrario de tres fallos consecutivos, manteniendo cancelación y fallo inmediato para errores no transitorios.
+- Verificación streaming con workspace fijo de 8 MiB: relee origen y destinos completados por el mismo offset, compara CRC32C inmediatamente y no conserva historial CRC durante COPY.
+- Retry/fallback de verificación convertido a flujo iterativo para evitar crecimiento recursivo de pila.
+- Progreso, velocidad y ETA de COPY usan el mismo avance lógico del destino más atrasado; VERIFY expone velocidad lógica y ETA independientes.
+- WinUI compactada con Compact Density oficial, `TitleBar` nativo, Mica, barra global gruesa, destinos horizontales autoajustados y verificación siempre activa sin toggle visible.
+- Ventana principal reducida y árbol visual aligerado; refresco de telemetría limitado a 4 Hz para minimizar trabajo del UI thread durante las copias.
+- Producto C#/.NET-only validado en Core Release, WinUI Release x64 y publicación self-contained.
 ## v2.1.0 — 2026-09-15
 
 - FAN-OUT productivo unificado alrededor de `SharedBlock`, replay por rama lenta y tamaño de transferencia adaptativo; eliminadas capas intermedias sin consumidor productivo.
@@ -68,3 +72,4 @@ RepartoCopier 2.0.0 establece el nuevo baseline nativo de Windows en C#/.NET 10 
 - Build WinUI Release x64 con 0 warnings y 0 errores en el gate de integración.
 
 La versión histórica v1.4.3 permanece intacta y publicada como referencia de la generación anterior.
+
