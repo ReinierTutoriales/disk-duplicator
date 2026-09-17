@@ -38,7 +38,6 @@ internal sealed class DeviceScheduler : IDisposable
     private readonly object _backlogGate = new();
     private int _outstandingIo;
     private int _peakOutstandingIo;
-    private int _transientFailuresSinceSuccess;
     private long _queuedBytes;
     private long _peakQueuedBytes;
     private bool _disposed;
@@ -89,16 +88,6 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    internal bool RecordTransientFailure()
-    {
-        lock (_gate)
-        {
-            ThrowIfDisposed();
-            _transientFailuresSinceSuccess++;
-            return _transientFailuresSinceSuccess <= 3;
-        }
-    }
-
     public void ReserveBacklog(int bytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
@@ -146,7 +135,6 @@ internal sealed class DeviceScheduler : IDisposable
         {
             if (_outstandingIo != 1) throw new InvalidOperationException("La contabilidad de I/O físico quedó inválida.");
             _outstandingIo = 0;
-            _transientFailuresSinceSuccess = 0;
             while (_waiters.Count > 0)
             {
                 var candidate = _waiters.Dequeue();

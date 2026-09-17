@@ -37,7 +37,7 @@ public sealed class DirectIoSourceReaderTests
 
         Assert.AreEqual(alignment, DirectIoSourceReader.RequiredAlignment(device));
         Assert.IsTrue(DirectIoSourceReader.IsEligible(device, 2 * alignment));
-        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));
+        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, alignment));
         using var lease = SourceBufferLease.RentAligned(2 * alignment, alignment);
         Assert.IsTrue(lease.IsAlignedFor(alignment));
     }

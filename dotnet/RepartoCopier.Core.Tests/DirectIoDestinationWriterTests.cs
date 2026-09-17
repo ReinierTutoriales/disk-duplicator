@@ -7,7 +7,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class DirectIoDestinationWriterTests
 {
     [TestMethod]
-    public void LocalHddAndSsdAreEligibleWithoutFixedFileSizeFloor()
+    public void LocalHddAndSsdFollowExtremeStyleNoBufferingEligibility()
     {
         var hdd = Device("SATA", StorageMediaKind.Rotational);
         var ssd = Device("NVMe", StorageMediaKind.SolidState);
@@ -15,7 +15,7 @@ public sealed class DirectIoDestinationWriterTests
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(hdd, 64L * 1024 * 1024));
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 64L * 1024 * 1024));
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 4096));
-        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(ssd, 1));
+        Assert.IsFalse(DirectIoDestinationWriter.IsEligible(ssd, 1));
         Assert.IsFalse(DirectIoDestinationWriter.IsEligible(ssd, 0));
     }
 
@@ -54,7 +54,7 @@ public sealed class DirectIoDestinationWriterTests
                 FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.None,
-                FileOptions.Asynchronous);
+                FileOptions.SequentialScan);
             using var session = new DirectIoDestinationWriter.Session(handle, alignment);
             using var scheduler = new DeviceScheduler("PhysicalDiskTail", 8, 64L * 1024 * 1024);
 

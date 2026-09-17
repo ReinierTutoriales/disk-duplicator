@@ -42,6 +42,33 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsTrue(engine.Contains("worker.Channel.Writer.TryWrite(message)", StringComparison.Ordinal));
     }
 
+    [TestMethod]
+    public void DestinationPathUsesSynchronousSequentialWritesWithoutOverlapped()
+    {
+        var root = FindRepositoryRoot();
+        var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
+        var coordinator = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DestinationWriteCoordinator.cs"));
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("WriteFile(handle", StringComparison.Ordinal));
+        Assert.IsFalse(direct.Contains("FileFlagOverlapped", StringComparison.Ordinal));
+        Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
+        Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void RecoverableIoHasNoFixedThreeFailureCutoffAndVerifyRetryIsIterative()
+    {
+        var root = FindRepositoryRoot();
+        var scheduler = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DeviceScheduler.cs"));
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsFalse(scheduler.Contains("RecordTransientFailure", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("RecordTransientFailure", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("DelayTransientRetryAsync", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("return await ReadVerifyTargetAsync", StringComparison.Ordinal));
+    }
+
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
         new(@"E:\copy", @"E:\", 4, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, trim, 0);
 

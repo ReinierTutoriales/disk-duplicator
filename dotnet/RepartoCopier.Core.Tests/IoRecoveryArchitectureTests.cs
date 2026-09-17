@@ -26,19 +26,12 @@ public sealed class IoRecoveryArchitectureTests
     }
 
     [TestMethod]
-    public void TransientFailuresNeverIncreaseOrDecreaseFixedQueueDepthOne()
+    public void FixedSchedulerDoesNotOwnAnArbitraryRetryCutoff()
     {
-        using var scheduler = new DeviceScheduler("synthetic", 8, 64L * 1024 * 1024);
-
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.IsTrue(scheduler.RecordTransientFailure());
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.IsTrue(scheduler.RecordTransientFailure());
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.IsTrue(scheduler.RecordTransientFailure());
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.IsFalse(scheduler.RecordTransientFailure());
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
+        var root = FindRepositoryRoot();
+        var scheduler = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DeviceScheduler.cs"));
+        Assert.IsFalse(scheduler.Contains("RecordTransientFailure", StringComparison.Ordinal));
+        Assert.IsFalse(scheduler.Contains("_transientFailuresSinceSuccess", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -54,5 +47,16 @@ public sealed class IoRecoveryArchitectureTests
         Assert.AreEqual(1, item.RetryCount);
         Assert.AreEqual(4096L, item.Offset);
         Assert.IsFalse(item.Recovered);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "RepartoCopier.sln"))) return current.FullName;
+            current = current.Parent;
+        }
+        throw new AssertFailedException("No se encontró la raíz del repositorio.");
     }
 }

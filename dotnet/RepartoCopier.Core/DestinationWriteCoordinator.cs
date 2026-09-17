@@ -3,9 +3,8 @@ using Microsoft.Win32.SafeHandles;
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// Single production primitive for one logical destination block. Queue depth is
-/// supplied by independent in-flight blocks through DeviceScheduler; a sequential
-/// block is never fragmented merely to manufacture concurrency.
+/// One stable synchronous write per physical destination. Different physical
+/// destinations still run in parallel through their independent writer loops.
 /// </summary>
 internal static class DestinationWriteCoordinator
 {
@@ -19,15 +18,14 @@ internal static class DestinationWriteCoordinator
     {
         ArgumentNullException.ThrowIfNull(handle);
         ArgumentNullException.ThrowIfNull(scheduler);
-        if (data.IsEmpty)
-            return 0;
-        if (offset < 0)
-            throw new ArgumentOutOfRangeException(nameof(offset));
+        if (data.IsEmpty) return 0;
+        if (offset < 0) throw new ArgumentOutOfRangeException(nameof(offset));
         if (alignment <= 0 || offset % alignment != 0 || data.Length % alignment != 0)
             throw new ArgumentOutOfRangeException(nameof(alignment));
 
         using var lease = await scheduler.AcquireIoAsync(data.Length, token).ConfigureAwait(false);
-        await RandomAccess.WriteAsync(handle, data, offset, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        RandomAccess.Write(handle, data.Span, offset);
         return 1;
     }
 }
