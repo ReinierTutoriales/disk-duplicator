@@ -28,16 +28,47 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Apply migration
         run: python tools/ui_compact_final_migration.py
-      - name: UI architecture guards
+      - name: Align legacy architecture contracts
+        shell: pwsh
+        run: |
+          $sourceTests = 'dotnet/RepartoCopier.Core.Tests/DirectIoSourceReaderTests.cs'
+          $text = Get-Content $sourceTests -Raw
+          $text = $text.Replace('Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));', 'Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, alignment));')
+          Set-Content -Path $sourceTests -Value $text -Encoding utf8NoBOM
+
+          $perfTests = 'dotnet/RepartoCopier.Core.Tests/PerformanceFreedomArchitectureTests.cs'
+          $text = Get-Content $perfTests -Raw
+          $text = $text.Replace('public void DirectWriteEligibilityHasNoArtificialSizeFloor()', 'public void DirectWriteEligibilityUsesExtremeStyleSmallFileRule()')
+          $text = $text.Replace('Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));', 'Assert.IsFalse(DirectIoDestinationWriter.IsEligible(device, 1));')
+          Set-Content -Path $perfTests -Value $text -Encoding utf8NoBOM
+
+          $extremeTests = 'dotnet/RepartoCopier.Core.Tests/ExtremeStyleIoArchitectureTests.cs'
+          $text = Get-Content $extremeTests -Raw
+          $text = $text.Replace('Assert.IsFalse(engine.Contains("FileOptions.Asynchronous | FileOptions.SequentialScan", StringComparison.Ordinal));', 'Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));')
+          Set-Content -Path $extremeTests -Value $text -Encoding utf8NoBOM
+      - name: Architecture guards
         shell: pwsh
         run: |
           $xaml = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml -Raw
           $code = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
+          $direct = Get-Content dotnet/RepartoCopier.Core/DirectIoDestinationWriter.cs -Raw
+          $coord = Get-Content dotnet/RepartoCopier.Core/DestinationWriteCoordinator.cs -Raw
+          $scheduler = Get-Content dotnet/RepartoCopier.Core/DeviceScheduler.cs -Raw
+          $engine = Get-Content dotnet/RepartoCopier.Core/CopyEngine.cs -Raw
           if ($xaml.Contains('VerifyCheck') -or $code.Contains('VerifyCheck')) { throw 'Verification toggle still exposed.' }
           if (-not $code.Contains('Verify: true')) { throw 'Verification is not permanently enabled.' }
           if (-not $xaml.Contains('Width="86" Height="34" Padding="5,0,3,0"')) { throw 'Dense destination chip missing.' }
           if (-not $xaml.Contains('Width="20" Height="20" Padding="0"')) { throw 'Dense remove affordance missing.' }
           if (-not $code.Contains('SizeInt32(740, 340)')) { throw 'Maximum compact window size missing.' }
+          if ($direct.Contains('FileFlagOverlapped')) { throw 'Destination OVERLAPPED path survived.' }
+          if (-not $direct.Contains('FileFlagNoBuffering | FileFlagSequentialScan')) { throw 'Extreme-style direct flags missing.' }
+          if (-not $direct.Contains('WriteFile(handle')) { throw 'Synchronous WriteFile path missing.' }
+          if ($coord.Contains('RandomAccess.WriteAsync')) { throw 'Buffered destination write is still asynchronous.' }
+          if (-not $coord.Contains('RandomAccess.Write(handle')) { throw 'Synchronous buffered write missing.' }
+          if ($scheduler.Contains('RecordTransientFailure')) { throw 'Fixed retry cutoff survived in scheduler.' }
+          if ($engine.Contains('RecordTransientFailure')) { throw 'Fixed retry cutoff survived in engine.' }
+          if (-not $engine.Contains('DelayTransientRetryAsync')) { throw 'Recoverable retry delay missing.' }
+          if ($engine.Contains('return await ReadVerifyTargetAsync')) { throw 'Recursive verify retry survived.' }
           git diff --check
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
@@ -58,5 +89,5 @@ jobs:
           git clean -fd artifact
           git add -A
           git diff --cached --check
-          git commit -m 'ui: maximize compact WinUI destination layout'
+          git commit -m 'perf: finalize Extreme-style USB I/O and compact WinUI'
           git push origin HEAD:main
