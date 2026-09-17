@@ -7,138 +7,53 @@ namespace RepartoCopier.Core.Tests;
 public sealed class DeviceSchedulerTests
 {
     [TestMethod]
-    public void DestinationsOnSamePhysicalDiskShareOneAdaptiveScheduler()
+    public void DestinationsOnSamePhysicalDiskShareOneFixedScheduler()
     {
-        var source = Device(@"C:\source", 1, "NVMe", StorageMediaKind.SolidState, trim: true);
-        var first = Device(@"E:\copy", 4, "SATA", StorageMediaKind.SolidState, trim: true);
-        var second = Device(@"F:\copy", 4, "SATA", StorageMediaKind.SolidState, trim: true);
-
+        var source = Device(@"C:\source", 1, "NVMe", StorageMediaKind.SolidState, true);
+        var first = Device(@"E:\copy", 4, "SATA", StorageMediaKind.SolidState, true);
+        var second = Device(@"F:\copy", 4, "USB", StorageMediaKind.SolidState, true);
         using var map = DeviceSchedulerMap.Create(source, [first, second]);
-        var scheduler = map.For(first);
-
         Assert.HasCount(1, map.Schedulers);
-        Assert.AreSame(scheduler, map.For(second));
-        Assert.AreEqual(DeviceIdentityConfidence.Exact, scheduler.IdentityConfidence);
-        Assert.AreEqual(8, scheduler.InitialQueueDepth);
-        Assert.AreEqual(8, scheduler.CurrentQueueDepth);
-        Assert.AreEqual(16, scheduler.ExplorationQueueDepth);
-    }
-
-    [TestMethod]
-    public void PhysicalCollisionSharesOnlyTheCollidingDiskAndLeavesOtherHardwareIndependent()
-    {
-        var source = Device(@"C:\source", 1, "NVMe", StorageMediaKind.SolidState, trim: true);
-        var first = Device(@"E:\copy", 4, "SATA", StorageMediaKind.SolidState, trim: true);
-        var second = Device(@"F:\copy", 4, "USB", StorageMediaKind.SolidState, trim: true);
-        var independent = Device(@"G:\copy", 9, "NVMe", StorageMediaKind.SolidState, trim: true);
-
-        using var map = DeviceSchedulerMap.Create(source, [first, second, independent]);
-
-        Assert.HasCount(2, map.Schedulers);
         Assert.AreSame(map.For(first), map.For(second));
-        Assert.AreNotSame(map.For(first), map.For(independent));
-        Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(first).IdentityConfidence);
-        Assert.AreEqual(DeviceIdentityConfidence.Exact, map.For(independent).IdentityConfidence);
-        Assert.AreEqual(16, map.For(independent).InitialQueueDepth);
+        Assert.AreEqual(1, map.For(first).CurrentQueueDepth);
+        Assert.AreEqual(1, map.For(first).ExplorationQueueDepth);
     }
 
     [TestMethod]
-    public void SourceAndDestinationOnSameDiskStartAtOneButAreNotCappedThere()
+    public async Task SecondIoWaitsUntilFirstCompletes()
     {
-        var source = Device(@"C:\source", 4, "NVMe", StorageMediaKind.SolidState, trim: true);
-        var destination = Device(@"D:\copy", 4, "NVMe", StorageMediaKind.SolidState, trim: true);
-        using var map = DeviceSchedulerMap.Create(source, [destination]);
-        var scheduler = map.For(destination);
-
-        Assert.AreEqual(1, scheduler.InitialQueueDepth);
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.AreEqual(2, scheduler.ExplorationQueueDepth);
-    }
-
-    [TestMethod]
-    public async Task QdOneDemandUpshiftsAfterOneObservedConcurrencyWave()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDiskFastStart", 1, 32L * 1024 * 1024);
-        var first = await scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None);
-        var waiting = scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None).AsTask();
-
-        Assert.AreEqual(1, scheduler.CurrentQueueDepth);
-        Assert.IsFalse(waiting.IsCompleted);
-
+        using var scheduler = new DeviceScheduler("PhysicalDiskUSB", 1, 256L * 1024 * 1024);
+        using var first = await scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None);
+        var secondTask = scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None).AsTask();
+        Assert.IsFalse(secondTask.IsCompleted);
         first.Dispose();
-
-        using var second = await waiting.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.AreEqual(2, scheduler.CurrentQueueDepth,
-            "Sustained QD1 demand should be evaluated after the single concurrency wave actually observed, not after a fixed eight-completion floor.");
-        Assert.AreEqual("increase:baseline-demand", scheduler.Snapshot().LastQueueDepthDecision);
-    }
-    [TestMethod]
-    public async Task SustainedDemandCanGrowBeyondLegacyNvmeQd16()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDiskNVMe", 16, 512L * 1024 * 1024);
-        var active = new List<DeviceScheduler.IoLease>();
-        var waiting = new List<Task<DeviceScheduler.IoLease>>();
-
-        for (var index = 0; index < 16; index++)
-            active.Add(await scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None));
-        for (var index = 0; index < 16; index++)
-            waiting.Add(scheduler.AcquireIoAsync(256 * 1024, CancellationToken.None).AsTask());
-
-        foreach (var lease in active)
-            lease.Dispose();
-        active.Clear();
-
-        foreach (var task in waiting)
-            active.Add(await task.WaitAsync(TimeSpan.FromSeconds(2)));
-        foreach (var lease in active)
-            lease.Dispose();
-
-        Assert.IsGreaterThanOrEqualTo(32, scheduler.CurrentQueueDepth);
-        Assert.IsGreaterThan(scheduler.CurrentQueueDepth, scheduler.ExplorationQueueDepth);
-        var snapshot = scheduler.Snapshot();
-        Assert.IsGreaterThanOrEqualTo(1, snapshot.QueueDepthUpshifts);
-        Assert.IsGreaterThanOrEqualTo(32, snapshot.MaximumObservedQueueDepth);
-    }
-
-    [TestMethod]
-    public async Task CancelledWaiterDoesNotLeakAdaptiveCapacity()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDisk11", 1, 32L * 1024 * 1024);
-        using var first = await scheduler.AcquireIoAsync(4096, CancellationToken.None);
-        using var cancellation = new CancellationTokenSource();
-        var waiting = scheduler.AcquireIoAsync(4096, cancellation.Token).AsTask();
-        cancellation.Cancel();
-
-        await Assert.ThrowsExactlyAsync<TaskCanceledException>(async () => await waiting);
+        using var second = await secondTask.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.AreEqual(1, scheduler.OutstandingIo);
+        Assert.AreEqual(1, scheduler.PeakOutstandingIo);
     }
 
     [TestMethod]
-    public void SoftBacklogTargetIsAccountingOnlyAndAllowsImmediateOverflow()
+    public void SnapshotStaysFixedInsteadOfExploring()
+    {
+        using var scheduler = new DeviceScheduler("PhysicalDisk", 16, 512L * 1024 * 1024);
+        var snapshot = scheduler.Snapshot();
+        Assert.AreEqual(1, snapshot.InitialQueueDepth);
+        Assert.AreEqual(1, snapshot.CurrentQueueDepth);
+        Assert.AreEqual(1, snapshot.ExplorationQueueDepth);
+        Assert.AreEqual(0, snapshot.QueueDepthUpshifts);
+        Assert.AreEqual("fixed:extreme-style", snapshot.LastQueueDepthDecision);
+    }
+
+    [TestMethod]
+    public void SoftBacklogTargetRemainsAccountingOnly()
     {
         const int block = 8 * 1024 * 1024;
-        using var scheduler = new DeviceScheduler("PhysicalDisk3", 1, block);
-
+        using var scheduler = new DeviceScheduler("PhysicalDisk", 1, block);
         scheduler.ReserveBacklog(block);
         scheduler.ReserveBacklog(block);
-
-        var snapshot = scheduler.Snapshot();
-        Assert.AreEqual(2L * block, snapshot.QueuedBytes);
-        Assert.AreEqual(2.0, snapshot.BacklogPressure, 0.000001);
+        Assert.AreEqual(2L * block, scheduler.Snapshot().QueuedBytes);
         scheduler.ReleaseBacklog(block);
         scheduler.ReleaseBacklog(block);
-    }
-
-    [TestMethod]
-    public void SnapshotExposesAdaptiveWindowRatherThanFixedMaximum()
-    {
-        using var scheduler = new DeviceScheduler("PhysicalDisk12", 8, 64L * 1024 * 1024);
-        var snapshot = scheduler.Snapshot();
-
-        Assert.AreEqual(8, snapshot.InitialQueueDepth);
-        Assert.AreEqual(8, snapshot.CurrentQueueDepth);
-        Assert.AreEqual(16, snapshot.ExplorationQueueDepth);
-        Assert.AreEqual(8, snapshot.BestObservedQueueDepth);
     }
 
     private static StorageDeviceInfo Device(string root, uint physicalDisk, string bus, StorageMediaKind media, bool? trim) =>

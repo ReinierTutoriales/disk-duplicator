@@ -19,6 +19,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(180) };
     private CopyJob? _job;
     private DateTimeOffset? _copyStartedAt;
+    private readonly LogicalProgressRate _copyProgressRate = new();
 
     public MainWindow()
     {
@@ -26,7 +27,7 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(800, 460));
+        AppWindow.Resize(new SizeInt32(760, 400));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();
@@ -34,7 +35,6 @@ public sealed partial class MainWindow : Window
         ApplySavedTheme();
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
-        Activated += MainWindow_Activated;
         TryLoadLaunchSource();
     }
 
@@ -49,14 +49,6 @@ public sealed partial class MainWindow : Window
             titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 128, 128, 128);
         }
         catch { }
-    }
-
-    private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
-    {
-        var active = args.WindowActivationState != WindowActivationState.Deactivated;
-        TitleBarText.Opacity = active ? 1.0 : 0.58;
-        LogoImage.Opacity = active ? 1.0 : 0.58;
-        AppMenuButton.Opacity = active ? 1.0 : 0.72;
     }
 
     private void ApplySavedTheme()
@@ -183,6 +175,7 @@ public sealed partial class MainWindow : Window
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
+            _copyProgressRate.Reset();
 
             _job = await CopyEngine.StartAsync(plan, options);
             PauseButton.IsEnabled = true;
@@ -324,8 +317,7 @@ public sealed partial class MainWindow : Window
             var written = active.Length == 0
                 ? snapshots.Select(item => item.Written).DefaultIfEmpty(0UL).Max()
                 : active.Min(item => item.Written);
-            var diagnostics = _job.DiagnosticsSnapshot();
-            var speed = paused ? 0d : diagnostics.SourceRead5sBytesPerSecond;
+            var speed = paused ? 0d : _copyProgressRate.Observe(written);
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
             OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
             SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
@@ -661,6 +653,46 @@ public sealed partial class MainWindow : Window
     {
         _progressTimer.Stop();
         _job?.RequestCancel();
+    }
+
+    private sealed class LogicalProgressRate
+    {
+        private long _lastTimestamp;
+        private ulong _lastBytes;
+        private double _smoothedBytesPerSecond;
+
+        internal void Reset()
+        {
+            _lastTimestamp = 0;
+            _lastBytes = 0;
+            _smoothedBytesPerSecond = 0;
+        }
+
+        internal double Observe(ulong bytes)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (_lastTimestamp == 0 || bytes < _lastBytes)
+            {
+                _lastTimestamp = now;
+                _lastBytes = bytes;
+                _smoothedBytesPerSecond = 0;
+                return 0;
+            }
+            var elapsed = Stopwatch.GetElapsedTime(_lastTimestamp, now).TotalSeconds;
+            if (elapsed < 0.15) return _smoothedBytesPerSecond;
+            var delta = bytes - _lastBytes;
+            var instant = delta / elapsed;
+            _lastTimestamp = now;
+            _lastBytes = bytes;
+            if (delta == 0)
+            {
+                _smoothedBytesPerSecond *= 0.82;
+                if (_smoothedBytesPerSecond < 1024) _smoothedBytesPerSecond = 0;
+                return _smoothedBytesPerSecond;
+            }
+            _smoothedBytesPerSecond = _smoothedBytesPerSecond <= 0 ? instant : (_smoothedBytesPerSecond * 0.70) + (instant * 0.30);
+            return _smoothedBytesPerSecond;
+        }
     }
 
     private static string FormatDestinationCount(int count) =>

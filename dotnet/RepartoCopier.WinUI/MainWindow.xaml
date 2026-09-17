@@ -32,60 +32,42 @@
         </Grid.Resources>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="36" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="26" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="12,0,138,0" Background="Transparent">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <Image x:Name="LogoImage" Width="22" Height="22" Source="ms-appx:///Assets/AppLogo.png"
-                   Stretch="Uniform" VerticalAlignment="Center" />
-            <TextBlock x:Name="TitleBarText" Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" Text="RepartoCopier" FontSize="13" FontWeight="SemiBold" />
-            <Button x:Name="AppMenuButton" Grid.Column="3" Width="30" Height="28" Padding="0"
-                    VerticalAlignment="Center" HorizontalAlignment="Right" CornerRadius="6"
-                    ToolTipService.ToolTip="Menú">
-                <FontIcon Glyph="&#xE700;" FontSize="16" />
-                <Button.Flyout>
-                    <Flyout Placement="BottomEdgeAlignedRight">
-                        <Border Width="208" Padding="6" CornerRadius="8"
-                                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-                            <StackPanel Spacing="1">
-                                <Button Style="{StaticResource MenuButtonStyle}" Click="LoadProfile_Click">
-                                    <StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE8E5;" FontSize="16"/><TextBlock Text="Cargar copia..." /></StackPanel>
-                                </Button>
-                                <Button Style="{StaticResource MenuButtonStyle}" Click="SaveProfile_Click">
-                                    <StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE74E;" FontSize="16"/><TextBlock Text="Guardar copia..." /></StackPanel>
-                                </Button>
-                                <Rectangle Height="1" Margin="6,4" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                <Button Style="{StaticResource MenuButtonStyle}" Click="Settings_Click">
-                                    <StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE713;" FontSize="16"/><TextBlock Text="Ajustes" /></StackPanel>
-                                </Button>
-                                <Button x:Name="AboutMenuButton" Style="{StaticResource MenuButtonStyle}" Click="About_Click">
-                                    <StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE946;" FontSize="16"/><TextBlock Text="Acerca de" /></StackPanel>
-                                </Button>
-                                <Rectangle Height="1" Margin="6,4" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
-                                <Button Style="{StaticResource MenuButtonStyle}" Click="Exit_Click">
-                                    <StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE8BB;" FontSize="16"/><TextBlock Text="Salir" /></StackPanel>
-                                </Button>
-                            </StackPanel>
-                        </Border>
-                    </Flyout>
-                </Button.Flyout>
-            </Button>
-        </Grid>
+        <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="RepartoCopier">
+            <TitleBar.IconSource>
+                <ImageIconSource ImageSource="ms-appx:///Assets/AppLogo.png" />
+            </TitleBar.IconSource>
+            <TitleBar.RightHeader>
+                <Button x:Name="AppMenuButton" Width="30" Height="28" Padding="0" CornerRadius="6" ToolTipService.ToolTip="Menú">
+                    <FontIcon Glyph="&#xE700;" FontSize="16" />
+                    <Button.Flyout>
+                        <Flyout Placement="BottomEdgeAlignedRight">
+                            <Border Width="208" Padding="6" CornerRadius="8" Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                <StackPanel Spacing="1">
+                                    <Button Style="{StaticResource MenuButtonStyle}" Click="LoadProfile_Click"><StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE8E5;" FontSize="16"/><TextBlock Text="Cargar copia..." /></StackPanel></Button>
+                                    <Button Style="{StaticResource MenuButtonStyle}" Click="SaveProfile_Click"><StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE74E;" FontSize="16"/><TextBlock Text="Guardar copia..." /></StackPanel></Button>
+                                    <Rectangle Height="1" Margin="6,4" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                    <Button Style="{StaticResource MenuButtonStyle}" Click="Settings_Click"><StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE713;" FontSize="16"/><TextBlock Text="Ajustes" /></StackPanel></Button>
+                                    <Button x:Name="AboutMenuButton" Style="{StaticResource MenuButtonStyle}" Click="About_Click"><StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE946;" FontSize="16"/><TextBlock Text="Acerca de" /></StackPanel></Button>
+                                    <Rectangle Height="1" Margin="6,4" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
+                                    <Button Style="{StaticResource MenuButtonStyle}" Click="Exit_Click"><StackPanel Orientation="Horizontal" Spacing="10"><FontIcon Glyph="&#xE8BB;" FontSize="16"/><TextBlock Text="Salir" /></StackPanel></Button>
+                                </StackPanel>
+                            </Border>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+            </TitleBar.RightHeader>
+        </TitleBar>
 
-        <Grid Grid.Row="1" Margin="12,2,12,8" MaxWidth="780" HorizontalAlignment="Stretch">
+        <Grid Grid.Row="1" Margin="8,0,8,6" MaxWidth="760" HorizontalAlignment="Stretch">
             <InfoBar x:Name="ErrorBar" VerticalAlignment="Top" Margin="0,0,0,8" IsOpen="False"
                      Severity="Error" IsClosable="True" Canvas.ZIndex="10" />
 
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="8" MaxWidth="680" HorizontalAlignment="Center">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="8" MaxWidth="744" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -195,9 +177,9 @@
                 <TextBlock Grid.Row="2" Margin="2,0" Text="La copia usa un único flujo FAN-OUT compartido para todos los destinos." Opacity="0.52" FontSize="10" />
             </Grid>
 
-            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="8" MaxWidth="700" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Border Style="{StaticResource SurfaceCardStyle}" Padding="12,10">
-                    <Grid RowSpacing="11">
+            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="8" MaxWidth="744" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,10,0,0">
+                <Border Style="{StaticResource SurfaceCardStyle}" Padding="10,8">
+                    <Grid RowSpacing="8">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
                         <Grid ColumnSpacing="10">
@@ -215,8 +197,12 @@
 
                         <Grid Grid.Row="1">
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                            <ProgressBar x:Name="OverallProgressBar" Height="6" Minimum="0" Maximum="100" Value="0" />
-                            <TextBlock x:Name="OverallDetailText" Grid.Row="1" Margin="0,5,0,0" Text="Preparando..." Opacity="0.58" FontSize="10"/>
+                            <ProgressBar x:Name="OverallProgressBar" Height="10" MinHeight="10" Minimum="0" Maximum="100" Value="0">
+                                <ProgressBar.Resources>
+                                    <x:Double x:Key="ProgressBarTrackHeight">10</x:Double>
+                                </ProgressBar.Resources>
+                            </ProgressBar>
+                            <TextBlock x:Name="OverallDetailText" Grid.Row="1" Margin="0,3,0,0" Text="Preparando..." Opacity="0.58" FontSize="10"/>
                         </Grid>
 
                         <Grid Grid.Row="2" ColumnSpacing="20">
