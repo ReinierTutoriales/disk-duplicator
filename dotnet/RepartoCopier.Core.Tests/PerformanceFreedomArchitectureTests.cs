@@ -26,11 +26,11 @@ public sealed class PerformanceFreedomArchitectureTests
     }
 
     [TestMethod]
-    public void DirectWriteEligibilityHasNoArtificialSizeFloor()
+    public void DirectWriteEligibilityUsesExtremeStyleSmallFileRule()
     {
         var device = ExactLocalNvme();
 
-        Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1));
+        Assert.IsFalse(DirectIoDestinationWriter.IsEligible(device, 1));
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 4096));
         Assert.IsTrue(DirectIoDestinationWriter.IsEligible(device, 1024 * 1024));
     }

@@ -34,7 +34,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="26" />
+            <RowDefinition Height="22" />
         </Grid.RowDefinitions>
 
         <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="RepartoCopier">
@@ -63,11 +63,11 @@
             </TitleBar.RightHeader>
         </TitleBar>
 
-        <Grid Grid.Row="1" Margin="8,0,8,6" MaxWidth="760" HorizontalAlignment="Stretch">
+        <Grid Grid.Row="1" Margin="6,0,6,4" MaxWidth="740" HorizontalAlignment="Stretch">
             <InfoBar x:Name="ErrorBar" VerticalAlignment="Top" Margin="0,0,0,8" IsOpen="False"
                      Severity="Error" IsClosable="True" Canvas.ZIndex="10" />
 
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="8" MaxWidth="744" HorizontalAlignment="Stretch">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="6" MaxWidth="728" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -86,8 +86,8 @@
                     </Button>
                 </Grid>
 
-                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="10">
-                    <Grid RowSpacing="8">
+                <Border Grid.Row="1" Style="{StaticResource SurfaceCardStyle}" Padding="8">
+                    <Grid RowSpacing="6">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -126,7 +126,7 @@
 
                         <Rectangle Grid.Row="2" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-                        <ListView x:Name="DestinationList" Grid.Row="3" SelectionMode="None" Height="50" MaxHeight="50"
+                        <ListView x:Name="DestinationList" Grid.Row="3" SelectionMode="None" Height="40" MaxHeight="40"
                                   Padding="0" IsTabStop="False"
                                   ScrollViewer.HorizontalScrollMode="Enabled"
                                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
@@ -140,23 +140,23 @@
                             <ListView.ItemContainerStyle>
                                 <Style TargetType="ListViewItem">
                                     <Setter Property="Padding" Value="0"/>
-                                    <Setter Property="Margin" Value="0,0,6,0"/>
-                                    <Setter Property="MinHeight" Value="42"/>
+                                    <Setter Property="Margin" Value="0,0,3,0"/>
+                                    <Setter Property="MinHeight" Value="34"/>
                                     <Setter Property="CornerRadius" Value="6"/>
                                 </Style>
                             </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Width="158" Height="42" Padding="8,0" CornerRadius="6"
+                                    <Border Width="86" Height="34" Padding="5,0,3,0" CornerRadius="5"
                                             Background="{ThemeResource ControlFillColorDefaultBrush}"
                                             BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                             ToolTipService.ToolTip="{Binding Path}">
-                                        <Grid ColumnSpacing="7">
+                                        <Grid ColumnSpacing="4">
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                            <FontIcon Glyph="&#xEDA2;" FontSize="13" Opacity="0.68" VerticalAlignment="Center"/>
-                                            <TextBlock Grid.Column="1" Text="{Binding Path}" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                            <Button Grid.Column="2" Width="24" Height="24" Padding="0" CornerRadius="5" Tag="{Binding Path}" Click="RemoveDestination_Click" ToolTipService.ToolTip="Quitar">
-                                                <FontIcon Glyph="&#xE711;" FontSize="10"/>
+                                            <FontIcon Glyph="&#xEDA2;" FontSize="12" Opacity="0.68" VerticalAlignment="Center"/>
+                                            <TextBlock Grid.Column="1" Text="{Binding Path}" FontSize="11" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="22"/>
+                                            <Button Grid.Column="2" Width="20" Height="20" Padding="0" CornerRadius="4" Tag="{Binding Path}" Click="RemoveDestination_Click" ToolTipService.ToolTip="Quitar">
+                                                <FontIcon Glyph="&#xE711;" FontSize="9"/>
                                             </Button>
                                         </Grid>
                                     </Border>
@@ -165,8 +165,7 @@
                         </ListView>
 
                         <Expander Grid.Row="4" Header="Opciones" IsExpanded="False" HorizontalAlignment="Stretch">
-                            <StackPanel Orientation="Horizontal" Spacing="16" Padding="0,7,0,2">
-                                <CheckBox x:Name="VerifyCheck" Content="Verificar después de copiar" IsChecked="True"/>
+                            <StackPanel Orientation="Horizontal" Spacing="12" Padding="0,5,0,0">
                                 <CheckBox x:Name="SkipSameCheck" Content="Omitir iguales"/>
                                 <CheckBox x:Name="KeepGoingCheck" Content="Continuar ante error"/>
                             </StackPanel>
@@ -177,8 +176,8 @@
                 <TextBlock Grid.Row="2" Margin="2,0" Text="La copia usa un único flujo FAN-OUT compartido para todos los destinos." Opacity="0.52" FontSize="10" />
             </Grid>
 
-            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="8" MaxWidth="744" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,10,0,0">
-                <Border Style="{StaticResource SurfaceCardStyle}" Padding="10,8">
+            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="6" MaxWidth="728" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,6,0,0">
+                <Border Style="{StaticResource SurfaceCardStyle}" Padding="8,6">
                     <Grid RowSpacing="8">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
@@ -227,7 +226,7 @@
             </Grid>
         </Grid>
 
-        <Border Grid.Row="2" Padding="16,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        <Border Grid.Row="2" Padding="10,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <Grid>
                 <TextBlock x:Name="StatusText" Text="Listo" FontSize="10" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

@@ -932,11 +932,7 @@ public static class CopyEngine
                         job.Telemetry.RecordIoRecovery(
                             "copy-write", current.Entry.RelativePath, "direct", lastTransientCode,
                             failedQueueDepth, directRetryCount, offset, recovered: false);
-                        if (!worker.DeviceScheduler.RecordTransientFailure())
-                        {
-                            ReleaseBranchBlock(worker, block);
-                            return PendingWriteResult.Failed(ex);
-                        }
+                        await DelayTransientRetryAsync(directRetryCount, job.Token).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (DirectIoDestinationWriter.IsFallbackable(ex))
                     {
@@ -1005,8 +1001,7 @@ public static class CopyEngine
                 job.Telemetry.RecordIoRecovery(
                     "copy-write", current.Entry.RelativePath, "buffered", lastBufferedTransientCode,
                     failedQueueDepth, bufferedRetryCount, offset, recovered: false);
-                if (!worker.DeviceScheduler.RecordTransientFailure())
-                    break;
+                await DelayTransientRetryAsync(bufferedRetryCount, job.Token).ConfigureAwait(false);
             }
         }
 
@@ -1387,61 +1382,80 @@ public static class CopyEngine
         long offset,
         CopyJob job)
     {
-        var requestBytes = target.Direct is null
-            ? expectedBytes
-            : AlignUp(expectedBytes, target.Direct.Alignment);
-
-        IDisposable? io = null;
-        if (target.Scheduler is not null)
-            io = await target.Scheduler.AcquireIoAsync(requestBytes, job.Token).ConfigureAwait(false);
-        using (io)
+        var retryCount = 0;
+        while (true)
         {
-            var started = Stopwatch.GetTimestamp();
-            try
+            job.Token.ThrowIfCancellationRequested();
+            var requestBytes = target.Direct is null
+                ? expectedBytes
+                : AlignUp(expectedBytes, target.Direct.Alignment);
+
+            IDisposable? io = null;
+            if (target.Scheduler is not null)
+                io = await target.Scheduler.AcquireIoAsync(requestBytes, job.Token).ConfigureAwait(false);
+            using (io)
             {
-                int read;
-                if (target.Direct is not null)
+                var started = Stopwatch.GetTimestamp();
+                try
                 {
-                    try
+                    int read;
+                    if (target.Direct is not null)
                     {
-                        read = await target.Direct.ReadAsync(
-                            target.Buffer!, requestBytes, offset, job.Token).ConfigureAwait(false);
+                        try
+                        {
+                            read = await target.Direct.ReadAsync(target.Buffer!, requestBytes, offset, job.Token).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                        {
+                            target.SwitchToBuffered();
+                            continue;
+                        }
                     }
-                    catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                    else
                     {
-                        target.SwitchToBuffered();
-                        return await ReadVerifyTargetAsync(target, expectedBytes, offset, job).ConfigureAwait(false);
+                        read = await RandomAccess.ReadAsync(
+                            target.BufferedHandle!,
+                            target.Buffer!.Memory[..expectedBytes],
+                            offset,
+                            job.Token).ConfigureAwait(false);
                     }
+
+                    job.Telemetry.RecordVerifyRead(expectedBytes, Stopwatch.GetElapsedTime(started));
+                    if (retryCount > 0)
+                    {
+                        job.Telemetry.RecordIoRecovery(
+                            "verify-read", target.Path, target.Direct is null ? "buffered" : "direct", 0,
+                            target.Scheduler?.CurrentQueueDepth ?? 1, retryCount, offset, recovered: true);
+                    }
+                    return read;
                 }
-                else
+                catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
                 {
-                    read = await RandomAccess.ReadAsync(
-                        target.BufferedHandle!,
-                        target.Buffer!.Memory[..expectedBytes],
+                    retryCount++;
+                    target.Progress?.AddRetry();
+                    job.Telemetry.RecordIoRecovery(
+                        "verify-read",
+                        target.Path,
+                        target.Direct is null ? "buffered" : "direct",
+                        TransientIoErrorClassifier.GetNativeCodeOrZero(ex),
+                        target.Scheduler?.CurrentQueueDepth ?? 1,
+                        retryCount,
                         offset,
-                        job.Token).ConfigureAwait(false);
+                        recovered: false);
                 }
-                job.Telemetry.RecordVerifyRead(expectedBytes, Stopwatch.GetElapsedTime(started));
-                return read;
             }
-            catch (Exception ex) when (
-                target.Scheduler is not null &&
-                TransientIoErrorClassifier.IsTransient(ex) &&
-                target.Scheduler.RecordTransientFailure())
-            {
-                target.Progress?.AddRetry();
-                job.Telemetry.RecordIoRecovery(
-                    "verify-read",
-                    target.Path,
-                    target.Direct is null ? "buffered" : "direct",
-                    TransientIoErrorClassifier.GetNativeCodeOrZero(ex),
-                    target.Scheduler.CurrentQueueDepth,
-                    retryCount: 1,
-                    offset,
-                    recovered: false);
-                return await ReadVerifyTargetAsync(target, expectedBytes, offset, job).ConfigureAwait(false);
-            }
+
+            await DelayTransientRetryAsync(retryCount, job.Token).ConfigureAwait(false);
         }
+    }
+
+    private static Task DelayTransientRetryAsync(int retryCount, CancellationToken token)
+    {
+        // No arbitrary retry-count cutoff: recoverable USB/storage faults can settle.
+        // A short capped delay prevents a disconnected device from becoming a hot spin;
+        // the user can always cancel the job.
+        var milliseconds = Math.Min(250, 10 * Math.Min(Math.Max(1, retryCount), 25));
+        return Task.Delay(milliseconds, token);
     }
 
     private static int AlignUp(int value, int alignment)
@@ -1729,7 +1743,7 @@ public static class CopyEngine
         FileMode mode,
         long preallocationSize)
     {
-        var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
+        var options = FileOptions.SequentialScan;
         return new FileStream(path, new FileStreamOptions
         {
             Mode = mode,

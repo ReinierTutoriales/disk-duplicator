@@ -27,7 +27,7 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(760, 400));
+        AppWindow.Resize(new SizeInt32(740, 340));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();
@@ -152,7 +152,7 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
-                Verify: VerifyCheck.IsChecked == true,
+                Verify: true,
                 SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
@@ -169,9 +169,7 @@ public sealed partial class MainWindow : Window
             FilesMetricText.Text = "0/0";
             OverallProgressBar.Value = 0;
             OverallPercentText.Text = "0%";
-            OverallDetailText.Text = options.Verify
-                ? "Preparando copia con verificación rápida..."
-                : "Preparando copia sin verificación posterior...";
+            OverallDetailText.Text = "Preparando copia con verificación rápida...";
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
@@ -372,7 +370,6 @@ public sealed partial class MainWindow : Window
             SkipSameCheck.IsChecked = profile.SkipExisting;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
-            VerifyCheck.IsChecked = profile.VerifyAfterCopy;
             StatusText.Text = "Configuración cargada";
             ShowPreparationView();
         }
@@ -390,7 +387,7 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true,
                 ShutdownCheck.IsChecked == true,
-                VerifyCheck.IsChecked == true);
+                true);
             var picker = new FileSavePicker(AppWindow.Id)
             {
                 Title = "Guardar copia",
@@ -637,7 +634,6 @@ public sealed partial class MainWindow : Window
     {
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
-        VerifyCheck.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
     }
