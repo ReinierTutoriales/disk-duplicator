@@ -32,6 +32,16 @@ public sealed class ExtremeStyleIoArchitectureTests
         foreach (var device in devices) Assert.AreEqual(1, StorageIoProfile.For(device).InitialQueueDepth);
     }
 
+    [TestMethod]
+    public void FixedFlowKeepsLargeSharedFanoutPoolAsThePipelineWindow()
+    {
+        var root = FindRepositoryRoot();
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("SharedFanoutPoolBytes = 256L * 1024 * 1024", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("SharedFanoutBlockBytes = 8 * 1024 * 1024", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.Channel.Writer.TryWrite(message)", StringComparison.Ordinal));
+    }
+
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
         new(@"E:\copy", @"E:\", 4, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, trim, 0);
 
