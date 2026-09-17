@@ -1,0 +1,80 @@
+name: UI and I/O stability migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ui_io_stability_migration.py'
+      - '.github/workflows/ui-io-stability-migration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ui-io-stability-main
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Apply migration
+        shell: pwsh
+        run: python tools/ui_io_stability_migration.py
+
+      - name: Architecture guards
+        shell: pwsh
+        run: |
+          $app = Get-Content dotnet/RepartoCopier.WinUI/App.xaml -Raw
+          $xaml = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml -Raw
+          $ui = Get-Content dotnet/RepartoCopier.WinUI/MainWindow.xaml.cs -Raw
+          $sched = Get-Content dotnet/RepartoCopier.Core/DeviceScheduler.cs -Raw
+          $profiles = Get-Content dotnet/RepartoCopier.Core/StorageIoProfile.cs -Raw
+          if (-not $app.Contains('Microsoft.UI.Xaml/DensityStyles/Compact.xaml')) { throw 'Official WinUI compact density missing.' }
+          if (-not $xaml.Contains('<TitleBar x:Name="AppTitleBar"')) { throw 'Windows App SDK TitleBar control missing.' }
+          if (-not $xaml.Contains('ProgressBarTrackHeight">10')) { throw 'Thick progress track missing.' }
+          if (-not $xaml.Contains('VerticalAlignment="Top" Margin="0,14,0,0"')) { throw 'Running surface still wastes vertical space.' }
+          if (-not $ui.Contains('SizeInt32(760, 400)')) { throw 'Compact window size missing.' }
+          if (-not $ui.Contains('_copyProgressRate.Observe(written)')) { throw 'Logical copy-rate estimator missing.' }
+          if ($ui.Contains('diagnostics.SourceRead5sBytesPerSecond')) { throw 'UI still mixes source rate with destination completion.' }
+          if (-not $sched.Contains('_maximumQueueDepth')) { throw 'QD ceiling missing.' }
+          if (-not $profiles.Contains('MaximumQueueDepth')) { throw 'Device profile QD ceiling missing.' }
+          if (-not $profiles.Contains('StorageProfileKind.SataSsd, 8, SataSsdBacklog, 8')) { throw 'SATA profile is not bounded.' }
+          git diff --check
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Build WinUI Release x64
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+
+      - name: Publish self-contained x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+
+      - name: Commit product and remove migration scaffolding
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f tools/ui_io_stability_migration.py .github/workflows/ui-io-stability-migration.yml
+          git clean -fd artifact
+          git add -A
+          git diff --cached --check
+          git commit -m 'ui: adopt native compact WinUI shell and stabilize copy throughput'
+          git push origin HEAD:main
