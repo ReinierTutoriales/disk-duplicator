@@ -6,6 +6,7 @@ on:
     paths:
       - 'tools/ui_io_stability_migration.py'
       - '.github/workflows/ui-io-stability-migration.yml'
+      - 'dotnet/RepartoCopier.Core.Tests/IoRecoveryArchitectureTests.cs'
   workflow_dispatch:
 
 permissions:
