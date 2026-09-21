@@ -132,7 +132,7 @@ internal static class DirectIoDestinationWriter
         private static void WriteSynchronous(SafeFileHandle handle, ReadOnlyMemory<byte> data, long offset)
         {
             // The destination can have QD > 1. Never mutate the shared file pointer:
-            // SetFilePointerEx + WriteFile races concurrent writes on the same handle.
+            // Shared file-pointer mutation races concurrent writes on the same handle.
             // RandomAccess supplies an explicit offset per operation and preserves the
             // aligned pinned FAN-OUT buffer required by FILE_FLAG_NO_BUFFERING.
             try
