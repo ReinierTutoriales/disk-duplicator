@@ -83,6 +83,63 @@ public sealed class DirectIoDestinationWriterTests
     }
 
     [TestMethod]
+    public async Task ConcurrentQueueDepthWritesPreserveExplicitOffsets()
+    {
+        const int blockBytes = 1024 * 1024;
+        const int blockCount = 8;
+        var path = Path.Combine(Path.GetTempPath(), $"repartocopier-direct-qd-{Guid.NewGuid():N}.bin");
+        try
+        {
+            using var handle = File.OpenHandle(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read,
+                FileOptions.SequentialScan);
+            RandomAccess.SetLength(handle, (long)blockBytes * blockCount);
+            using var session = new DirectIoDestinationWriter.Session(handle, 4096);
+            using var scheduler = new DeviceScheduler("PhysicalDiskConcurrent", 8, 64L * 1024 * 1024);
+            var leases = Enumerable.Range(0, blockCount)
+                .Select(_ => SourceBufferLease.RentAligned(blockBytes, 64 * 1024))
+                .ToArray();
+            try
+            {
+                for (var index = 0; index < leases.Length; index++)
+                    leases[index].Memory.Span.Fill(checked((byte)(index + 1)));
+
+                var writes = leases.Select((lease, index) => session.WriteAsync(
+                    lease.Memory,
+                    (long)index * blockBytes,
+                    (long)blockBytes * blockCount,
+                    lease.IsAlignedFor(4096),
+                    scheduler,
+                    CancellationToken.None)).ToArray();
+                await Task.WhenAll(writes);
+                session.FlushToDisk();
+            }
+            finally
+            {
+                foreach (var lease in leases)
+                    lease.Dispose();
+            }
+
+            session.Dispose();
+            var actual = await File.ReadAllBytesAsync(path);
+            for (var index = 0; index < blockCount; index++)
+            {
+                var expected = checked((byte)(index + 1));
+                Assert.IsTrue(
+                    actual.AsSpan(index * blockBytes, blockBytes).IndexOfAnyExcept(expected) < 0,
+                    $"El bloque {index} fue escrito fuera de su offset bajo QD concurrente.");
+            }
+        }
+        finally
+        {
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    [TestMethod]
     public void FallbackOnlyMasksUnsupportedDirectWriteNotHardwareFaults()
     {
         foreach (var code in new[] { 1, 5, 50, 87 })
