@@ -21,6 +21,23 @@ public sealed class DestinationReleaseArchitectureTests
     }
 
     [TestMethod]
+    public void RecoveryCloseFailureStillReleasesLeaseWithoutAdvertisingSafeRemoval()
+    {
+        var root = FindRepositoryRoot();
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+
+        var closeError = engine.IndexOf("Exception? recoveryCloseError = null;", StringComparison.Ordinal);
+        var fail = engine.IndexOf("worker.Fail($\"No se pudo cerrar el estado de recuperación:", closeError, StringComparison.Ordinal);
+        var release = engine.IndexOf("worker.ReleaseStateLease();", fail, StringComparison.Ordinal);
+        var readyGuard = engine.IndexOf("worker.IsActive && recoveryCloseError is null", release, StringComparison.Ordinal);
+
+        Assert.IsTrue(closeError >= 0);
+        Assert.IsTrue(fail > closeError, "Un fallo al cerrar recovery debe fallar sólo ese destino.");
+        Assert.IsTrue(release > fail, "El lease debe liberarse incluso si recovery falla al cerrar.");
+        Assert.IsTrue(readyGuard > release, "No se puede anunciar retiro seguro tras un fallo de cierre.");
+    }
+
+    [TestMethod]
     public void VerificationClosesReadHandlesBeforeAdvertisingSafeRemoval()
     {
         var root = FindRepositoryRoot();
