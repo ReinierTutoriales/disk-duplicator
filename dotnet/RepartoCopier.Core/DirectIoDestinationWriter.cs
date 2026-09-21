@@ -5,7 +5,7 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Stable sequential destination writer modeled after ExtremeCopy's active path:
-/// one synchronous physical write at a time per destination, SEQUENTIAL_SCAN and
+/// explicit-offset writes with bounded per-device queue depth, SEQUENTIAL_SCAN and
 /// NO_BUFFERING when safe. The shared FAN-OUT payload is never copied per destination.
 /// </summary>
 internal static class DirectIoDestinationWriter
@@ -14,6 +14,7 @@ internal static class DirectIoDestinationWriter
     private const uint OpenExisting = 3;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
+    private const uint FileFlagOverlapped = 0x40000000;
 
     internal static bool IsEligible(StorageDeviceInfo device, long fileSize)
     {
