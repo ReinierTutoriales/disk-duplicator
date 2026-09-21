@@ -44,7 +44,7 @@ internal static class DirectIoDestinationWriter
             FileShare.Read,
             IntPtr.Zero,
             OpenExisting,
-            FileFlagNoBuffering | FileFlagSequentialScan,
+            FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -131,23 +131,20 @@ internal static class DirectIoDestinationWriter
 
         private static void WriteSynchronous(SafeFileHandle handle, ReadOnlyMemory<byte> data, long offset)
         {
-            if (!MemoryMarshal.TryGetArray(data, out ArraySegment<byte> segment) || segment.Array is null)
-                throw new DirectIoWriteException(87, "El buffer de escritura debe estar respaldado por el pool FAN-OUT fijado.");
-
-            if (!NativeMethods.SetFilePointerEx(handle, offset, out _, 0))
+            // The destination can have QD > 1. Never mutate the shared file pointer:
+            // SetFilePointerEx + WriteFile races concurrent writes on the same handle.
+            // RandomAccess supplies an explicit offset per operation and preserves the
+            // aligned pinned FAN-OUT buffer required by FILE_FLAG_NO_BUFFERING.
+            try
             {
-                var code = Marshal.GetLastWin32Error();
-                throw new DirectIoWriteException(code, "No se pudo posicionar el handle síncrono del destino.");
+                RandomAccess.Write(handle, data.Span, offset);
             }
-
-            var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(segment.Array, segment.Offset);
-            if (!NativeMethods.WriteFile(handle, pointer, checked((uint)data.Length), out var written, IntPtr.Zero))
+            catch (IOException ex)
             {
-                var code = Marshal.GetLastWin32Error();
-                throw new DirectIoWriteException(code, "WriteFile síncrono falló.");
+                throw new DirectIoWriteException(
+                    TransientIoErrorClassifier.GetNativeCodeOrZero(ex),
+                    ex.Message);
             }
-            if (written != data.Length)
-                throw new DirectIoWriteException(1117, $"WriteFile escribió {written} de {data.Length} bytes.");
         }
 
         internal void FinalizeLength(long exactLength)
