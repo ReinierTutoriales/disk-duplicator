@@ -14,13 +14,13 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsFalse(code.Contains("DownshiftToBestLocked", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("_bestThroughputBytesPerSecond", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("_samplePeakObservedConcurrency", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("public int CurrentQueueDepth => 1;", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("public int ExplorationQueueDepth => 1;", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("fixed:extreme-style", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("public int CurrentQueueDepth => InitialQueueDepth;", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("public int ExplorationQueueDepth => InitialQueueDepth;", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("fixed:storage-profile", StringComparison.Ordinal));
     }
 
     [TestMethod]
-    public void EveryStorageClassUsesOnePhysicalIoAtATime()
+    public void EveryStorageClassUsesItsFixedHardwareQueueDepth()
     {
         var devices = new[]
         {
@@ -29,7 +29,9 @@ public sealed class ExtremeStyleIoArchitectureTests
             Device("NVMe", StorageMediaKind.SolidState, true),
             Device("SATA", StorageMediaKind.Rotational, false),
         };
-        foreach (var device in devices) Assert.AreEqual(1, StorageIoProfile.For(device).InitialQueueDepth);
+        CollectionAssert.AreEqual(
+            new[] { 4, 4, 8, 2 },
+            devices.Select(device => StorageIoProfile.For(device).InitialQueueDepth).ToArray());
     }
 
     [TestMethod]
