@@ -12,7 +12,7 @@ public sealed class DestinationReleaseArchitectureTests
         var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
 
         var dispose = engine.IndexOf("recovery?.Dispose();", StringComparison.Ordinal);
-        var release = engine.IndexOf("worker.ReleaseStateLease();", dispose, StringComparison.Ordinal);
+        var release = engine.IndexOf("worker.MarkSuccessfullyReleased();", dispose, StringComparison.Ordinal);
         var ready = engine.IndexOf("worker.Progress.SetPhase(DestinationPhase.Releasable)", release, StringComparison.Ordinal);
 
         Assert.IsTrue(dispose >= 0, "El writer debe cerrar manifest/journal.");
@@ -47,7 +47,7 @@ public sealed class DestinationReleaseArchitectureTests
         Assert.IsTrue(verify >= 0);
         var dispose = engine.IndexOf("target.Dispose();", verify, StringComparison.Ordinal);
         Assert.IsTrue(dispose > verify, "La verificación debe cerrar sus handles.");
-        var release = engine.IndexOf("workers[slot].ReleaseStateLease();", dispose, StringComparison.Ordinal);
+        var release = engine.IndexOf("workers[slot].MarkSuccessfullyReleased();", dispose, StringComparison.Ordinal);
         var ready = engine.IndexOf("progress[slot].SetPhase(DestinationPhase.Releasable);", release, StringComparison.Ordinal);
 
         Assert.IsTrue(release > dispose, "El lease debe soltarse después de cerrar handles de verificación.");
@@ -83,6 +83,18 @@ public sealed class DestinationReleaseArchitectureTests
         Assert.IsTrue(
             engine.Contains("and not DestinationPhase.Done", StringComparison.Ordinal),
             "Un fallo ajeno no debe sobrescribir un destino ya terminado.");
+    }
+
+    [TestMethod]
+    public void SuccessfulReleaseRetiresDestinationFromLiveSpillFairShare()
+    {
+        var root = FindRepositoryRoot();
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+
+        Assert.IsTrue(engine.Contains("public void MarkSuccessfullyReleased()", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("DeactivateDestination();", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("workers[slot].MarkSuccessfullyReleased();", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.MarkSuccessfullyReleased();", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
