@@ -572,19 +572,23 @@ public static class CopyEngine
                             continue;
                         }
 
-                        FanoutSpillBlock? privateBlock = null;
+                        FanoutSpillBlock privateBlock;
                         try
                         {
                             privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
-                            await DeliverSingleDataAsync(worker, new DataMessage(new SpillBlock(privateBlock)), job).ConfigureAwait(false);
-                            privateBlock = null;
                         }
                         catch
                         {
-                            privateBlock?.Dispose();
                             worker.ReleaseSpill(read);
                             throw;
                         }
+
+                        // Ownership (including the spill reservation) transfers to
+                        // delivery before any enqueue operation can fail.
+                        await DeliverSingleDataAsync(
+                            worker,
+                            new DataMessage(new SpillBlock(privateBlock)),
+                            job).ConfigureAwait(false);
                     }
 
                     normal.RemoveAll(worker => !worker.IsActive);
