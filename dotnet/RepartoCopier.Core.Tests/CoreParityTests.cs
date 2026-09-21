@@ -342,6 +342,36 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void RecoveryCheckpointDisposeReleasesManifestAndJournalHandles()
+    {
+        using var temp = new TempDirectory("recovery-checkpoint-release");
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var file = new RecoveryFile(
+            Path.Combine(destination, "source.bin"),
+            "source.bin",
+            3,
+            123);
+        var hash = new byte[32];
+
+        using (var checkpoint = new RecoveryCheckpointWriter(destination))
+            checkpoint.Append(file, hash);
+
+        using var manifest = new FileStream(
+            StateLayout.ManifestPath(destination),
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        using var journal = new FileStream(
+            StateLayout.JournalPath(destination),
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        Assert.IsTrue(manifest.CanWrite);
+        Assert.IsTrue(journal.CanWrite);
+    }
+
+    [TestMethod]
     public void DestinationStateLeaseRejectsConcurrentOwnerAndRecoversAfterRelease()
     {
         using var temp = new TempDirectory("destination-state-lease");
