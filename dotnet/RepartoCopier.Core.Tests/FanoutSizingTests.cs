@@ -8,18 +8,24 @@ public sealed class FanoutSizingTests
     [TestMethod]
     public void SharedPoolHoldsThirtyTwoFullStreamingBlocks()
     {
-        const long pool = 256L * 1024 * 1024;
-        const int block = 8 * 1024 * 1024;
-        Assert.AreEqual(32L, pool / block);
+        var pool = new FanoutSpillBudget(256L * 1024 * 1024);
+        var block = 8L * 1024 * 1024;
+        Assert.AreEqual(32L, pool.CapacityBytes / block);
     }
 
     [TestMethod]
     public void EightMiBBlockProvidesUsefulConcurrencyAtFixedQueueDepths()
     {
+        var profiles = new[]
+        {
+            StorageIoProfile.For(Device("NVMe", StorageMediaKind.SolidState, true)),
+            StorageIoProfile.For(Device("SATA", StorageMediaKind.SolidState, true)),
+            StorageIoProfile.For(Device("SATA", StorageMediaKind.Rotational, false)),
+        };
         const long block = 8L * 1024 * 1024;
-        Assert.AreEqual(64L * 1024 * 1024, block * 8); // NVMe QD8
-        Assert.AreEqual(32L * 1024 * 1024, block * 4); // SSD QD4
-        Assert.AreEqual(16L * 1024 * 1024, block * 2); // HDD/network QD2
+        CollectionAssert.AreEqual(
+            new[] { 64L, 32L, 16L },
+            profiles.Select(profile => block * profile.InitialQueueDepth / (1024 * 1024)).ToArray());
     }
 
     [TestMethod]
@@ -31,4 +37,7 @@ public sealed class FanoutSizingTests
         Assert.IsTrue(ceiling / block >= 12);
         Assert.IsTrue(ceiling <= 512L * 1024 * 1024 / 5);
     }
+
+    private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
+        new(@"C:\\dest", @"C:\\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, trim, 0);
 }
