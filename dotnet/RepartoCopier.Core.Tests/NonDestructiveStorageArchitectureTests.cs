@@ -53,6 +53,9 @@ public sealed class NonDestructiveStorageArchitectureTests
         Assert.IsFalse(direct.Contains("PhysicalDrive", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(direct.Contains("SetFilePointerEx", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("WriteFile(", StringComparison.Ordinal));
+        StringAssert.Contains(direct, "FileFlagOverlapped");
+        StringAssert.Contains(direct, "RandomAccess.WriteAsync(handle, data, offset, token)");
+        Assert.IsFalse(direct.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("FSCTL_", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(direct.Contains("IOCTL_DISK_", StringComparison.OrdinalIgnoreCase));
     }
