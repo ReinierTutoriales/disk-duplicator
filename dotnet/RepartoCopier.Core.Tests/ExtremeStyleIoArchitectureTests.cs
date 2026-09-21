@@ -45,14 +45,15 @@ public sealed class ExtremeStyleIoArchitectureTests
     }
 
     [TestMethod]
-    public void DestinationPathUsesSynchronousSequentialWritesWithoutOverlapped()
+    public void DestinationPathUsesExplicitOffsetWritesWithoutOverlapped()
     {
         var root = FindRepositoryRoot();
         var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
         var coordinator = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DestinationWriteCoordinator.cs"));
         var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
         Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
-        Assert.IsTrue(direct.Contains("WriteFile(handle", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("RandomAccess.Write(handle, data.Span, offset)", StringComparison.Ordinal));
+        Assert.IsFalse(direct.Contains("SetFilePointerEx(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("FileFlagOverlapped", StringComparison.Ordinal));
         Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
         Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
