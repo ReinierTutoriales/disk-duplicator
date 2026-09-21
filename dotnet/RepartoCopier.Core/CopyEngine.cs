@@ -304,7 +304,7 @@ public static class CopyEngine
                     deviceSchedulers.For(copy.DestinationDevices[index]),
                     controlBudget,
                     spillBudget,
-                    copy.DestinationRoots.Length))
+                    () => workers.Count(worker => worker.IsActive)))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -2173,7 +2173,7 @@ public static class CopyEngine
             DeviceScheduler deviceScheduler,
             AdaptiveControlByteBudget controlBudget,
             FanoutSpillBudget spillBudget,
-            int destinationCount)
+            Func<int> activeDestinationCount)
         {
             Root = root;
             Slot = slot;
@@ -2182,7 +2182,7 @@ public static class CopyEngine
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
             SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
-            SpillCeilingBytes = spillBudget.DestinationCeiling(destinationCount, deviceScheduler.BacklogTargetBytes);
+            ActiveDestinationCount = activeDestinationCount ?? throw new ArgumentNullException(nameof(activeDestinationCount));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2199,7 +2199,10 @@ public static class CopyEngine
         internal AdaptiveControlByteBudget ControlBudget { get; }
         internal FanoutSpillBudget SpillBudget { get; }
         internal FanoutSpillController SpillController { get; } = new();
-        internal long SpillCeilingBytes { get; }
+        private Func<int> ActiveDestinationCount { get; }
+        internal long SpillCeilingBytes => SpillBudget.DestinationCeilingForCurrentActiveCount(
+            ActiveDestinationCount,
+            DeviceScheduler.BacklogTargetBytes)
         internal long SpillBytes => Interlocked.Read(ref _spillBytes);
         internal long PeakSpillBytes => Interlocked.Read(ref _peakSpillBytes);
         public Channel<FanoutMessage> Channel { get; }
