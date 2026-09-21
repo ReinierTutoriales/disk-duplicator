@@ -617,7 +617,7 @@ public static class CopyEngine
                         // delivery before any enqueue operation can fail.
                         await DeliverSingleDataAsync(
                             worker,
-                            new DataMessage(new SpillBlock(privateBlock)),
+                            new DataMessage(new SpillBlock(worker, privateBlock)),
                             job).ConfigureAwait(false);
                     }
 
@@ -681,12 +681,7 @@ public static class CopyEngine
             if (queueOwned) worker.DecrementQueueDepth();
             if (payloadOwned) ReleaseBranchPayload(worker, message.Block.Length);
             if (blockOwned)
-            {
-                var spill = message.Block.IsSpill;
-                var length = message.Block.Length;
                 message.Block.Release();
-                if (spill) worker.ReleaseSpill(length);
-            }
         }
     }
 
@@ -1207,10 +1202,8 @@ public static class CopyEngine
     private static void ReleaseBranchBlock(DestinationWorker worker, FanoutBlock block)
     {
         var length = block.Length;
-        var spill = block.IsSpill;
         ReleaseBranchPayload(worker, length);
         block.Release();
-        if (spill) worker.ReleaseSpill(length);
     }
 
     private static void ReleaseBranchPayload(DestinationWorker worker, int bytes)
@@ -1946,14 +1939,22 @@ public static class CopyEngine
         internal abstract void Release();
     }
 
-    private sealed class SpillBlock(FanoutSpillBlock block) : FanoutBlock
+    private sealed class SpillBlock(DestinationWorker owner, FanoutSpillBlock block) : FanoutBlock
     {
+        private DestinationWorker? _owner = owner ?? throw new ArgumentNullException(nameof(owner));
         private FanoutSpillBlock? _block = block ?? throw new ArgumentNullException(nameof(block));
         internal override int Length => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Length;
         internal override ReadOnlyMemory<byte> Memory => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Memory;
         internal override bool IsAlignedFor(int alignment) => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).IsAlignedFor(alignment);
         internal override bool IsSpill => true;
-        internal override void Release() => Interlocked.Exchange(ref _block, null)?.Dispose();
+        internal override void Release()
+        {
+            var released = Interlocked.Exchange(ref _block, null);
+            if (released is null) return;
+            var length = released.Length;
+            released.Dispose();
+            Interlocked.Exchange(ref _owner, null)?.ReleaseSpill(length);
+        }
     }
 
     internal sealed class SharedBlock : FanoutBlock
