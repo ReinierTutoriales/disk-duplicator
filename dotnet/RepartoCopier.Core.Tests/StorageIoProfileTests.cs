@@ -31,6 +31,6 @@ public sealed class StorageIoProfileTests
         Assert.AreEqual(256L * 1024 * 1024, usb.DeviceBacklogTargetBytes);
     }
 
-    private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
-        new(@"C:\dest", @"C:\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, trim, 0);
+    private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim, bool isNetwork = false) =>
+        new(@"C:\dest", @"C:\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, isNetwork, true, trim, 0);
 }
