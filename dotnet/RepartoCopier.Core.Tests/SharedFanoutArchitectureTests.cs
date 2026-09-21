@@ -17,7 +17,7 @@ public sealed class SharedFanoutArchitectureTests
     }
 
     [TestMethod]
-    public void SharedPoolBackpressureReplacesReplayAndPrivateBranchBuffers()
+    public void BoundedPrivateSpillReplacesReplayWithoutReintroducingGlobalBackpressure()
     {
         var root = FindRepositoryRoot();
         var core = Path.Combine(root, "dotnet", "RepartoCopier.Core");
@@ -27,6 +27,10 @@ public sealed class SharedFanoutArchitectureTests
         var engine = File.ReadAllText(Path.Combine(core, "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("SharedFanoutPoolBytes", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("bufferPool.RentAsync", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("FanoutSpillBlock.CopyFrom", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Math.Max(1, normal.Count)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.TryReserveSpill(read)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.SpillController.ShouldSpill", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -61,6 +65,8 @@ public sealed class SharedFanoutArchitectureTests
             "StageBranchAsync",
             "DetachBranchBlock",
             "EnableReplay",
+            "QueueDepthUpshifts++",
+            "QueueDepthDownshifts++",
         })
         {
             Assert.IsFalse(product.Contains(token, StringComparison.Ordinal), $"Ruta retirada reapareció: {token}");
