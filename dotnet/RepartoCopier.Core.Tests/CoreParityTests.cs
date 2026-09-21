@@ -512,6 +512,70 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task ReleasedDestinationCanBeRenamedExclusivelyBeforeJobWideCompletion()
+    {
+        using var temp = new TempDirectory("released-destination-exclusive");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[32 * 1024 * 1024 + 193];
+        new Random(2026092101).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+
+        var fastBase = Directory.CreateDirectory(Path.Combine(temp.Path, "fast")).FullName;
+        var slowBase = Directory.CreateDirectory(Path.Combine(temp.Path, "slow")).FullName;
+        var plan = CopyPlan.Create(source, [fastBase, slowBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(
+            plan,
+            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        while (!job.Completion.IsCompleted)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            var snapshots = job.Snapshot();
+            var released = snapshots
+                .Select((snapshot, slot) => (snapshot, slot))
+                .FirstOrDefault(item => item.snapshot.Phase == DestinationPhase.Releasable);
+            if (released.snapshot is not null)
+            {
+                var releasedBase = released.slot == 0 ? fastBase : slowBase;
+                var releasedRoot = Path.Combine(releasedBase, "Origen");
+                var copied = Path.Combine(releasedRoot, "payload.bin");
+
+                using (var exclusive = new FileStream(
+                    copied,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.AreEqual(payload.LongLength, exclusive.Length);
+
+                using (var manifest = new FileStream(
+                    StateLayout.ManifestPath(releasedRoot),
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.IsTrue(manifest.CanRead);
+
+                using (var journal = new FileStream(
+                    StateLayout.JournalPath(releasedRoot),
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.IsTrue(journal.CanRead);
+
+                using (var reacquired = DestinationStateLease.Acquire(releasedRoot))
+                {
+                }
+
+                break;
+            }
+            await Task.Delay(10, timeout.Token);
+        }
+
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
+        AssertHealthy(job);
+    }
+
+    [TestMethod]
     public void ParallelBlake3IncrementalMatchesSerialExactly()
     {
         var payload = new byte[17 * 1024 * 1024 + 997];
