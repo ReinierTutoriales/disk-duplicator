@@ -1,3 +1,5 @@
+> **CONTINUIDAD:** el estado exacto de implementación, CI confirmado, commits recientes, invariantes y próximos pasos está en [FANOUT-WORK-STATE.md](FANOUT-WORK-STATE.md). Leer ese documento antes de retomar cambios en `feature/fanout-per-destination-spill`.
+
 # FAN-OUT Performance Audit & Roadmap
 
 ## Objetivo
