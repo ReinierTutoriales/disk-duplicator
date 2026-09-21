@@ -977,13 +977,28 @@ public static class CopyEngine
             // "Done" must mean the destination is no longer held open by the copy
             // writer. Flush/close the recovery manifest and journal before releasing
             // the cross-process state lease so Windows can eject removable media.
-            recovery?.Dispose();
-            recovery = null;
+            Exception? recoveryCloseError = null;
+            try
+            {
+                recovery?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                recoveryCloseError = ex;
+                worker.Fail($"No se pudo cerrar el estado de recuperación: {ex.Message}");
+            }
+            finally
+            {
+                recovery = null;
+            }
 
+            // Lease release is unconditional here: even a recovery flush/close failure
+            // must not leave this process holding the destination lock. Releasable,
+            // however, is only advertised after a successful recovery close.
             if (!options.Verify || !worker.IsActive)
             {
                 worker.ReleaseStateLease();
-                if (worker.IsActive)
+                if (worker.IsActive && recoveryCloseError is null)
                     worker.Progress.SetPhase(DestinationPhase.Releasable);
             }
         }
