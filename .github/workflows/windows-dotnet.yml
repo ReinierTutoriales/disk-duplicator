@@ -11,6 +11,12 @@ on:
       - 'dotnet/**'
       - 'RepartoCopier.sln'
       - '.github/workflows/windows-dotnet.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dotnet/**'
+      - 'RepartoCopier.sln'
+      - '.github/workflows/windows-dotnet.yml'
   workflow_dispatch:
 
 permissions:
