@@ -50,4 +50,21 @@ public sealed class FanoutSpillBudgetTests
             budget.Release(bytes);
         Assert.AreEqual(0, budget.UsedBytes);
     }
+
+    [TestMethod]
+    public void FairShareGrowsWhenDestinationsBecomeInactive()
+    {
+        var budget = new FanoutSpillBudget();
+        var active = 8;
+        long Ceiling() => budget.DestinationCeilingForCurrentActiveCount(() => active, 512L * 1024 * 1024);
+
+        Assert.AreEqual(64L * 1024 * 1024, Ceiling());
+        active = 4;
+        Assert.AreEqual(128L * 1024 * 1024, Ceiling());
+        active = 2;
+        Assert.AreEqual(256L * 1024 * 1024, Ceiling());
+        active = 1;
+        Assert.AreEqual(512L * 1024 * 1024, Ceiling());
+    }
+
 }
