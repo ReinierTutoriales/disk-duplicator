@@ -28,13 +28,15 @@ public sealed class DestinationReleaseArchitectureTests
 
         var closeError = engine.IndexOf("Exception? recoveryCloseError = null;", StringComparison.Ordinal);
         var fail = engine.IndexOf("worker.Fail($\"No se pudo cerrar el estado de recuperación:", closeError, StringComparison.Ordinal);
-        var release = engine.IndexOf("worker.ReleaseStateLease();", fail, StringComparison.Ordinal);
-        var readyGuard = engine.IndexOf("worker.IsActive && recoveryCloseError is null", release, StringComparison.Ordinal);
+        var readyGuard = engine.IndexOf("worker.IsActive && recoveryCloseError is null", fail, StringComparison.Ordinal);
+        var safeRelease = engine.IndexOf("worker.MarkSuccessfullyReleased();", readyGuard, StringComparison.Ordinal);
+        var failureRelease = engine.IndexOf("worker.ReleaseStateLease();", safeRelease, StringComparison.Ordinal);
 
         Assert.IsTrue(closeError >= 0);
         Assert.IsTrue(fail > closeError, "Un fallo al cerrar recovery debe fallar sólo ese destino.");
-        Assert.IsTrue(release > fail, "El lease debe liberarse incluso si recovery falla al cerrar.");
-        Assert.IsTrue(readyGuard > release, "No se puede anunciar retiro seguro tras un fallo de cierre.");
+        Assert.IsTrue(readyGuard > fail, "La liberación exitosa debe estar protegida por cierre recovery correcto.");
+        Assert.IsTrue(safeRelease > readyGuard, "Sólo el camino exitoso puede anunciar liberación completa.");
+        Assert.IsTrue(failureRelease > safeRelease, "El camino fallido debe soltar el lease sin anunciar retiro seguro.");
     }
 
     [TestMethod]
