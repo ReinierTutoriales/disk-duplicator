@@ -10,9 +10,11 @@ public sealed class PhysicalDiskPerformanceBenchmarkTests
 {
     [TestMethod]
     [TestCategory("PhysicalBenchmark")]
-    [Ignore("Destructive only inside explicitly supplied benchmark directories. Set REPARTOCOPIER_BENCH_SOURCE and REPARTOCOPIER_BENCH_DESTINATIONS, then run this test explicitly on target hardware.")]
     public async Task MeasureRealSourceAndDestinationThroughput()
     {
+        if (!string.Equals(Environment.GetEnvironmentVariable("REPARTOCOPIER_RUN_PHYSICAL_BENCHMARK"), "1", StringComparison.Ordinal))
+            Assert.Inconclusive("Set REPARTOCOPIER_RUN_PHYSICAL_BENCHMARK=1 and the benchmark paths to run on target hardware.");
+
         var sourceBase = Environment.GetEnvironmentVariable("REPARTOCOPIER_BENCH_SOURCE");
         var destinationValue = Environment.GetEnvironmentVariable("REPARTOCOPIER_BENCH_DESTINATIONS");
         Assert.IsFalse(string.IsNullOrWhiteSpace(sourceBase));
@@ -44,7 +46,9 @@ public sealed class PhysicalDiskPerformanceBenchmarkTests
         var bytes = checked((long)sizeGiB * 1024 * 1024 * 1024);
         await CreateDeterministicFileAsync(sourceFile, bytes);
 
-        var plan = CopyPlan.Create(sourceFile, destinationRoots, skipSame: false, keepGoing: false);
+        // Use directory-copy semantics: each supplied destination remains a root,
+        // and the benchmark payload lands at <destination>/<runId>/payload.bin.
+        var plan = CopyPlan.Create(sourceRoot, destinations, skipSame: false, keepGoing: false);
         var wall = Stopwatch.StartNew();
         await using var job = CopyEngine.Start(
             plan,
