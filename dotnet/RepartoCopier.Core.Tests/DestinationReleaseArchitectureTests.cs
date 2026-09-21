@@ -64,6 +64,27 @@ public sealed class DestinationReleaseArchitectureTests
         Assert.IsTrue(ui.Contains("para retirar", StringComparison.OrdinalIgnoreCase));
     }
 
+    [TestMethod]
+    public void VerificationFailureDrainsWritersAndPreservesAlreadyReleasedDestinations()
+    {
+        var root = FindRepositoryRoot();
+        var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+
+        var capture = engine.IndexOf("verificationError = ex;", StringComparison.Ordinal);
+        var drainLoop = engine.IndexOf("while (pendingWriters.Count != 0)", StringComparison.Ordinal);
+        var rethrow = engine.IndexOf("ExceptionDispatchInfo.Capture(verificationError).Throw()", StringComparison.Ordinal);
+        Assert.IsTrue(drainLoop >= 0);
+        Assert.IsTrue(capture > drainLoop, "El fallo de verificación debe capturarse dentro del drenaje de writers.");
+        Assert.IsTrue(rethrow > capture, "El fallo sólo puede propagarse después de terminar el drenaje.");
+
+        Assert.IsTrue(
+            engine.Contains("and not DestinationPhase.Releasable", StringComparison.Ordinal),
+            "Un fallo ajeno no debe convertir un destino ya liberado en Failed.");
+        Assert.IsTrue(
+            engine.Contains("and not DestinationPhase.Done", StringComparison.Ordinal),
+            "Un fallo ajeno no debe sobrescribir un destino ya terminado.");
+    }
+
     private static string FindRepositoryRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
