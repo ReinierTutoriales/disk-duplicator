@@ -885,7 +885,7 @@ public static class CopyEngine
     private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
         CurrentFile current,
-        SharedBlock block,
+        FanoutBlock block,
         long offset,
         CopyJob job)
     {
@@ -1103,16 +1103,19 @@ public static class CopyEngine
             ReleaseRetryBlock(worker, result.RetryBlock);
     }
 
-    private static void ReleaseRetryBlock(DestinationWorker worker, SharedBlock? block)
+    private static void ReleaseRetryBlock(DestinationWorker worker, FanoutBlock? block)
     {
         if (block is not null)
             ReleaseBranchBlock(worker, block);
     }
 
-    private static void ReleaseBranchBlock(DestinationWorker worker, SharedBlock block)
+    private static void ReleaseBranchBlock(DestinationWorker worker, FanoutBlock block)
     {
-        ReleaseBranchPayload(worker, block.Length);
+        var length = block.Length;
+        var spill = block.IsSpill;
+        ReleaseBranchPayload(worker, length);
         block.Release();
+        if (spill) worker.ReleaseSpill(length);
     }
 
     private static void ReleaseBranchPayload(DestinationWorker worker, int bytes)
@@ -1811,7 +1814,7 @@ public static class CopyEngine
     private abstract record FanoutMessage;
     private abstract record ControlMessage : FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
-    private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
+    private sealed record DataMessage(FanoutBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
@@ -1839,7 +1842,26 @@ public static class CopyEngine
         }
     }
 
-    internal sealed class SharedBlock
+    private abstract class FanoutBlock
+    {
+        internal abstract int Length { get; }
+        internal abstract ReadOnlyMemory<byte> Memory { get; }
+        internal abstract bool IsAlignedFor(int alignment);
+        internal abstract bool IsSpill { get; }
+        internal abstract void Release();
+    }
+
+    private sealed class SpillBlock(FanoutSpillBlock block) : FanoutBlock
+    {
+        private FanoutSpillBlock? _block = block ?? throw new ArgumentNullException(nameof(block));
+        internal override int Length => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Length;
+        internal override ReadOnlyMemory<byte> Memory => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Memory;
+        internal override bool IsAlignedFor(int alignment) => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).IsAlignedFor(alignment);
+        internal override bool IsSpill => true;
+        internal override void Release() => Interlocked.Exchange(ref _block, null)?.Dispose();
+    }
+
+    internal sealed class SharedBlock : FanoutBlock
     {
         private SharedFanoutBufferPool.Lease? _lease;
 
@@ -1852,14 +1874,15 @@ public static class CopyEngine
             Length = length;
         }
 
-        public int Length { get; }
-        public ReadOnlyMemory<byte> Memory =>
+        internal override int Length { get; }
+        internal override ReadOnlyMemory<byte> Memory =>
             (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
 
-        internal bool IsAlignedFor(int alignment) =>
+        internal override bool IsAlignedFor(int alignment) =>
             (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
+        internal override bool IsSpill => false;
 
-        public void Release()
+        internal override void Release()
         {
             var lease = Volatile.Read(ref _lease)
                 ?? throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
@@ -2080,6 +2103,7 @@ public static class CopyEngine
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
         internal FanoutSpillBudget SpillBudget { get; }
+        internal FanoutSpillController SpillController { get; } = new();
         internal long SpillCeilingBytes { get; }
         internal long SpillBytes => Interlocked.Read(ref _spillBytes);
         internal long PeakSpillBytes => Interlocked.Read(ref _peakSpillBytes);
@@ -2175,6 +2199,7 @@ public static class CopyEngine
         public void Fail(string error)
         {
             if (Interlocked.Exchange(ref _active, 0) == 0) return;
+            SpillController.Fail();
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
             Channel.Writer.TryComplete();
@@ -2190,14 +2215,14 @@ public static class CopyEngine
 
     private sealed record PendingWriteResult(
         PendingWriteStatus Status,
-        SharedBlock? RetryBlock,
+        FanoutBlock? RetryBlock,
         long Offset,
         Exception? Error)
     {
         internal static PendingWriteResult Success() =>
             new(PendingWriteStatus.Success, null, 0, null);
 
-        internal static PendingWriteResult NeedsBufferedRetry(SharedBlock block, long offset, Exception error) =>
+        internal static PendingWriteResult NeedsBufferedRetry(FanoutBlock block, long offset, Exception error) =>
             new(PendingWriteStatus.NeedsBufferedRetry, block, offset, error);
 
         internal static PendingWriteResult Failed(Exception error) =>
