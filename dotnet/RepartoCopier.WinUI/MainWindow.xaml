@@ -205,7 +205,7 @@
 
                         <Grid Grid.Row="2" ColumnSpacing="16">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <StackPanel><TextBlock Text="Velocidad" Opacity="0.52" FontSize="10"/><TextBlock x:Name="SpeedMetricText" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
+                            <StackPanel><TextBlock Text="Velocidad fuente" Opacity="0.52" FontSize="10"/><TextBlock x:Name="SpeedMetricText" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Text="Restante" Opacity="0.52" FontSize="10"/><TextBlock x:Name="RemainingMetricText" Text="--:--:--" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="2"><TextBlock Text="Archivos" Opacity="0.52" FontSize="10"/><TextBlock x:Name="FilesMetricText" Text="0/0" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <CheckBox x:Name="ShutdownCheck" Grid.Column="3" Content="Apagar al terminar" HorizontalAlignment="Right" VerticalAlignment="Center"/>
