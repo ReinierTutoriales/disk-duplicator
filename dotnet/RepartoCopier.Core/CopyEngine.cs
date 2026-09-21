@@ -305,7 +305,7 @@ public static class CopyEngine
                     deviceSchedulers.For(copy.DestinationDevices[index]),
                     controlBudget,
                     spillBudget,
-                    copy.StateLeases[index],
+                    () => copy.ReleaseStateLease(index),
                     () => Volatile.Read(ref activeDestinationCount),
                     () => Interlocked.Decrement(ref activeDestinationCount)))
                 .ToArray();
@@ -1891,10 +1891,20 @@ public static class CopyEngine
         StorageDeviceInfo[] DestinationDevices,
         DestinationStateLease[] StateLeases)
     {
+        private readonly int[] _releasedStateLeases = new int[StateLeases.Length];
+
+        internal void ReleaseStateLease(int slot)
+        {
+            if ((uint)slot >= (uint)StateLeases.Length)
+                throw new ArgumentOutOfRangeException(nameof(slot));
+            if (Interlocked.Exchange(ref _releasedStateLeases[slot], 1) == 0)
+                StateLeases[slot].Dispose();
+        }
+
         internal void ReleaseStateLeases()
         {
-            foreach (var lease in StateLeases)
-                lease.Dispose();
+            for (var slot = 0; slot < StateLeases.Length; slot++)
+                ReleaseStateLease(slot);
         }
     }
 
@@ -2168,7 +2178,7 @@ public static class CopyEngine
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
-        private DestinationStateLease? _stateLease;
+        private Action? _releaseStateLease;
         private long _pendingPayloadBytes;
         private long _peakPendingPayloadBytes;
         private long _spillBytes;
@@ -2183,7 +2193,7 @@ public static class CopyEngine
             DeviceScheduler deviceScheduler,
             AdaptiveControlByteBudget controlBudget,
             FanoutSpillBudget spillBudget,
-            DestinationStateLease stateLease,
+            Action releaseStateLease,
             Func<int> activeDestinationCount,
             Action deactivateDestination)
         {
@@ -2194,7 +2204,7 @@ public static class CopyEngine
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
             SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
-            _stateLease = stateLease ?? throw new ArgumentNullException(nameof(stateLease));
+            _releaseStateLease = releaseStateLease ?? throw new ArgumentNullException(nameof(releaseStateLease));
             ActiveDestinationCount = activeDestinationCount ?? throw new ArgumentNullException(nameof(activeDestinationCount));
             DeactivateDestination = deactivateDestination ?? throw new ArgumentNullException(nameof(deactivateDestination));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
@@ -2229,7 +2239,7 @@ public static class CopyEngine
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
 
         public void ReleaseStateLease() =>
-            Interlocked.Exchange(ref _stateLease, null)?.Dispose();
+            Interlocked.Exchange(ref _releaseStateLease, null)?.Invoke();
 
         public void ReservePendingPayload(int bytes)
         {
