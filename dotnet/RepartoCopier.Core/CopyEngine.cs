@@ -381,7 +381,7 @@ public static class CopyEngine
             {
                 if (token.IsCancellationRequested)
                     progress[i].SetPhase(DestinationPhase.Cancelled, "Cancelado");
-                else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed)
+                else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed and not DestinationPhase.Releasable)
                     progress[i].SetPhase(DestinationPhase.Done);
             }
         }
@@ -961,7 +961,7 @@ public static class CopyEngine
             {
                 worker.ReleaseStateLease();
                 if (worker.IsActive)
-                    worker.Progress.SetPhase(DestinationPhase.Done);
+                    worker.Progress.SetPhase(DestinationPhase.Releasable);
             }
         }
     }
@@ -1371,7 +1371,7 @@ public static class CopyEngine
             else
             {
                 workers[slot].ReleaseStateLease();
-                progress[slot].SetPhase(DestinationPhase.Done);
+                progress[slot].SetPhase(DestinationPhase.Releasable);
             }
         }
 
@@ -1496,7 +1496,7 @@ public static class CopyEngine
                         if (Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]) == 0)
                         {
                             workers[target.Slot].ReleaseStateLease();
-                            target.Progress!.SetPhase(DestinationPhase.Done);
+                            target.Progress!.SetPhase(DestinationPhase.Releasable);
                         }
                     }
                 }
