@@ -180,16 +180,6 @@ internal static class DirectIoDestinationWriter
     private static class NativeMethods
     {
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool SetFilePointerEx(SafeFileHandle hFile, long distanceToMove, out long newFilePointer, uint moveMethod);
-
-        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool WriteFile(SafeFileHandle hFile, IntPtr buffer, uint numberOfBytesToWrite, out uint numberOfBytesWritten, IntPtr overlapped);
-
-        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
         internal static extern SafeFileHandle CreateFileW(
             string fileName,
