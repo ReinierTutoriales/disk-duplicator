@@ -51,6 +51,8 @@ public sealed class NonDestructiveStorageArchitectureTests
         Assert.IsTrue(engine.Contains("AtomicFileCommit.Commit", StringComparison.Ordinal));
         Assert.IsTrue(direct.Contains("CreateFileW(", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("PhysicalDrive", StringComparison.OrdinalIgnoreCase));
+        Assert.IsFalse(direct.Contains("SetFilePointerEx", StringComparison.Ordinal));
+        Assert.IsFalse(direct.Contains("WriteFile(", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("FSCTL_", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(direct.Contains("IOCTL_DISK_", StringComparison.OrdinalIgnoreCase));
     }
