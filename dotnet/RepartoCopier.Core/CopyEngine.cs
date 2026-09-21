@@ -1019,9 +1019,15 @@ public static class CopyEngine
             // however, is only advertised after a successful recovery close.
             if (!options.Verify || !worker.IsActive)
             {
-                worker.ReleaseStateLease();
                 if (worker.IsActive && recoveryCloseError is null)
+                {
+                    worker.MarkSuccessfullyReleased();
                     worker.Progress.SetPhase(DestinationPhase.Releasable);
+                }
+                else
+                {
+                    worker.ReleaseStateLease();
+                }
             }
         }
     }
@@ -1432,7 +1438,7 @@ public static class CopyEngine
                 progress[slot].SetPhase(DestinationPhase.Verifying);
             else
             {
-                workers[slot].ReleaseStateLease();
+                workers[slot].MarkSuccessfullyReleased();
                 progress[slot].SetPhase(DestinationPhase.Releasable);
             }
         }
@@ -1571,7 +1577,7 @@ public static class CopyEngine
                         workers[slot].ReleaseStateLease();
                     else if (Volatile.Read(ref remainingVerifyFiles[slot]) == 0)
                     {
-                        workers[slot].ReleaseStateLease();
+                        workers[slot].MarkSuccessfullyReleased();
                         progress[slot].SetPhase(DestinationPhase.Releasable);
                     }
                 }
@@ -2340,6 +2346,14 @@ public static class CopyEngine
 
         public void ReleaseStateLease() =>
             Interlocked.Exchange(ref _releaseStateLease, null)?.Invoke();
+
+        public void MarkSuccessfullyReleased()
+        {
+            ReleaseStateLease();
+            if (Interlocked.Exchange(ref _active, 0) == 0)
+                return;
+            DeactivateDestination();
+        }
 
         public void ReservePendingPayload(int bytes)
         {
