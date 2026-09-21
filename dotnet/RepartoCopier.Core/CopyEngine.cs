@@ -1493,22 +1493,25 @@ public static class CopyEngine
                     foreach (var target in targets.Where(target => !target.IsSource && workers[target.Slot].IsActive))
                     {
                         target.Progress!.MarkVerifyFileDone();
-                        if (Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]) == 0)
-                        {
-                            workers[target.Slot].ReleaseStateLease();
-                            target.Progress!.SetPhase(DestinationPhase.Releasable);
-                        }
+                        Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]);
                     }
                 }
             }
             finally
             {
+                // Verification handles must be closed before a successful destination
+                // is advertised as safe to remove.
                 foreach (var target in targets)
                     target.Dispose();
                 foreach (var slot in slots)
                 {
                     if (!workers[slot].IsActive)
                         workers[slot].ReleaseStateLease();
+                    else if (Volatile.Read(ref remainingVerifyFiles[slot]) == 0)
+                    {
+                        workers[slot].ReleaseStateLease();
+                        progress[slot].SetPhase(DestinationPhase.Releasable);
+                    }
                 }
             }
         }
