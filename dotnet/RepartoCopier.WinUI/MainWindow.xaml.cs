@@ -315,13 +315,15 @@ public sealed partial class MainWindow : Window
             var written = active.Length == 0
                 ? snapshots.Select(item => item.Written).DefaultIfEmpty(0UL).Max()
                 : active.Min(item => item.Written);
-            var speed = paused ? 0d : _copyProgressRate.Observe(written);
+            var progressSpeed = paused ? 0d : _copyProgressRate.Observe(written);
+            var diagnostics = _job.DiagnosticsSnapshot();
+            var sourceSpeed = paused ? 0d : diagnostics.SourceRead5sBytesPerSecond;
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
             OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
-            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
+            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(sourceSpeed);
             var remaining = total > written ? total - written : 0;
-            RemainingMetricText.Text = !paused && speed > 1
-                ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
+            RemainingMetricText.Text = !paused && progressSpeed > 1
+                ? FormatDuration(TimeSpan.FromSeconds(remaining / progressSpeed))
                 : "--:--:--";
             if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
             {
@@ -347,7 +349,9 @@ public sealed partial class MainWindow : Window
 
         var releasable = snapshots.Count(item => item.Phase == DestinationPhase.Releasable);
         if (releasable > 0)
-            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} listo{(releasable == 1 ? string.Empty : "s")} para retirar · los demás continúan";
+            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} liberado{(releasable == 1 ? string.Empty : "s")} · los demás continúan";
+
+        CurrentPathText.Text = FormatDestinationRates(snapshots);
 
         var current = snapshots.Select(item => item.LastFile).FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
         if (!string.IsNullOrWhiteSpace(current)) CurrentFileText.Text = Path.GetFileName(current);
@@ -700,6 +704,28 @@ public sealed partial class MainWindow : Window
 
     private static string FormatDuration(TimeSpan value) =>
         $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+
+    private static string FormatDestinationRates(IReadOnlyList<DestinationSnapshot> snapshots)
+    {
+        if (snapshots.Count == 0)
+            return string.Empty;
+
+        return string.Join("  ·  ", snapshots.Select((snapshot, index) =>
+        {
+            var rate = snapshot.Phase is DestinationPhase.Copying
+                ? snapshot.SustainedWrite5sBytesPerSecond
+                : 0d;
+            var state = snapshot.Phase switch
+            {
+                DestinationPhase.Releasable => "LIBERADO",
+                DestinationPhase.Verifying => "verificando",
+                DestinationPhase.Failed => "falló",
+                DestinationPhase.Cancelled => "cancelado",
+                _ => Throughput.Format(rate),
+            };
+            return $"D{index + 1} {state}";
+        }));
+    }
 
     private static string FormatBytes(ulong bytes)
     {
