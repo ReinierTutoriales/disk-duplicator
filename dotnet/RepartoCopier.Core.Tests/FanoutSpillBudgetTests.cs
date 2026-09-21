@@ -29,4 +29,25 @@ public sealed class FanoutSpillBudgetTests
         budget.Release(16 * 1024 * 1024);
         Assert.AreEqual(0L, budget.UsedBytes);
     }
+
+    [TestMethod]
+    public void MixedFiveDestinationBudgetCannotExceedGlobalCap()
+    {
+        var budget = new FanoutSpillBudget();
+        var ceiling = budget.DestinationCeiling(5, 512L * 1024 * 1024);
+        Assert.AreEqual(102L * 1024 * 1024 + 2L * 1024 * 1024 / 5, ceiling);
+
+        var reserved = new List<int>();
+        const int block = 8 * 1024 * 1024;
+        while (budget.TryReserve(block))
+            reserved.Add(block);
+
+        Assert.IsTrue(budget.UsedBytes <= FanoutSpillBudget.DefaultCapacityBytes);
+        Assert.IsTrue(budget.PeakUsedBytes <= FanoutSpillBudget.DefaultCapacityBytes);
+        Assert.IsFalse(budget.TryReserve(block));
+
+        foreach (var bytes in reserved)
+            budget.Release(bytes);
+        Assert.AreEqual(0, budget.UsedBytes);
+    }
 }
