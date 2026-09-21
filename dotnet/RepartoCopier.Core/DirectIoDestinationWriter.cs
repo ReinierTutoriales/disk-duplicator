@@ -14,6 +14,7 @@ internal static class DirectIoDestinationWriter
     private const uint OpenExisting = 3;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
+    private const uint FileFlagOverlapped = 0x40000000;
 
     internal static bool IsEligible(StorageDeviceInfo device, long fileSize)
     {
@@ -44,7 +45,7 @@ internal static class DirectIoDestinationWriter
             FileShare.Read,
             IntPtr.Zero,
             OpenExisting,
-            FileFlagNoBuffering | FileFlagSequentialScan,
+            FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -102,7 +103,7 @@ internal static class DirectIoDestinationWriter
                 {
                     using var io = await scheduler.AcquireIoAsync(alignedLength, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, data[..alignedLength], fileOffset);
+                    await WriteAtOffsetAsync(handle, data[..alignedLength], fileOffset, token).ConfigureAwait(false);
                     operations++;
                 }
 
@@ -117,7 +118,7 @@ internal static class DirectIoDestinationWriter
                     data.Span[alignedLength..].CopyTo(tail.Memory.Span);
                     using var io = await scheduler.AcquireIoAsync(Alignment, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, tail.Memory, checked(fileOffset + alignedLength));
+                    await WriteAtOffsetAsync(handle, tail.Memory, checked(fileOffset + alignedLength), token).ConfigureAwait(false);
                     operations++;
                 }
 
@@ -129,15 +130,19 @@ internal static class DirectIoDestinationWriter
             }
         }
 
-        private static void WriteSynchronous(SafeFileHandle handle, ReadOnlyMemory<byte> data, long offset)
+        private static async ValueTask WriteAtOffsetAsync(
+            SafeFileHandle handle,
+            ReadOnlyMemory<byte> data,
+            long offset,
+            CancellationToken token)
         {
-            // The destination can have QD > 1. Never mutate the shared file pointer:
-            // Shared file-pointer mutation races concurrent writes on the same handle.
-            // RandomAccess supplies an explicit offset per operation and preserves the
-            // aligned pinned FAN-OUT buffer required by FILE_FLAG_NO_BUFFERING.
+            // QD > 1 only becomes real concurrency if an admitted write yields while
+            // the device owns the request. The handle is OVERLAPPED and RandomAccess
+            // supplies an explicit offset, so the writer loop can launch the next
+            // admitted block instead of blocking synchronously on the current one.
             try
             {
-                RandomAccess.Write(handle, data.Span, offset);
+                await RandomAccess.WriteAsync(handle, data, offset, token).ConfigureAwait(false);
             }
             catch (IOException ex)
             {
