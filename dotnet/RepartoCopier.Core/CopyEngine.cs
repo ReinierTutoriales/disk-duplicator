@@ -498,16 +498,28 @@ public static class CopyEngine
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 active.RemoveAll(worker => !worker.IsActive);
-                if (active.Count == 0)
-                    return null;
+                if (active.Count == 0) return null;
 
-                var reservedReferences = active.Count;
+                var normal = new List<DestinationWorker>(active.Count);
+                var spilling = new List<DestinationWorker>();
+                foreach (var worker in active)
+                {
+                    if (worker.SpillController.ShouldSpill(
+                        worker.DeviceScheduler.QueuedBytes,
+                        worker.DeviceScheduler.BacklogTargetBytes,
+                        worker.SpillBytes))
+                        spilling.Add(worker);
+                    else
+                        normal.Add(worker);
+                }
+
+                // A producer reference is used only when every active destination is
+                // isolated. It gives the source a temporary aligned page to read/copy
+                // from without making any slow destination retain the shared pool.
+                var reservedReferences = Math.Max(1, normal.Count);
                 var poolStarted = Stopwatch.GetTimestamp();
                 SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
-                    readBufferSize,
-                    transferAlignment,
-                    reservedReferences,
-                    job.Token).ConfigureAwait(false);
+                    readBufferSize, transferAlignment, reservedReferences, job.Token).ConfigureAwait(false);
                 job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
                 job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
 
@@ -521,7 +533,6 @@ public static class CopyEngine
                     {
                         if (sharedSourceScheduler is not null)
                             sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
-
                         if (direct is not null)
                         {
                             try
@@ -540,48 +551,64 @@ public static class CopyEngine
                             }
                         }
                         else
-                        {
                             read = await buffered!.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                        }
                     }
-                    finally
-                    {
-                        sourceIo?.Dispose();
-                    }
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
+                    finally { sourceIo?.Dispose(); }
 
-                    if (read == 0)
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
-
+                    job.Telemetry.RecordSourceRead(read, Stopwatch.GetElapsedTime(readStarted));
+                    if (read == 0) throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
                     totalRead += read;
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
                     job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
-                    active.RemoveAll(worker => !worker.IsActive);
-                    var releasedBeforeDelivery = reservedReferences - active.Count;
-                    for (var released = 0; released < releasedBeforeDelivery; released++)
-                        lease.ReleaseReference();
-                    if (active.Count == 0)
+
+                    // Private copies are made before shared delivery. They never retain a
+                    // shared-pool reference, so a lagging branch cannot stall fast peers.
+                    foreach (var worker in spilling.ToArray())
                     {
-                        lease = null;
-                        return null;
+                        if (!worker.IsActive) continue;
+                        if (!worker.TryReserveSpill(read))
+                        {
+                            worker.Fail($"Destino {worker.Root}: abortado — no pudo sostener el ritmo mínimo de su propia clase de hardware");
+                            continue;
+                        }
+
+                        FanoutSpillBlock? privateBlock = null;
+                        try
+                        {
+                            privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], SpillAlignmentBytes);
+                            await DeliverSingleDataAsync(worker, new DataMessage(new SpillBlock(privateBlock)), job).ConfigureAwait(false);
+                            privateBlock = null;
+                        }
+                        catch
+                        {
+                            privateBlock?.Dispose();
+                            worker.ReleaseSpill(read);
+                            throw;
+                        }
                     }
 
-                    var block = new SharedBlock(lease, read);
-                    lease = null;
-                    var deliveryStarted = Stopwatch.GetTimestamp();
-                    await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
-                    var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                    job.Telemetry.RecordFanoutWait(deliveryElapsed);
+                    normal.RemoveAll(worker => !worker.IsActive);
+                    if (normal.Count > 0)
+                    {
+                        var released = reservedReferences - normal.Count;
+                        for (var n = 0; n < released; n++) lease.ReleaseReference();
+                        var block = new SharedBlock(lease, read);
+                        lease = null;
+                        await DeliverDataAsync(normal, new DataMessage(block), job).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // Release either the temporary producer reference or references
+                        // belonging to normal branches that failed before delivery.
+                        for (var n = 0; n < reservedReferences; n++) lease.ReleaseReference();
+                        lease = null;
+                    }
+
                     active.RemoveAll(worker => !worker.IsActive);
-                    if (active.Count == 0)
-                        return null;
+                    if (active.Count == 0) return null;
                 }
-                finally
-                {
-                    lease?.Dispose();
-                }
+                finally { lease?.Dispose(); }
             }
 
             ValidateCompletedSourceRead(entry, totalRead);
@@ -590,8 +617,37 @@ public static class CopyEngine
         finally
         {
             direct?.Dispose();
-            if (buffered is not null)
-                await buffered.DisposeAsync().ConfigureAwait(false);
+            if (buffered is not null) await buffered.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task DeliverSingleDataAsync(DestinationWorker worker, DataMessage message, CopyJob job)
+    {
+        var payloadOwned = false;
+        var queueOwned = false;
+        var blockOwned = true;
+        try
+        {
+            if (!worker.IsActive) return;
+            worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
+            worker.ReservePendingPayload(message.Block.Length);
+            payloadOwned = true;
+            worker.IncrementQueueDepth();
+            queueOwned = true;
+            if (worker.Channel.Writer.TryWrite(message))
+            {
+                payloadOwned = false;
+                queueOwned = false;
+                blockOwned = false;
+                return;
+            }
+            if (worker.IsActive) worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+        }
+        finally
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (payloadOwned) ReleaseBranchPayload(worker, message.Block.Length);
+            if (blockOwned) message.Block.Release();
         }
     }
 
