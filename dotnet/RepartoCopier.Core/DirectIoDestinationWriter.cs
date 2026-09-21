@@ -14,7 +14,6 @@ internal static class DirectIoDestinationWriter
     private const uint OpenExisting = 3;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
-    private const uint FileFlagOverlapped = 0x40000000;
 
     internal static bool IsEligible(StorageDeviceInfo device, long fileSize)
     {
@@ -45,7 +44,7 @@ internal static class DirectIoDestinationWriter
             FileShare.Read,
             IntPtr.Zero,
             OpenExisting,
-            FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,
+            FileFlagNoBuffering | FileFlagSequentialScan,
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
