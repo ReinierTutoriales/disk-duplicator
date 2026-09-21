@@ -85,6 +85,19 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsFalse(engine.Contains("VerificationBlock", StringComparison.Ordinal));
     }
 
+
+    [TestMethod]
+    public void CompletedFanoutMustReleaseEveryMemoryAndBacklogCounter()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("ValidateFanoutDrain(workers, spillBudget, activeBufferPool)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.PendingPayloadBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.SpillBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.DeviceScheduler.QueuedBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("spillBudget.UsedBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("bufferPool.UsedBytes != 0", StringComparison.Ordinal));
+    }
+
     private static string FindRepositoryRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
