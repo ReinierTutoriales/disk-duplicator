@@ -1489,7 +1489,7 @@ public static class CopyEngine
                         if (Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]) == 0)
                         {
                             workers[target.Slot].ReleaseStateLease();
-                            target.Progress.SetPhase(DestinationPhase.Done);
+                            target.Progress!.SetPhase(DestinationPhase.Done);
                         }
                     }
                 }
