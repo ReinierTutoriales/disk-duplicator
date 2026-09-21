@@ -305,6 +305,7 @@ public static class CopyEngine
                     deviceSchedulers.For(copy.DestinationDevices[index]),
                     controlBudget,
                     spillBudget,
+                    copy.StateLeases[index],
                     () => Volatile.Read(ref activeDestinationCount),
                     () => Interlocked.Decrement(ref activeDestinationCount)))
                 .ToArray();
@@ -941,6 +942,11 @@ public static class CopyEngine
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
             DrainAndRelease(worker.Channel.Reader, worker);
+            if (!options.Verify && worker.IsActive)
+            {
+                worker.ReleaseStateLease();
+                worker.Progress.SetPhase(DestinationPhase.Done);
+            }
         }
     }
 
@@ -2162,6 +2168,7 @@ public static class CopyEngine
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
+        private DestinationStateLease? _stateLease;
         private long _pendingPayloadBytes;
         private long _peakPendingPayloadBytes;
         private long _spillBytes;
@@ -2176,6 +2183,7 @@ public static class CopyEngine
             DeviceScheduler deviceScheduler,
             AdaptiveControlByteBudget controlBudget,
             FanoutSpillBudget spillBudget,
+            DestinationStateLease stateLease,
             Func<int> activeDestinationCount,
             Action deactivateDestination)
         {
@@ -2186,6 +2194,7 @@ public static class CopyEngine
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
             SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
+            _stateLease = stateLease ?? throw new ArgumentNullException(nameof(stateLease));
             ActiveDestinationCount = activeDestinationCount ?? throw new ArgumentNullException(nameof(activeDestinationCount));
             DeactivateDestination = deactivateDestination ?? throw new ArgumentNullException(nameof(deactivateDestination));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
@@ -2208,7 +2217,7 @@ public static class CopyEngine
         private Action DeactivateDestination { get; }
         internal long SpillCeilingBytes => SpillBudget.DestinationCeilingForCurrentActiveCount(
             ActiveDestinationCount,
-            DeviceScheduler.BacklogTargetBytes)
+            DeviceScheduler.BacklogTargetBytes);
         internal long SpillBytes => Interlocked.Read(ref _spillBytes);
         internal long PeakSpillBytes => Interlocked.Read(ref _peakSpillBytes);
         public Channel<FanoutMessage> Channel { get; }
@@ -2218,6 +2227,9 @@ public static class CopyEngine
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
+
+        public void ReleaseStateLease() =>
+            Interlocked.Exchange(ref _stateLease, null)?.Dispose();
 
         public void ReservePendingPayload(int bytes)
         {
