@@ -55,8 +55,8 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsTrue(direct.Contains("RandomAccess.WriteAsync(handle, data, offset, token)", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("SetFilePointerEx(handle", StringComparison.Ordinal));
-        Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
-        Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
+        Assert.IsTrue(coordinator.Contains("RandomAccess.WriteAsync(handle, data, offset, token)", StringComparison.Ordinal));
+        Assert.IsFalse(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));
     }
 
