@@ -7,7 +7,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class StorageIoProfileTests
 {
     [TestMethod]
-    public void AllLocalStorageProfilesUseFixedQueueDepthOne()
+    public void StorageProfilesUseFixedQueueDepthByHardwareClass()
     {
         var profiles = new[]
         {
@@ -18,15 +18,15 @@ public sealed class StorageIoProfileTests
             StorageIoProfile.For(Device("NVMe", StorageMediaKind.SolidState, true)),
             StorageIoProfile.For(Device("Unknown", StorageMediaKind.Unknown, null)),
         };
-        foreach (var profile in profiles) Assert.AreEqual(1, profile.InitialQueueDepth);
+        CollectionAssert.AreEqual(new[] { 4, 1, 4, 2, 8, 1 }, profiles.Select(profile => profile.InitialQueueDepth).ToArray());
     }
 
     [TestMethod]
-    public void UsbStillKeepsUsefulBacklogAccountingWithoutIncreasingIoConcurrency()
+    public void UsbSsdUsesQueueDepthFourAndKeepsItsBacklogBudget()
     {
         var usb = StorageIoProfile.For(Device("USB", StorageMediaKind.SolidState, true));
         Assert.AreEqual(StorageProfileKind.UsbSsd, usb.Kind);
-        Assert.AreEqual(1, usb.InitialQueueDepth);
+        Assert.AreEqual(4, usb.InitialQueueDepth);
         Assert.AreEqual(256L * 1024 * 1024, usb.DeviceBacklogTargetBytes);
     }
 
