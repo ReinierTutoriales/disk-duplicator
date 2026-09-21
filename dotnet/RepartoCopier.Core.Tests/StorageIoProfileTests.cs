@@ -16,9 +16,10 @@ public sealed class StorageIoProfileTests
             StorageIoProfile.For(Device("SATA", StorageMediaKind.SolidState, true)),
             StorageIoProfile.For(Device("SATA", StorageMediaKind.Rotational, false)),
             StorageIoProfile.For(Device("NVMe", StorageMediaKind.SolidState, true)),
+            StorageIoProfile.For(Device("Network", StorageMediaKind.Unknown, null, isNetwork: true)),
             StorageIoProfile.For(Device("Unknown", StorageMediaKind.Unknown, null)),
         };
-        CollectionAssert.AreEqual(new[] { 4, 1, 4, 2, 8, 1 }, profiles.Select(profile => profile.InitialQueueDepth).ToArray());
+        CollectionAssert.AreEqual(new[] { 4, 1, 4, 2, 8, 2, 1 }, profiles.Select(profile => profile.InitialQueueDepth).ToArray());
     }
 
     [TestMethod]
