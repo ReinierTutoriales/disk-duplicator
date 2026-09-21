@@ -445,7 +445,15 @@ public static class CopyEngine
         var token = job.Token;
         try
         {
-            for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+            // Plan once, outside the block hot path: files needed by more destinations
+            // go first so a resumed job maximizes one-read/many-writes fan-out.
+            var fileOrder = Enumerable.Range(0, copy.Files.Count)
+                .OrderByDescending(fileIndex =>
+                    Enumerable.Range(0, workers.Length).Count(slot => !skipMasks[fileIndex][slot]))
+                .ThenBy(fileIndex => fileIndex)
+                .ToArray();
+
+            foreach (var fileIndex in fileOrder)
             {
                 token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(token).ConfigureAwait(false);
@@ -942,10 +950,11 @@ public static class CopyEngine
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
             DrainAndRelease(worker.Channel.Reader, worker);
-            if (!options.Verify && worker.IsActive)
+            if (!options.Verify || !worker.IsActive)
             {
                 worker.ReleaseStateLease();
-                worker.Progress.SetPhase(DestinationPhase.Done);
+                if (worker.IsActive)
+                    worker.Progress.SetPhase(DestinationPhase.Done);
             }
         }
     }
@@ -1339,6 +1348,7 @@ public static class CopyEngine
         CopyJob job,
         DeviceScheduler? sharedSourceScheduler)
     {
+        var remainingVerifyFiles = new int[workers.Length];
         for (var slot = 0; slot < workers.Length; slot++)
         {
             if (!workers[slot].IsActive)
@@ -1347,9 +1357,15 @@ public static class CopyEngine
                 .Where(entry => workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             var bytes = entries.Aggregate<FileEntry, ulong>(0, (sum, entry) => checked(sum + (ulong)entry.Size));
+            remainingVerifyFiles[slot] = entries.Length;
             progress[slot].SetVerifyWork(bytes, (ulong)entries.Length);
             if (entries.Length > 0)
                 progress[slot].SetPhase(DestinationPhase.Verifying);
+            else
+            {
+                workers[slot].ReleaseStateLease();
+                progress[slot].SetPhase(DestinationPhase.Done);
+            }
         }
 
         foreach (var entry in copy.Files)
@@ -1468,13 +1484,25 @@ public static class CopyEngine
                 else
                 {
                     foreach (var target in targets.Where(target => !target.IsSource && workers[target.Slot].IsActive))
+                    {
                         target.Progress!.MarkVerifyFileDone();
+                        if (Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]) == 0)
+                        {
+                            workers[target.Slot].ReleaseStateLease();
+                            target.Progress.SetPhase(DestinationPhase.Done);
+                        }
+                    }
                 }
             }
             finally
             {
                 foreach (var target in targets)
                     target.Dispose();
+                foreach (var slot in slots)
+                {
+                    if (!workers[slot].IsActive)
+                        workers[slot].ReleaseStateLease();
+                }
             }
         }
     }
