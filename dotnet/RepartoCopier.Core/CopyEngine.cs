@@ -347,6 +347,8 @@ public static class CopyEngine
 
             job.Telemetry.RecordCopyPhase(Stopwatch.GetElapsedTime(copyPhaseStarted));
 
+            ValidateFanoutDrain(workers, spillBudget, activeBufferPool);
+
             if (producerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
             if (writerError is not null)
@@ -399,6 +401,31 @@ public static class CopyEngine
             bufferPool?.Dispose();
             copy.ReleaseStateLeases();
         }
+    }
+
+    private static void ValidateFanoutDrain(
+        IReadOnlyList<DestinationWorker> workers,
+        FanoutSpillBudget spillBudget,
+        SharedFanoutBufferPool bufferPool)
+    {
+        var failures = new List<string>();
+        foreach (var worker in workers)
+        {
+            if (worker.PendingPayloadBytes != 0)
+                failures.Add($"{worker.Root}: pending={worker.PendingPayloadBytes}");
+            if (worker.SpillBytes != 0)
+                failures.Add($"{worker.Root}: spill={worker.SpillBytes}");
+            if (worker.DeviceScheduler.QueuedBytes != 0)
+                failures.Add($"{worker.Root}: queued={worker.DeviceScheduler.QueuedBytes}");
+        }
+        if (spillBudget.UsedBytes != 0)
+            failures.Add($"spill-global={spillBudget.UsedBytes}");
+        if (bufferPool.UsedBytes != 0)
+            failures.Add($"shared-pool={bufferPool.UsedBytes}");
+
+        if (failures.Count != 0)
+            throw new InvalidOperationException(
+                "FAN-OUT terminó con recursos retenidos: " + string.Join(", ", failures));
     }
 
     private static async Task ProducerLoopAsync(
