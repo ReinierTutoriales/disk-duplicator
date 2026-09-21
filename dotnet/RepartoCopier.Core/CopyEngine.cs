@@ -347,6 +347,7 @@ public static class CopyEngine
             }
 
             Exception? writerError = null;
+            Exception? verificationError = null;
             var verifyPhaseStarted = options.Verify ? Stopwatch.GetTimestamp() : 0;
             try
             {
@@ -374,9 +375,21 @@ public static class CopyEngine
                             .Where(item => workers[item.Slot].IsActive)
                             .Select(item => item.Slot)
                             .ToArray();
-                        if (readySlots.Length != 0)
-                            await VerifyDestinationsAsync(
-                                copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler, readySlots).ConfigureAwait(false);
+                        if (readySlots.Length != 0 && verificationError is null)
+                        {
+                            try
+                            {
+                                await VerifyDestinationsAsync(
+                                    copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler, readySlots).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                // Keep draining every writer before shared FAN-OUT resources
+                                // can be disposed. The first verification error is rethrown only
+                                // after all destination writers have reached their terminal state.
+                                verificationError = ex;
+                            }
+                        }
                     }
                 }
                 else
@@ -396,6 +409,8 @@ public static class CopyEngine
 
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
+            if (verificationError is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(verificationError).Throw();
 
             activeBufferPool.Dispose();
             bufferPool = null;
@@ -415,7 +430,14 @@ public static class CopyEngine
         }
         catch (Exception ex)
         {
-            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Failed))
+            foreach (var item in progress.Where(p =>
+            {
+                var phase = p.Snapshot().Phase;
+                return phase is not DestinationPhase.Failed
+                    and not DestinationPhase.Releasable
+                    and not DestinationPhase.Done
+                    and not DestinationPhase.Cancelled;
+            }))
                 item.SetPhase(DestinationPhase.Failed, ex.Message);
         }
         finally
