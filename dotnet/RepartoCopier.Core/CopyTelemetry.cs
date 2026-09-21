@@ -79,6 +79,11 @@ public sealed record CopyDiagnosticsSnapshot(
     public int MinimumTransferBytes { get; init; }
     public int MaximumTransferBytes { get; init; }
     public IReadOnlyList<IoRecoveryEvent> RecentIoRecoveryEvents { get; init; } = [];
+    public long SpillCopyBytes { get; init; }
+    public TimeSpan SpillCopyTime { get; init; }
+    public long PeakGlobalSpillBytes { get; init; }
+    public long GlobalSpillCapacityBytes { get; init; }
+    public double SpillCopyBytesPerSecond => Rate(SpillCopyBytes, SpillCopyTime);
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -109,6 +114,7 @@ internal sealed class CopyTelemetry
     private readonly SlidingByteRateWindow _verifyLogicalRate = new();
     private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
+    private FanoutSpillBudget? _spillBudget;
     private long _sourceReadBytes, _sourceReadTicks;
     private long _directSourceReadBytes, _directSourceReadOperations;
     private int _directSourceFallbacks;
@@ -124,9 +130,19 @@ internal sealed class CopyTelemetry
     private int _currentTransferBytes, _minimumTransferBytes = int.MaxValue, _maximumTransferBytes;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
+    private long _spillCopyBytes, _spillCopyTicks;
 
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
         _deviceSchedulers = schedulers.ToArray();
+
+    internal void AttachSpillBudget(FanoutSpillBudget budget) =>
+        _spillBudget = budget ?? throw new ArgumentNullException(nameof(budget));
+
+    internal void RecordSpillCopy(int bytes, TimeSpan elapsed)
+    {
+        AddBytes(ref _spillCopyBytes, bytes);
+        AddTicks(ref _spillCopyTicks, elapsed);
+    }
 
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed)
@@ -256,6 +272,10 @@ internal sealed class CopyTelemetry
             MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
             MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
             RecentIoRecoveryEvents = _ioRecoveryEvents.ToArray(),
+            SpillCopyBytes = Interlocked.Read(ref _spillCopyBytes),
+            SpillCopyTime = ToTimeSpan(Interlocked.Read(ref _spillCopyTicks)),
+            PeakGlobalSpillBytes = _spillBudget?.PeakUsedBytes ?? 0,
+            GlobalSpillCapacityBytes = _spillBudget?.CapacityBytes ?? 0,
         };
     }
 
