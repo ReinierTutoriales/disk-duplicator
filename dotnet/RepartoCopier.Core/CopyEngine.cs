@@ -295,6 +295,7 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
+            var activeDestinationCount = copy.DestinationRoots.Length;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(
                     root,
@@ -304,7 +305,8 @@ public static class CopyEngine
                     deviceSchedulers.For(copy.DestinationDevices[index]),
                     controlBudget,
                     spillBudget,
-                    () => workers.Count(worker => worker.IsActive)))
+                    () => Volatile.Read(ref activeDestinationCount),
+                    () => Interlocked.Decrement(ref activeDestinationCount)))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -2174,7 +2176,8 @@ public static class CopyEngine
             DeviceScheduler deviceScheduler,
             AdaptiveControlByteBudget controlBudget,
             FanoutSpillBudget spillBudget,
-            Func<int> activeDestinationCount)
+            Func<int> activeDestinationCount,
+            Action deactivateDestination)
         {
             Root = root;
             Slot = slot;
@@ -2184,6 +2187,7 @@ public static class CopyEngine
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
             SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
             ActiveDestinationCount = activeDestinationCount ?? throw new ArgumentNullException(nameof(activeDestinationCount));
+            DeactivateDestination = deactivateDestination ?? throw new ArgumentNullException(nameof(deactivateDestination));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2201,6 +2205,7 @@ public static class CopyEngine
         internal FanoutSpillBudget SpillBudget { get; }
         internal FanoutSpillController SpillController { get; } = new();
         private Func<int> ActiveDestinationCount { get; }
+        private Action DeactivateDestination { get; }
         internal long SpillCeilingBytes => SpillBudget.DestinationCeilingForCurrentActiveCount(
             ActiveDestinationCount,
             DeviceScheduler.BacklogTargetBytes)
@@ -2298,6 +2303,7 @@ public static class CopyEngine
         public void Fail(string error)
         {
             if (Interlocked.Exchange(ref _active, 0) == 0) return;
+            DeactivateDestination();
             SpillController.Fail();
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
