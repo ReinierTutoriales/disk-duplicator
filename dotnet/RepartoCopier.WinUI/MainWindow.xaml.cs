@@ -349,7 +349,7 @@ public sealed partial class MainWindow : Window
 
         var releasable = snapshots.Count(item => item.Phase == DestinationPhase.Releasable);
         if (releasable > 0)
-            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} liberado{(releasable == 1 ? string.Empty : "s")} · los demás continúan";
+            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} liberado{(releasable == 1 ? string.Empty : "s")} y listo{(releasable == 1 ? string.Empty : "s")} para retirar · los demás continúan";
 
         CurrentPathText.Text = FormatDestinationRates(snapshots);
 
