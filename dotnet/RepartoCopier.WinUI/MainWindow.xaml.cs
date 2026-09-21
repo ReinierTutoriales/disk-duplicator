@@ -242,7 +242,7 @@ public sealed partial class MainWindow : Window
                 var completedWithErrors = failed > 0 || erroredFiles > 0;
                 var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
                 var filesDone = snapshots.Count == 0 ? 0UL : snapshots
-                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                     .Select(item => item.FilesDone)
                     .DefaultIfEmpty(snapshots.Max(item => item.FilesDone))
                     .Min();
@@ -285,7 +285,7 @@ public sealed partial class MainWindow : Window
         if (verifying)
         {
             var verifyActive = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                 .ToArray();
             var verifyTotal = snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max();
             var verified = verifyActive.Length == 0
@@ -309,7 +309,7 @@ public sealed partial class MainWindow : Window
         else
         {
             var active = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                 .ToArray();
             var total = snapshots.Select(item => item.Total).DefaultIfEmpty(0UL).Max();
             var written = active.Length == 0
@@ -334,7 +334,7 @@ public sealed partial class MainWindow : Window
         OverallPercentText.Text = $"{percent:0}%";
 
         var activeFileSnapshots = snapshots
-            .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+            .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
             .ToArray();
         var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
         var filesDone = activeFileSnapshots.Length == 0
@@ -344,6 +344,10 @@ public sealed partial class MainWindow : Window
 
         if (_copyStartedAt is not null)
             ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
+
+        var releasable = snapshots.Count(item => item.Phase == DestinationPhase.Releasable);
+        if (releasable > 0)
+            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} listo{(releasable == 1 ? string.Empty : "s")} para retirar · los demás continúan";
 
         var current = snapshots.Select(item => item.LastFile).FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
         if (!string.IsNullOrWhiteSpace(current)) CurrentFileText.Text = Path.GetFileName(current);
