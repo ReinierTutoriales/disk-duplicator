@@ -94,7 +94,6 @@ public static class CopyEngine
 
     private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
     private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
-    private const int SpillAlignmentBytes = 64 * 1024;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -576,7 +575,7 @@ public static class CopyEngine
                         FanoutSpillBlock? privateBlock = null;
                         try
                         {
-                            privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], SpillAlignmentBytes);
+                            privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
                             await DeliverSingleDataAsync(worker, new DataMessage(new SpillBlock(privateBlock)), job).ConfigureAwait(false);
                             privateBlock = null;
                         }
@@ -647,7 +646,13 @@ public static class CopyEngine
         {
             if (queueOwned) worker.DecrementQueueDepth();
             if (payloadOwned) ReleaseBranchPayload(worker, message.Block.Length);
-            if (blockOwned) message.Block.Release();
+            if (blockOwned)
+            {
+                var spill = message.Block.IsSpill;
+                var length = message.Block.Length;
+                message.Block.Release();
+                if (spill) worker.ReleaseSpill(length);
+            }
         }
     }
 
@@ -1898,7 +1903,7 @@ public static class CopyEngine
         }
     }
 
-    private abstract class FanoutBlock
+    internal abstract class FanoutBlock
     {
         internal abstract int Length { get; }
         internal abstract ReadOnlyMemory<byte> Memory { get; }
