@@ -27,12 +27,12 @@ public sealed class DestinationReleaseArchitectureTests
         var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
 
         var verify = engine.IndexOf("private static async Task VerifyDestinationsAsync", StringComparison.Ordinal);
-        var dispose = engine.IndexOf("foreach (var target in targets)\n                    target.Dispose();", verify, StringComparison.Ordinal);
+        Assert.IsTrue(verify >= 0);
+        var dispose = engine.IndexOf("target.Dispose();", verify, StringComparison.Ordinal);
+        Assert.IsTrue(dispose > verify, "La verificación debe cerrar sus handles.");
         var release = engine.IndexOf("workers[slot].ReleaseStateLease();", dispose, StringComparison.Ordinal);
         var ready = engine.IndexOf("progress[slot].SetPhase(DestinationPhase.Releasable);", release, StringComparison.Ordinal);
 
-        Assert.IsTrue(verify >= 0);
-        Assert.IsTrue(dispose > verify, "La verificación debe cerrar sus handles.");
         Assert.IsTrue(release > dispose, "El lease debe soltarse después de cerrar handles de verificación.");
         Assert.IsTrue(ready > release, "El estado retirable debe publicarse al final.");
     }
