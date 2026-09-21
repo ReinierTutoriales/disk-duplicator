@@ -7,6 +7,7 @@ public enum DestinationPhase
     Idle,
     Copying,
     Verifying,
+    Releasable,
     Done,
     Failed,
     Cancelled,
