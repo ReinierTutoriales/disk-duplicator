@@ -22,6 +22,14 @@ internal sealed class FanoutSpillBudget
     internal long UsedBytes => Interlocked.Read(ref _usedBytes);
     internal long PeakUsedBytes => Interlocked.Read(ref _peakUsedBytes);
 
+    internal long DestinationCeilingForCurrentActiveCount(
+        Func<int> activeDestinationCount,
+        long backlogTargetBytes)
+    {
+        ArgumentNullException.ThrowIfNull(activeDestinationCount);
+        return DestinationCeiling(Math.Max(1, activeDestinationCount()), backlogTargetBytes);
+    }
+
     internal long DestinationCeiling(int activeDestinations, long backlogTargetBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(activeDestinations);
