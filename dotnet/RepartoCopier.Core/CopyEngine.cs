@@ -339,43 +339,66 @@ public static class CopyEngine
                     worker.Channel.Writer.TryComplete(producerError);
             }
 
+            if (producerError is not null)
+            {
+                try { await Task.WhenAll(writerTasks).ConfigureAwait(false); }
+                catch { }
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
+            }
+
             Exception? writerError = null;
+            var verifyPhaseStarted = options.Verify ? Stopwatch.GetTimestamp() : 0;
             try
             {
-                await Task.WhenAll(writerTasks).ConfigureAwait(false);
+                if (options.Verify && !token.IsCancellationRequested)
+                {
+                    // The producer is finished, so source reads are no longer competing with COPY.
+                    // Verify destinations in writer-completion batches while slower writers keep
+                    // draining their already-produced fan-out pages. This keeps verification
+                    // source-shared inside each batch without a job-wide writer barrier.
+                    var pendingWriters = writerTasks
+                        .Select((task, slot) => (Task: task, Slot: slot))
+                        .ToList();
+                    while (pendingWriters.Count != 0)
+                    {
+                        var completedTask = await Task.WhenAny(pendingWriters.Select(item => item.Task)).ConfigureAwait(false);
+                        var ready = pendingWriters.Where(item => item.Task.IsCompleted).ToArray();
+                        foreach (var item in ready)
+                        {
+                            pendingWriters.Remove(item);
+                            try { await item.Task.ConfigureAwait(false); }
+                            catch (Exception ex) { writerError ??= ex; }
+                        }
+
+                        var readySlots = ready
+                            .Where(item => workers[item.Slot].IsActive)
+                            .Select(item => item.Slot)
+                            .ToArray();
+                        if (readySlots.Length != 0)
+                            await VerifyDestinationsAsync(
+                                copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler, readySlots).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    try { await Task.WhenAll(writerTasks).ConfigureAwait(false); }
+                    catch (Exception ex) { writerError = ex; }
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                writerError = ex;
+                if (options.Verify)
+                    job.Telemetry.RecordVerifyPhase(Stopwatch.GetElapsedTime(verifyPhaseStarted));
             }
 
             job.Telemetry.RecordCopyPhase(Stopwatch.GetElapsedTime(copyPhaseStarted));
-
             ValidateFanoutDrain(workers, spillBudget, activeBufferPool);
 
-            if (producerError is not null)
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
 
-            // COPY owns the large 256 MiB page pool. Verification deliberately does not.
-            // Once every writer drained, release that pinned/locked region before VERIFY.
             activeBufferPool.Dispose();
             bufferPool = null;
-
-            if (options.Verify && !token.IsCancellationRequested)
-            {
-                var verifyPhaseStarted = Stopwatch.GetTimestamp();
-                try
-                {
-                    await VerifyDestinationsAsync(
-                        copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
-                }
-                finally
-                {
-                    job.Telemetry.RecordVerifyPhase(Stopwatch.GetElapsedTime(verifyPhaseStarted));
-                }
-            }
 
             for (var i = 0; i < progress.Length; i++)
             {
@@ -1353,12 +1376,14 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         CopyJob job,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        IReadOnlyCollection<int> eligibleSlots)
     {
+        var eligible = eligibleSlots.ToHashSet();
         var remainingVerifyFiles = new int[workers.Length];
         for (var slot = 0; slot < workers.Length; slot++)
         {
-            if (!workers[slot].IsActive)
+            if (!eligible.Contains(slot) || !workers[slot].IsActive)
                 continue;
             var entries = copy.Files
                 .Where(entry => workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
@@ -1380,7 +1405,7 @@ public static class CopyEngine
             job.Token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
-            var slots = Enumerable.Range(0, workers.Length)
+            var slots = eligible
                 .Where(slot => workers[slot].IsActive && workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             if (slots.Length == 0)
