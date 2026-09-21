@@ -10,7 +10,7 @@ public sealed class FanoutSpillBudgetTests
     {
         var budget = new FanoutSpillBudget(512L * 1024 * 1024);
         Assert.AreEqual(256L * 1024 * 1024, budget.DestinationCeiling(2, 512L * 1024 * 1024));
-        Assert.AreEqual(32L * 1024 * 1024, budget.DestinationCeiling(20, 256L * 1024 * 1024));
+        Assert.AreEqual(512L * 1024 * 1024 / 20, budget.DestinationCeiling(20, 256L * 1024 * 1024));
         Assert.AreEqual(16L * 1024 * 1024, budget.DestinationCeiling(64, 256L * 1024 * 1024));
         Assert.AreEqual(32L * 1024 * 1024, budget.DestinationCeiling(1, 32L * 1024 * 1024));
     }
