@@ -98,6 +98,25 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsTrue(engine.Contains("bufferPool.UsedBytes != 0", StringComparison.Ordinal));
     }
 
+
+    [TestMethod]
+    public void PrivateSpillBlockOwnsItsReservationUntilRelease()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("new SpillBlock(worker, privateBlock)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Interlocked.Exchange(ref _owner, null)?.ReleaseSpill(length)", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("if (spill) worker.ReleaseSpill(length)", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void ActiveDestinationCountUsesAtomicLifecycleNotHotPathEnumeration()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("Volatile.Read(ref activeDestinationCount)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Interlocked.Decrement(ref activeDestinationCount)", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("workers.Count(worker => worker.IsActive)", StringComparison.Ordinal));
+    }
+
     private static string FindRepositoryRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
