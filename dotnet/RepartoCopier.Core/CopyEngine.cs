@@ -94,6 +94,7 @@ public static class CopyEngine
 
     private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
     private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
+    private const int SpillAlignmentBytes = 64 * 1024;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -280,6 +281,7 @@ public static class CopyEngine
         using var resources = new ResourceGovernor();
         SharedFanoutBufferPool? bufferPool = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
+        var spillBudget = new FanoutSpillBudget();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         try
@@ -300,7 +302,9 @@ public static class CopyEngine
                     progress[index],
                     copy.DestinationDevices[index],
                     deviceSchedulers.For(copy.DestinationDevices[index]),
-                    controlBudget))
+                    controlBudget,
+                    spillBudget,
+                    copy.DestinationRoots.Length))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -2039,6 +2043,8 @@ public static class CopyEngine
         private int _queueDepth;
         private long _pendingPayloadBytes;
         private long _peakPendingPayloadBytes;
+        private long _spillBytes;
+        private long _peakSpillBytes;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
 
         public DestinationWorker(
@@ -2047,7 +2053,9 @@ public static class CopyEngine
             DestinationProgress progress,
             StorageDeviceInfo device,
             DeviceScheduler deviceScheduler,
-            AdaptiveControlByteBudget controlBudget)
+            AdaptiveControlByteBudget controlBudget,
+            FanoutSpillBudget spillBudget,
+            int destinationCount)
         {
             Root = root;
             Slot = slot;
@@ -2055,6 +2063,8 @@ public static class CopyEngine
             Device = device;
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
+            SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
+            SpillCeilingBytes = spillBudget.DestinationCeiling(destinationCount, deviceScheduler.BacklogTargetBytes);
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2069,6 +2079,10 @@ public static class CopyEngine
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
+        internal FanoutSpillBudget SpillBudget { get; }
+        internal long SpillCeilingBytes { get; }
+        internal long SpillBytes => Interlocked.Read(ref _spillBytes);
+        internal long PeakSpillBytes => Interlocked.Read(ref _peakSpillBytes);
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
@@ -2101,6 +2115,44 @@ public static class CopyEngine
                 if (Interlocked.CompareExchange(ref _pendingPayloadBytes, current - bytes, current) == current)
                     return;
             }
+        }
+
+        internal bool TryReserveSpill(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            while (true)
+            {
+                var current = Interlocked.Read(ref _spillBytes);
+                var next = checked(current + bytes);
+                if (next > SpillCeilingBytes || !SpillBudget.TryReserve(bytes))
+                    return false;
+                if (Interlocked.CompareExchange(ref _spillBytes, next, current) == current)
+                {
+                    var peak = Interlocked.Read(ref _peakSpillBytes);
+                    while (next > peak)
+                    {
+                        var observed = Interlocked.CompareExchange(ref _peakSpillBytes, next, peak);
+                        if (observed == peak) break;
+                        peak = observed;
+                    }
+                    return true;
+                }
+                SpillBudget.Release(bytes);
+            }
+        }
+
+        internal void ReleaseSpill(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            while (true)
+            {
+                var current = Interlocked.Read(ref _spillBytes);
+                if (current < bytes)
+                    throw new InvalidOperationException("El destino intentó liberar más spill del reservado.");
+                if (Interlocked.CompareExchange(ref _spillBytes, current - bytes, current) == current)
+                    break;
+            }
+            SpillBudget.Release(bytes);
         }
 
         public void IncrementQueueDepth()
