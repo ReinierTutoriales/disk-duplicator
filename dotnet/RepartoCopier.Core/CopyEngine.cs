@@ -381,7 +381,7 @@ public static class CopyEngine
             {
                 if (token.IsCancellationRequested)
                     progress[i].SetPhase(DestinationPhase.Cancelled, "Cancelado");
-                else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed and not DestinationPhase.Releasable)
+                else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed)
                     progress[i].SetPhase(DestinationPhase.Done);
             }
         }
