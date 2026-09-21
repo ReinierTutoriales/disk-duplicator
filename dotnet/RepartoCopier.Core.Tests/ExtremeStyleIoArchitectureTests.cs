@@ -45,16 +45,16 @@ public sealed class ExtremeStyleIoArchitectureTests
     }
 
     [TestMethod]
-    public void DestinationPathUsesExplicitOffsetWritesWithoutOverlapped()
+    public void DestinationPathUsesExplicitOffsetWritesWithOverlappedAsyncQueueDepth()
     {
         var root = FindRepositoryRoot();
         var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
         var coordinator = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DestinationWriteCoordinator.cs"));
         var engine = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
-        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
-        Assert.IsTrue(direct.Contains("RandomAccess.Write(handle, data.Span, offset)", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("RandomAccess.WriteAsync(handle, data, offset, token)", StringComparison.Ordinal));
+        Assert.IsFalse(direct.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("SetFilePointerEx(handle", StringComparison.Ordinal));
-        Assert.IsFalse(direct.Contains("FileFlagOverlapped", StringComparison.Ordinal));
         Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
         Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));
@@ -66,7 +66,7 @@ public sealed class ExtremeStyleIoArchitectureTests
         var root = FindRepositoryRoot();
         var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
         Assert.IsTrue(direct.Contains("fileSize >= 64L * 1024 || fileSize % alignment == 0", StringComparison.Ordinal));
-        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
+        Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped", StringComparison.Ordinal));
     }
 
     [TestMethod]
