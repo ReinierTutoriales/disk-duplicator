@@ -850,7 +850,7 @@ public static class CopyEngine
         CopyJob job)
     {
         CurrentFile? current = null;
-        using var recovery = new RecoveryCheckpointWriter(worker.Root);
+        RecoveryCheckpointWriter? recovery = new(worker.Root);
         try
         {
             worker.Progress.SetPhase(DestinationPhase.Copying);
@@ -916,7 +916,7 @@ public static class CopyEngine
                             if (pendingError is not null)
                                 FailCurrentFile(worker, current, options, pendingError.Message);
                             if (!current.Failed)
-                                FinishFile(worker, current, end.Hash, options, recovery, job);
+                                FinishFile(worker, current, end.Hash, options, recovery!, job);
                             current = null;
                             break;
                     }
@@ -950,6 +950,13 @@ public static class CopyEngine
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
             DrainAndRelease(worker.Channel.Reader, worker);
+
+            // "Done" must mean the destination is no longer held open by the copy
+            // writer. Flush/close the recovery manifest and journal before releasing
+            // the cross-process state lease so Windows can eject removable media.
+            recovery?.Dispose();
+            recovery = null;
+
             if (!options.Verify || !worker.IsActive)
             {
                 worker.ReleaseStateLease();
