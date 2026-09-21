@@ -283,6 +283,7 @@ public static class CopyEngine
         var spillBudget = new FanoutSpillBudget();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
+        job.Telemetry.AttachSpillBudget(spillBudget);
         try
         {
             var skipMasks = options.SkipSame
@@ -602,7 +603,9 @@ public static class CopyEngine
                         FanoutSpillBlock privateBlock;
                         try
                         {
+                            var spillCopyStarted = Stopwatch.GetTimestamp();
                             privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
+                            job.Telemetry.RecordSpillCopy(read, Stopwatch.GetElapsedTime(spillCopyStarted));
                         }
                         catch
                         {
