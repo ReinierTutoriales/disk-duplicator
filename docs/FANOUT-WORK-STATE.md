@@ -169,3 +169,25 @@ Un USB rápido debe poder terminar, verificar, cerrar y quedar listo para retira
 - Medir antes de cambiar números.
 - Si una optimización añade coste permanente al hot path, exigir evidencia clara de beneficio.
 - Tests pueden ser complejos; producción no.
+
+
+## Fase final de validación (2026-09-21)
+
+Se añadió un benchmark físico opt-in en `PhysicalDiskPerformanceBenchmarkTests.MeasureRealSourceAndDestinationThroughput`.
+
+Variables:
+- `REPARTOCOPIER_BENCH_SOURCE`: carpeta de trabajo en el disco origen.
+- `REPARTOCOPIER_BENCH_DESTINATIONS`: carpetas base de destinos, separadas por `Path.PathSeparator` (en Windows, punto y coma).
+- `REPARTOCOPIER_BENCH_GIB`: tamaño del payload; default 4 GiB.
+- `REPARTOCOPIER_BENCH_VERIFY=0`: desactiva verify para medir sólo copy.
+- `REPARTOCOPIER_BENCH_KEEP=1`: conserva los datos generados.
+
+El benchmark está `[Ignore]` por diseño y sólo opera dentro de subdirectorios únicos `repartocopier-bench-...` bajo las rutas suministradas. No debe ejecutarse automáticamente en CI ni sobre una raíz de volumen sin intención explícita.
+
+Se añadió `NonDestructiveStorageArchitectureTests`, que prohíbe APIs/tokens de formateo, particionado, inicialización, raw `PhysicalDrive`, lock/dismount y extensión de volumen en código de producto. La ruta Direct I/O debe seguir usando un path de archivo normal, nunca un dispositivo raw.
+
+Se añadió prueba de liberación a nivel job: al observar `Releasable`, intenta abrir archivo copiado, manifest y journal con `FileShare.None` y reacquirir `DestinationStateLease` antes de finalizar el job global.
+
+También se corrigió el conteo live de destinos: un destino liberado exitosamente ejecuta `MarkSuccessfullyReleased()`, libera su lease y sale exactamente una vez del active-destination count usado por spill fair-share.
+
+Pendiente inmediato: esperar CI del HEAD y corregir cualquier fallo real o de contrato. Después ejecutar el benchmark físico en el hardware objetivo para obtener MB/s reales por NVMe/SATA/USB/HDD/SD y combinaciones.
