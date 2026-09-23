@@ -131,6 +131,10 @@ public sealed class ProgressTelemetryTests
         Assert.AreEqual(2, diagnostics.RecoveryEvents);
         Assert.IsGreaterThanOrEqualTo(2, diagnostics.DurableFlushes);
         Assert.IsTrue(diagnostics.WriteTime > TimeSpan.Zero);
+        Assert.AreEqual(smallSize + largeSize, (long)final.WriteIoBytes);
+        Assert.IsTrue(final.WriteIoOperations >= 2);
+        Assert.IsTrue(final.WriteIoTime > TimeSpan.Zero);
+        Assert.IsTrue(final.WriteIoBytesPerSecond > 0);
     }
 
     private sealed class TempScope : IDisposable
