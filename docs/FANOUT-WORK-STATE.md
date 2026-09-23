@@ -73,6 +73,12 @@ La verificación ya no espera a que todos los writers terminen: los writers term
 
 Si una verificación falla, el error se conserva pero todos los writers restantes deben terminar/drenar antes de liberar el pool FAN-OUT y propagar el error. Un fallo de otro destino no debe convertir un destino ya `Releasable` o `Done` en `Failed`.
 
+### Pendiente separado: fallo después de commit
+
+Si `AtomicFileCommit.Commit` termina correctamente pero después falla `File.SetLastWriteTimeUtc` o `RecoveryCheckpointWriter.Append`, el archivo final ya puede estar correcto en `DestinationPath` aunque `FailCurrentFile` lo contabilice como fallido: revierte `Written`, no lo incorpora a `CompletedFiles` y el checkpoint puede no registrarlo. No implica corrupción del archivo confirmado por el commit; puede producir un falso negativo y una recopia redundante en un resume posterior.
+
+No resolver este caso dentro del hardening actual de `KeepGoing`. Revisarlo como contrato independiente cuando se audite resume/recovery en profundidad, distinguiendo explícitamente estados pre-commit y post-commit.
+
 ## Resume seguro
 
 - `SkipSame` verifica candidatos por tamaño/timestamp y hash antes de saltarlos.
