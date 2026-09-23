@@ -40,6 +40,10 @@ public sealed record DestinationSnapshot(
 {
     public double SustainedWrite5sBytesPerSecond { get; init; }
     public double SustainedWrite10sBytesPerSecond { get; init; }
+    public long WriteIoBytes { get; init; }
+    public long WriteIoOperations { get; init; }
+    public TimeSpan WriteIoTime { get; init; }
+    public double WriteIoBytesPerSecond => WriteIoBytes <= 0 || WriteIoTime <= TimeSpan.Zero ? 0 : WriteIoBytes / WriteIoTime.TotalSeconds;
 
     public DestinationSnapshot(
         string label,
@@ -96,6 +100,9 @@ internal sealed class DestinationProgress
     private ulong _verifyBytesTotal;
     private ulong _verifyFilesDone;
     private ulong _verifyFilesTotal;
+    private long _writeIoBytes;
+    private long _writeIoOperations;
+    private long _writeIoStopwatchTicks;
 
     public DestinationProgress(string label, ulong total, ulong filesTotal = 0)
     {
@@ -141,12 +148,20 @@ internal sealed class DestinationProgress
         lock (_gate) Retries++;
     }
 
-    public void AddWritten(int bytes)
+    public void AddWritten(int bytes) => AddWritten(bytes, TimeSpan.Zero, 0);
+
+    public void AddWritten(int bytes, TimeSpan writeIoElapsed, int writeIoOperations)
     {
         if (bytes <= 0) return;
         lock (_gate)
         {
             Written += (ulong)bytes;
+            if (writeIoElapsed > TimeSpan.Zero)
+            {
+                _writeIoBytes = checked(_writeIoBytes + bytes);
+                _writeIoOperations = checked(_writeIoOperations + Math.Max(0, writeIoOperations));
+                _writeIoStopwatchTicks = checked(_writeIoStopwatchTicks + (long)(writeIoElapsed.TotalSeconds * Stopwatch.Frequency));
+            }
             var now = Stopwatch.GetTimestamp();
             RecordWriteSampleLocked((ulong)bytes, now);
             _sustainedWriteRate.Record(bytes, now);
@@ -237,6 +252,9 @@ internal sealed class DestinationProgress
             {
                 SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
                 SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
+                WriteIoBytes = _writeIoBytes,
+                WriteIoOperations = _writeIoOperations,
+                WriteIoTime = _writeIoStopwatchTicks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)_writeIoStopwatchTicks / Stopwatch.Frequency),
             };
         }
     }
