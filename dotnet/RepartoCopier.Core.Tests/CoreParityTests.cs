@@ -506,8 +506,9 @@ public sealed class CoreParityTests
                 "must-copy",
                 await File.ReadAllTextAsync(Path.Combine(destinationRoot, "survivor.txt")),
                 "KeepGoing=true debe continuar con archivos posteriores después de un fallo por archivo.");
-            Assert.AreEqual("old-blocked", await File.ReadAllTextAsync(blockedDestination));
         }
+
+        Assert.AreEqual("old-blocked", await File.ReadAllTextAsync(blockedDestination));
     }
 
     [TestMethod]
