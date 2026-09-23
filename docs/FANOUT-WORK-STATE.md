@@ -51,7 +51,7 @@ Memoria principal acotada: aproximadamente 256 MiB shared + hasta 512 MiB spill,
 
 Se encontró una corrupción real bajo QD concurrente: la ruta anterior hacía `SetFilePointerEx + WriteFile` sobre un handle compartido. Con varias escrituras concurrentes el file pointer podía competir y colocar un bloque en el offset incorrecto.
 
-Corregido: la escritura Direct I/O usa `RandomAccess.Write(handle, data.Span, offset)`, es decir, offset explícito por operación. Se mantiene `NO_BUFFERING + SEQUENTIAL_SCAN` y no se usa `OVERLAPPED`.
+Corregido: la escritura Direct I/O usa `RandomAccess.WriteAsync(handle, data, offset, token)`, es decir, offset explícito por operación. Se mantiene `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED`, de modo que el QD fijo puede representar I/O realmente concurrente sin compartir cursor de archivo.
 
 Existe un test runtime con QD=8 y ocho bloques concurrentes con patrones diferentes que verifica que cada bloque termina exactamente en su offset.
 
@@ -182,7 +182,7 @@ Variables:
 - `REPARTOCOPIER_BENCH_VERIFY=0`: desactiva verify para medir sólo copy.
 - `REPARTOCOPIER_BENCH_KEEP=1`: conserva los datos generados.
 
-El benchmark está `[Ignore]` por diseño y sólo opera dentro de subdirectorios únicos `repartocopier-bench-...` bajo las rutas suministradas. No debe ejecutarse automáticamente en CI ni sobre una raíz de volumen sin intención explícita.
+El benchmark es opt-in mediante `REPARTOCOPIER_RUN_PHYSICAL_BENCHMARK=1`; sin esa variable termina como inconclusive/skipped en CI. Sólo opera dentro de subdirectorios únicos `repartocopier-bench-...` bajo las rutas suministradas. No debe ejecutarse sobre una raíz de volumen sin intención explícita.
 
 Se añadió `NonDestructiveStorageArchitectureTests`, que prohíbe APIs/tokens de formateo, particionado, inicialización, raw `PhysicalDrive`, lock/dismount y extensión de volumen en código de producto. La ruta Direct I/O debe seguir usando un path de archivo normal, nunca un dispositivo raw.
 
@@ -191,3 +191,22 @@ Se añadió prueba de liberación a nivel job: al observar `Releasable`, intenta
 También se corrigió el conteo live de destinos: un destino liberado exitosamente ejecuta `MarkSuccessfullyReleased()`, libera su lease y sale exactamente una vez del active-destination count usado por spill fair-share.
 
 Pendiente inmediato: esperar CI del HEAD y corregir cualquier fallo real o de contrato. Después ejecutar el benchmark físico en el hardware objetivo para obtener MB/s reales por NVMe/SATA/USB/HDD/SD y combinaciones.
+
+
+## Referencia de rendimiento físico — baseline del motor actual
+
+No registrar aquí resultados históricos del motor anterior como si fueran baseline vigente. El ~79 MB/s del escenario de aceptación precede Parte A/B y sirve sólo como referencia histórica.
+
+El baseline válido debe generarse con el HEAD actual y el test `PhysicalDiskPerformanceBenchmarkTests.MeasureRealSourceAndDestinationThroughput`. Matriz mínima recomendada, usando el mismo NVMe como origen y el mismo payload en cada corrida:
+
+| Corrida | Origen | Destino(s) | Copy MiB/s | Source MiB/s | Destino MiB/s | QD pico | Hash/pool/spill | Commit |
+|---|---|---|---:|---:|---:|---:|---|---|
+| 1 | NVMe | NVMe | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | HEAD |
+| 2 | NVMe | SATA SSD | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | HEAD |
+| 3 | NVMe | HDD | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | HEAD |
+| 4 | NVMe | USB SSD/flash | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | PENDIENTE | HEAD |
+| 5 | NVMe | NVMe + SATA SSD + HDD + USB | PENDIENTE | PENDIENTE | por destino | por dispositivo | PENDIENTE | HEAD |
+
+Regla de comparación: medir también cada dispositivo con una referencia local en la misma máquina y sesión de prueba. El objetivo no es alcanzar una cifra publicitaria, sino determinar qué fracción de la capacidad física observada consigue el motor. Mantener payload, verify, rutas y condiciones constantes entre baseline y cualquier optimización posterior.
+
+No implementar prefetch/profundidad concurrente de lectura antes de completar este baseline. Si después se cambia el pipeline, repetir exactamente esta matriz y registrar `antes -> después -> delta %`.
