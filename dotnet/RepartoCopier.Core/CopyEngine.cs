@@ -1376,45 +1376,53 @@ public static class CopyEngine
             return;
         }
 
-        if (current.DirectSession is not null)
+        try
         {
-            var flushStarted = Stopwatch.GetTimestamp();
-            current.DirectSession.FinalizeLength(current.Entry.Size);
-            current.DirectSession.FlushToDisk();
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
-            current.DirectSession.Dispose();
-            current.DirectSession = null;
+            if (current.DirectSession is not null)
+            {
+                var flushStarted = Stopwatch.GetTimestamp();
+                current.DirectSession.FinalizeLength(current.Entry.Size);
+                current.DirectSession.FlushToDisk();
+                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+                current.DirectSession.Dispose();
+                current.DirectSession = null;
+            }
+            else if (current.Stream is not null)
+            {
+                var flushStarted = Stopwatch.GetTimestamp();
+                current.Stream.Flush(flushToDisk: true);
+                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+                current.Stream.Dispose();
+                current.Stream = null;
+            }
+    
+            var actualSize = new FileInfo(current.PartPath).Length;
+            if (actualSize != current.Entry.Size)
+                throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
+    
+            ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
+            var commitStarted = Stopwatch.GetTimestamp();
+            AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
+            job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
+            File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
+            var recoveryStarted = Stopwatch.GetTimestamp();
+            recovery.Append(
+                new RecoveryFile(
+                    current.Entry.SourcePath,
+                    current.Entry.RelativePath,
+                    current.Entry.Size,
+                    current.Entry.ModifiedUnixNanoseconds),
+                expectedHash);
+            job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
+            worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
+            worker.Progress.MarkDone();
         }
-        else if (current.Stream is not null)
+    
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            var flushStarted = Stopwatch.GetTimestamp();
-            current.Stream.Flush(flushToDisk: true);
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
-            current.Stream.Dispose();
-            current.Stream = null;
+            FailCurrentFile(worker, current, options, ex.Message);
         }
-
-        var actualSize = new FileInfo(current.PartPath).Length;
-        if (actualSize != current.Entry.Size)
-            throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
-
-        ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
-        var commitStarted = Stopwatch.GetTimestamp();
-        AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
-        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
-        File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
-        var recoveryStarted = Stopwatch.GetTimestamp();
-        recovery.Append(
-            new RecoveryFile(
-                current.Entry.SourcePath,
-                current.Entry.RelativePath,
-                current.Entry.Size,
-                current.Entry.ModifiedUnixNanoseconds),
-            expectedHash);
-        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
-        worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
-        worker.Progress.MarkDone();
-    }
 
     private static async Task VerifyDestinationsAsync(
         PreparedCopy copy,
