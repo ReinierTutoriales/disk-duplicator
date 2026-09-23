@@ -41,5 +41,9 @@ public sealed class SustainedDestinationRateArchitectureTests
             .ToArray();
         CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.SustainedWrite5sBytesPerSecond));
         CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.SustainedWrite10sBytesPerSecond));
+        CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.WriteIoBytes));
+        CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.WriteIoOperations));
+        CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.WriteIoTime));
+        CollectionAssert.Contains(snapshotProperties, nameof(DestinationSnapshot.WriteIoBytesPerSecond));
     }
 }
