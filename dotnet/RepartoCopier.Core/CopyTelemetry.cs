@@ -28,7 +28,6 @@ public sealed record CopyDiagnosticsSnapshot(
     long SourceHashBytes,
     TimeSpan SourceHashTime,
     TimeSpan BufferWaitTime,
-    TimeSpan FanoutWaitTime,
     long WrittenBytes,
     long WriteOperations,
     TimeSpan WriteTime,
@@ -121,7 +120,7 @@ internal sealed class CopyTelemetry
     private int _directDestinationFiles, _directDestinationFallbacks;
     private long _directDestinationWriteBytes, _directDestinationWriteOperations;
     private long _sourceHashBytes, _sourceHashTicks;
-    private long _bufferWaitTicks, _fanoutWaitTicks;
+    private long _bufferWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
     private int _flushes, _commits, _recoveryEvents;
     private long _flushTicks, _commitTicks, _recoveryTicks;
@@ -184,7 +183,6 @@ internal sealed class CopyTelemetry
     }
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
-    internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
 
     internal void RecordWrite(int bytes, TimeSpan elapsed)
     {
@@ -242,7 +240,6 @@ internal sealed class CopyTelemetry
             Interlocked.Read(ref _sourceReadBytes), ToTimeSpan(Interlocked.Read(ref _sourceReadTicks)),
             Interlocked.Read(ref _sourceHashBytes), ToTimeSpan(Interlocked.Read(ref _sourceHashTicks)),
             ToTimeSpan(Interlocked.Read(ref _bufferWaitTicks)),
-            ToTimeSpan(Interlocked.Read(ref _fanoutWaitTicks)),
             Interlocked.Read(ref _writtenBytes), Interlocked.Read(ref _writeOperations), ToTimeSpan(Interlocked.Read(ref _writeTicks)),
             Volatile.Read(ref _flushes), ToTimeSpan(Interlocked.Read(ref _flushTicks)),
             Volatile.Read(ref _commits), ToTimeSpan(Interlocked.Read(ref _commitTicks)),
