@@ -1128,9 +1128,10 @@ public static class CopyEngine
                 job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var writeElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, writeElapsed);
                 current.RecordCompletedWrite(data.Length);
-                worker.Progress.AddWritten(data.Length);
+                worker.Progress.AddWritten(data.Length, writeElapsed, operations);
                 worker.NoteProgress();
                 ReleaseBranchBlock(worker, block);
                 return PendingWriteResult.Success();
@@ -1161,9 +1162,10 @@ public static class CopyEngine
 
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var writeElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, writeElapsed);
                 current.RecordCompletedWrite(data.Length);
-                worker.Progress.AddWritten(data.Length);
+                worker.Progress.AddWritten(data.Length, writeElapsed, operations);
                 worker.NoteProgress();
                 ReleaseBranchBlock(worker, block);
                 if (bufferedRetryCount > 0)
