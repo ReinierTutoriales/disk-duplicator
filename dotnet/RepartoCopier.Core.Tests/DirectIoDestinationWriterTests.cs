@@ -140,6 +140,16 @@ public sealed class DirectIoDestinationWriterTests
     }
 
     [TestMethod]
+    public void PermanentMediaErrorsAreNotRetried()
+    {
+        foreach (var code in new[] { 23, 1117 })
+            Assert.IsFalse(
+                TransientIoErrorClassifier.IsTransient(
+                    new DirectIoDestinationWriter.DirectIoWriteException(code, "hardware fault")),
+                $"Win32 {code} no debe consumir retries transitorios.");
+    }
+
+    [TestMethod]
     public void FallbackOnlyMasksUnsupportedDirectWriteNotHardwareFaults()
     {
         foreach (var code in new[] { 1, 5, 50, 87 })
