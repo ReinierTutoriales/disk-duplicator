@@ -210,3 +210,18 @@ El baseline válido debe generarse con el HEAD actual y el test `PhysicalDiskPer
 Regla de comparación: medir también cada dispositivo con una referencia local en la misma máquina y sesión de prueba. El objetivo no es alcanzar una cifra publicitaria, sino determinar qué fracción de la capacidad física observada consigue el motor. Mantener payload, verify, rutas y condiciones constantes entre baseline y cualquier optimización posterior.
 
 No implementar prefetch/profundidad concurrente de lectura antes de completar este baseline. Si después se cambia el pipeline, repetir exactamente esta matriz y registrar `antes -> después -> delta %`.
+
+
+## Ruta de instrumentación para baseline — 2026-09-23
+
+La instrumentación del baseline es observacional: no puede modificar QD, fan-out, pool, spill, tamaño de bloque, orden de producción ni admisión de I/O. No añadir logging por bloque, timers periódicos por bloque, allocations diagnósticas ni locks nuevos al hot path.
+
+Métricas vigentes: origen = SourceReadBytes/SourceReadTime; BLAKE3 = SourceHashBytes/SourceHashTime; pool shared = BufferWaitTime separado de I/O; spill = SpillCopyBytes/SpillCopyTime (TryReserve es no bloqueante); escritura global = WrittenBytes/WriteTime; escritura por destino = DestinationSnapshot.WriteIoBytes, WriteIoOperations, WriteIoTime y WriteIoBytesPerSecond; QD = DeviceIoSnapshot.OutstandingIo y PeakOutstandingIo. No añadir promedio temporal de QD hasta que una medición demuestre que hace falta.
+
+El tiempo de escritura por destino reutiliza exactamente el Stopwatch.GetElapsedTime(started) que ya mide la escritura global. DestinationProgress lo acumula dentro del mismo _gate que AddWritten ya tomaba; no se introduce un lock ni un timestamp adicional. La sobrecarga histórica AddWritten(int bytes) se conserva para callers sintéticos y no inventa tiempo de I/O.
+
+Se eliminó FanoutWaitTime/RecordFanoutWait: el acumulador estaba expuesto pero nunca tuvo call-site, por lo que reportaba cero con semántica engañosa. No reintroducirlo sin definir primero qué espera concreta representa y dónde comienza/termina.
+
+### Regla de decisión después del baseline
+
+No optimizar por intuición. Ejecutar primero la matriz física del HEAD y comparar las fases anteriores. Hacer un cambio dirigido al cuello medido, repetir exactamente la misma corrida y registrar antes -> después -> delta. Si no hay mejora material o aparece regresión, retirar el cambio. En particular, no introducir prefetch/profundidad concurrente del origen antes de demostrar que la lectura serial actual es el límite medido.
