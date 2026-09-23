@@ -1417,12 +1417,11 @@ public static class CopyEngine
             worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
             worker.Progress.MarkDone();
         }
-    
-        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             FailCurrentFile(worker, current, options, ex.Message);
         }
+    }
 
     private static async Task VerifyDestinationsAsync(
         PreparedCopy copy,
