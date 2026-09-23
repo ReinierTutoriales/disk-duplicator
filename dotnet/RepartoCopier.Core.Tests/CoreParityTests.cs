@@ -482,6 +482,35 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task KeepGoingContinuesAfterPerFileCommitFailure()
+    {
+        using var temp = new TempDirectory("keep-going-commit-failure");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(source, "blocked.txt"), "new-blocked");
+        await File.WriteAllTextAsync(Path.Combine(source, "survivor.txt"), "must-copy");
+
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var destinationRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Origen")).FullName;
+        var blockedDestination = Path.Combine(destinationRoot, "blocked.txt");
+        await File.WriteAllTextAsync(blockedDestination, "old-blocked");
+
+        using (var held = new FileStream(blockedDestination, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: true);
+            await using var job = CopyEngine.Start(
+                plan,
+                new CopyOptions(Verify: false, SkipSame: false, KeepGoing: true));
+            await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.AreEqual(
+                "must-copy",
+                await File.ReadAllTextAsync(Path.Combine(destinationRoot, "survivor.txt")),
+                "KeepGoing=true debe continuar con archivos posteriores después de un fallo por archivo.");
+            Assert.AreEqual("old-blocked", await File.ReadAllTextAsync(blockedDestination));
+        }
+    }
+
+    [TestMethod]
     public async Task FanOutStressWithRapidPauseResumePreservesEveryDestination()
     {
         using var temp = new TempDirectory("fanout-pause-stress");
