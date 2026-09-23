@@ -53,6 +53,8 @@ Se encontró una corrupción real bajo QD concurrente: la ruta anterior hacía `
 
 Corregido: la escritura Direct I/O usa `RandomAccess.WriteAsync(handle, data, offset, token)`, es decir, offset explícito por operación. Se mantiene `NO_BUFFERING + SEQUENTIAL_SCAN + OVERLAPPED`, de modo que el QD fijo puede representar I/O realmente concurrente sin compartir cursor de archivo.
 
+Los retries de escritura Direct y buffered pasan por `TransientIoErrorClassifier`: sólo errores transitorios consumen reintentos. Fallos de medio/permanentes como Win32 23 (`ERROR_CRC`) y 1117 (`ERROR_IO_DEVICE`) no se reintentan; el fallback Direct se clasifica por separado y no convierte esos fallos de hardware en fallback de compatibilidad.
+
 Existe un test runtime con QD=8 y ocho bloques concurrentes con patrones diferentes que verifica que cada bloque termina exactamente en su offset.
 
 ## Ciclo de vida y liberación
