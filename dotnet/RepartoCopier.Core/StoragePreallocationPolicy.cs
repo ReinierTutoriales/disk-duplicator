@@ -4,12 +4,16 @@ namespace RepartoCopier.Core;
 
 internal static class StoragePreallocationPolicy
 {
+    internal const string DisablePreallocationEnvironmentVariable = "REPARTOCOPIER_DISABLE_PREALLOCATION";
+
     private static readonly ConcurrentDictionary<string, bool> VolumePolicy =
         new(StringComparer.OrdinalIgnoreCase);
 
     internal static long GetPreallocationSize(string path, long fileSize)
     {
         if (fileSize <= 0)
+            return 0;
+        if (PreallocationDisabledForDiagnostics())
             return 0;
 
         var full = Path.GetFullPath(path);
@@ -35,4 +39,10 @@ internal static class StoragePreallocationPolicy
 
         return allowed ? fileSize : 0;
     }
+
+    private static bool PreallocationDisabledForDiagnostics() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable(DisablePreallocationEnvironmentVariable),
+            "1",
+            StringComparison.OrdinalIgnoreCase);
 }
