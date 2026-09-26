@@ -594,8 +594,8 @@ public static class CopyEngine
                 var normal = partition.NormalSlots.Select(slot => activeBySlot[slot]).ToList();
                 var spilling = partition.SpillingSlots.Select(slot => activeBySlot[slot]).ToList();
 
-                // A producer reference is used only when every active destination is
-                // isolated. It gives the source a temporary aligned page to read/copy
+                // Keep a defensive producer reference if no normal destination remains.
+                // It gives the source a temporary aligned page to read/copy
                 // from without making any slow destination retain the shared pool.
                 var reservedReferences = Math.Max(1, normal.Count);
                 var poolStarted = Stopwatch.GetTimestamp();
@@ -650,7 +650,7 @@ public static class CopyEngine
                         if (!worker.IsActive) continue;
                         if (!worker.TryReserveSpill(read))
                         {
-                            worker.Fail($"Destino {worker.Root}: abortado — no pudo sostener el ritmo mínimo de su propia clase de hardware");
+                            worker.Fail($"Destino {worker.Root}: abortado — techo de spill agotado (solicitado: {read} bytes; destino: {worker.SpillBytes}/{worker.SpillCeilingBytes} bytes; global: {worker.SpillBudget.UsedBytes}/{worker.SpillBudget.CapacityBytes} bytes)");
                             continue;
                         }
 

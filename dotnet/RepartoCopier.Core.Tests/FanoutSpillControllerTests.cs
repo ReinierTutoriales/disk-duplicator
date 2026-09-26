@@ -55,4 +55,40 @@ public sealed class FanoutSpillControllerTests
         Assert.IsFalse(flow.ShouldSpill(Target * 2, Target, 0));
         Assert.AreEqual(FanoutSpillState.Failed, flow.State);
     }
+
+    [TestMethod]
+    public void EvaluationNeverChangesState()
+    {
+        var flow = new FanoutSpillController();
+        Assert.IsTrue(flow.WouldSpill(Target, Target, 0));
+        Assert.AreEqual(FanoutSpillState.Normal, flow.State);
+        Assert.IsTrue(flow.EnterSpill());
+        Assert.IsFalse(flow.WouldSpill(Target / 2, Target, 0));
+        Assert.AreEqual(FanoutSpillState.Spill, flow.State);
+        flow.ExitSpill();
+        Assert.AreEqual(FanoutSpillState.Normal, flow.State);
+    }
+
+    [TestMethod]
+    public void ExplicitTransitionsNeverReviveFailedDestination()
+    {
+        var flow = new FanoutSpillController();
+        flow.EnterSpill();
+        flow.Fail();
+        flow.ExitSpill();
+        Assert.IsFalse(flow.EnterSpill());
+        Assert.IsFalse(flow.WouldSpill(Target, Target, 1024));
+        Assert.AreEqual(FanoutSpillState.Failed, flow.State);
+    }
+
+    [TestMethod]
+    public void EvaluationRejectsInvalidPressureWithoutChangingState()
+    {
+        var flow = new FanoutSpillController();
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => flow.WouldSpill(-1, Target, 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => flow.WouldSpill(0, 0, 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => flow.WouldSpill(0, Target, -1));
+        Assert.AreEqual(FanoutSpillState.Normal, flow.State);
+    }
+
 }
