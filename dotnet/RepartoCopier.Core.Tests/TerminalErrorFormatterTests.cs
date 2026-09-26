@@ -7,8 +7,20 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class TerminalErrorFormatterTests
 {
+    [TestInitialize]
+    public void Initialize()
+    {
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, null);
+        StoragePreallocationPolicy.ResetDiagnosticsForTests();
+    }
+
     [TestCleanup]
-    public void Cleanup() => TerminalFailureLog.SetLocalLogDirectoryForTests(null);
+    public void Cleanup()
+    {
+        TerminalFailureLog.SetLocalLogDirectoryForTests(null);
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, null);
+        StoragePreallocationPolicy.ResetDiagnosticsForTests();
+    }
 
     [TestMethod]
     public void FormatIncludesHResultNativeCodeDestinationAndFile()
@@ -24,6 +36,7 @@ public sealed class TerminalErrorFormatterTests
         StringAssert.Contains(message, @"Destino: E:\Copias");
         StringAssert.Contains(message, "Archivo: imagen.iso");
         StringAssert.Contains(message, "Fase: copy-write");
+        StringAssert.Contains(message, "preallocation=enabled_default");
         StringAssert.Contains(message, "HResult: 0x");
         StringAssert.Contains(message, "Win32 Native Error: 1117");
     }
@@ -40,6 +53,7 @@ public sealed class TerminalErrorFormatterTests
         StringAssert.Contains(message, @"Destino: E:\Copias");
         StringAssert.Contains(message, "Archivo: imagen.iso");
         StringAssert.Contains(message, "Fase: Failed");
+        StringAssert.Contains(message, "preallocation=enabled_default");
         StringAssert.Contains(message, "No se pudo escribir imagen.iso.");
     }
 
@@ -71,6 +85,7 @@ public sealed class TerminalErrorFormatterTests
         StringAssert.Contains(message, @"Destino: E:\Copias");
         StringAssert.Contains(message, "Archivo: imagen.iso");
         StringAssert.Contains(message, "Fase: Failed");
+        StringAssert.Contains(message, "preallocation=enabled_default");
         StringAssert.Contains(message, "Falló la escritura terminal.");
     }
 
@@ -94,6 +109,7 @@ public sealed class TerminalErrorFormatterTests
             StringAssert.Contains(text, "utc=");
             StringAssert.Contains(text, "head_sha=");
             StringAssert.Contains(text, $"destination={root}");
+            StringAssert.Contains(text, "preallocation=enabled_default");
             StringAssert.Contains(text, "imagen.iso");
             StringAssert.Contains(text, "Falló la escritura terminal.");
         }
@@ -103,6 +119,18 @@ public sealed class TerminalErrorFormatterTests
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
             if (Directory.Exists(local)) Directory.Delete(local, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void TerminalLogPayloadIncludesDisabledPreallocationState()
+    {
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, "1");
+        StoragePreallocationPolicy.ResetDiagnosticsForTests();
+
+        var payload = TerminalFailureLog.BuildPayload(@"E:\Copias", "Falló la escritura terminal.");
+
+        StringAssert.Contains(payload, "preallocation=disabled_by_env");
+        StringAssert.Contains(payload, @"destination=E:\Copias");
     }
 
     [TestMethod]
