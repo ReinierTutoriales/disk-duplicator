@@ -126,11 +126,24 @@ internal sealed class DestinationProgress
 
     public void SetPhase(DestinationPhase phase, string? error = null)
     {
+        string? terminalLog = null;
         lock (_gate)
         {
+            var previous = Phase;
             Phase = phase;
             if (error is not null) Error = error;
+            if (phase == DestinationPhase.Failed && previous != DestinationPhase.Failed)
+            {
+                terminalLog = TerminalErrorFormatter.FormatSnapshotError(
+                    Error,
+                    destination: Label,
+                    file: LastFile,
+                    phase: phase.ToString());
+            }
         }
+
+        if (terminalLog is not null)
+            TerminalFailureLog.Write(Label, terminalLog);
     }
 
     public void SetLastFile(string path)
