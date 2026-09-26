@@ -267,6 +267,9 @@ public sealed partial class MainWindow : Window
                 SetEditingEnabled(true);
                 StartButton.IsEnabled = true;
 
+                if (!cancelled && completedWithErrors)
+                    ShowTerminalErrorSummary(snapshots);
+
                 if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
                     await OfferShutdownAsync();
             }
@@ -651,6 +654,17 @@ public sealed partial class MainWindow : Window
         ErrorBar.Message = message;
         ErrorBar.IsOpen = true;
         StatusText.Text = "Ocurrió un error";
+    }
+
+    private void ShowTerminalErrorSummary(IReadOnlyList<DestinationSnapshot> snapshots)
+    {
+        var message = TerminalErrorFormatter.FormatSnapshots(snapshots);
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        ErrorBar.Message = message;
+        ErrorBar.IsOpen = true;
+        StatusText.Text = "La copia terminó con errores. Ver detalle arriba.";
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
