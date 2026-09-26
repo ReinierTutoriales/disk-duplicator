@@ -30,7 +30,8 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsTrue(engine.Contains("FanoutSpillBlock.CopyFrom", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("Math.Max(1, normal.Count)", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("worker.TryReserveSpill(read)", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("worker.SpillController.ShouldSpill", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("FanoutSpillPartitioner.Partition", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains(".ShouldSpill(", StringComparison.Ordinal));
     }
 
     [TestMethod]

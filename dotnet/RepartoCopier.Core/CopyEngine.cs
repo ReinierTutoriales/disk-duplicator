@@ -583,18 +583,16 @@ public static class CopyEngine
                 active.RemoveAll(worker => !worker.IsActive);
                 if (active.Count == 0) return null;
 
-                var normal = new List<DestinationWorker>(active.Count);
-                var spilling = new List<DestinationWorker>();
-                foreach (var worker in active)
-                {
-                    if (worker.SpillController.ShouldSpill(
+                var activeBySlot = active.ToDictionary(static worker => worker.Slot);
+                var partition = FanoutSpillPartitioner.Partition(
+                    active.Select(static worker => new FanoutSpillPartitionCandidate(
+                        worker.Slot,
                         worker.DeviceScheduler.QueuedBytes,
                         worker.DeviceScheduler.BacklogTargetBytes,
-                        worker.SpillBytes))
-                        spilling.Add(worker);
-                    else
-                        normal.Add(worker);
-                }
+                        worker.SpillBytes,
+                        worker.SpillController)).ToArray());
+                var normal = partition.NormalSlots.Select(slot => activeBySlot[slot]).ToList();
+                var spilling = partition.SpillingSlots.Select(slot => activeBySlot[slot]).ToList();
 
                 // A producer reference is used only when every active destination is
                 // isolated. It gives the source a temporary aligned page to read/copy
