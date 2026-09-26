@@ -6,6 +6,10 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class StoragePreallocationPolicyTests
 {
+    [TestCleanup]
+    public void Cleanup() =>
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, null);
+
     [TestMethod]
     public void SafePreallocationIsRestrictedToLocalNtfsAndRefs()
     {
@@ -34,6 +38,15 @@ public sealed class StoragePreallocationPolicyTests
             expectedAllowed ? 8192L : 0L,
             StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
         Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 0));
+    }
+
+    [TestMethod]
+    public void DiagnosticSwitchDisablesPreallocationWithoutChangingDefaultPolicy()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"repartocopier-prealloc-disabled-{Guid.NewGuid():N}.part");
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, "1");
+
+        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
     }
 
     [TestMethod]
