@@ -17,7 +17,7 @@ public sealed class SharedFanoutArchitectureTests
     }
 
     [TestMethod]
-    public void SharedPoolBackpressureReplacesReplayAndPrivateBranchBuffers()
+    public void BoundedPrivateSpillReplacesReplayWithoutReintroducingGlobalBackpressure()
     {
         var root = FindRepositoryRoot();
         var core = Path.Combine(root, "dotnet", "RepartoCopier.Core");
@@ -27,6 +27,14 @@ public sealed class SharedFanoutArchitectureTests
         var engine = File.ReadAllText(Path.Combine(core, "CopyEngine.cs"));
         Assert.IsTrue(engine.Contains("SharedFanoutPoolBytes", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("bufferPool.RentAsync", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("FanoutSpillBlock.CopyFrom", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Math.Max(1, normal.Count)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.TryReserveSpill(remaining)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("FanoutSpillPartitioner.Partition", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains(".ShouldSpill(", StringComparison.Ordinal));
+        Assert.IsTrue(engine.IndexOf("worker.TryReserveSpill(remaining)", StringComparison.Ordinal) <
+            engine.IndexOf("var reservedReferences", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("abortado — techo de spill agotado", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -61,6 +69,8 @@ public sealed class SharedFanoutArchitectureTests
             "StageBranchAsync",
             "DetachBranchBlock",
             "EnableReplay",
+            "QueueDepthUpshifts++",
+            "QueueDepthDownshifts++",
         })
         {
             Assert.IsFalse(product.Contains(token, StringComparison.Ordinal), $"Ruta retirada reapareció: {token}");
@@ -77,6 +87,38 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsTrue(engine.Contains("destinationCrc != sourceCrc", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationPlan", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationBlock", StringComparison.Ordinal));
+    }
+
+
+    [TestMethod]
+    public void CompletedFanoutMustReleaseEveryMemoryAndBacklogCounter()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("ValidateFanoutDrain(workers, spillBudget, activeBufferPool)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.PendingPayloadBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.SpillBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.DeviceScheduler.QueuedBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("spillBudget.UsedBytes != 0", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("bufferPool.UsedBytes != 0", StringComparison.Ordinal));
+    }
+
+
+    [TestMethod]
+    public void PrivateSpillBlockOwnsItsReservationUntilRelease()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("new SpillBlock(worker, privateBlock)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Interlocked.Exchange(ref _owner, null)?.ReleaseSpill(length)", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("if (spill) worker.ReleaseSpill(length)", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void ActiveDestinationCountUsesAtomicLifecycleNotHotPathEnumeration()
+    {
+        var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
+        Assert.IsTrue(engine.Contains("Volatile.Read(ref activeDestinationCount)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("Interlocked.Decrement(ref activeDestinationCount)", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("workers.Count(worker => worker.IsActive)", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()

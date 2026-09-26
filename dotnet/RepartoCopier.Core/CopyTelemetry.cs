@@ -28,7 +28,6 @@ public sealed record CopyDiagnosticsSnapshot(
     long SourceHashBytes,
     TimeSpan SourceHashTime,
     TimeSpan BufferWaitTime,
-    TimeSpan FanoutWaitTime,
     long WrittenBytes,
     long WriteOperations,
     TimeSpan WriteTime,
@@ -79,6 +78,15 @@ public sealed record CopyDiagnosticsSnapshot(
     public int MinimumTransferBytes { get; init; }
     public int MaximumTransferBytes { get; init; }
     public IReadOnlyList<IoRecoveryEvent> RecentIoRecoveryEvents { get; init; } = [];
+    public long SpillCopyBytes { get; init; }
+    public TimeSpan SpillCopyTime { get; init; }
+    public long PeakGlobalSpillBytes { get; init; }
+    public long GlobalSpillCapacityBytes { get; init; }
+    public string PreallocationPolicy { get; init; } = "unknown";
+    public int DestinationDetaches { get; init; }
+    public int LastDetachedSlot { get; init; } = -1;
+    public long LastDetachOffset { get; init; } = -1;
+    public double SpillCopyBytesPerSecond => Rate(SpillCopyBytes, SpillCopyTime);
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
         bytes <= 0 || elapsed <= TimeSpan.Zero ? 0 : bytes / elapsed.TotalSeconds;
@@ -104,18 +112,20 @@ public sealed record CopyDiagnosticsSnapshot(
 internal sealed class CopyTelemetry
 {
     private readonly long _started = Stopwatch.GetTimestamp();
+    private readonly string _preallocationPolicy = StoragePreallocationPolicy.DiagnosticState;
     private readonly SlidingByteRateWindow _writeRate = new();
     private readonly SlidingByteRateWindow _sourceReadRate = new();
     private readonly SlidingByteRateWindow _verifyLogicalRate = new();
     private readonly ConcurrentQueue<IoRecoveryEvent> _ioRecoveryEvents = new();
     private IReadOnlyCollection<DeviceScheduler>? _deviceSchedulers;
+    private FanoutSpillBudget? _spillBudget;
     private long _sourceReadBytes, _sourceReadTicks;
     private long _directSourceReadBytes, _directSourceReadOperations;
     private int _directSourceFallbacks;
     private int _directDestinationFiles, _directDestinationFallbacks;
     private long _directDestinationWriteBytes, _directDestinationWriteOperations;
     private long _sourceHashBytes, _sourceHashTicks;
-    private long _bufferWaitTicks, _fanoutWaitTicks;
+    private long _bufferWaitTicks;
     private long _writtenBytes, _writeOperations, _writeTicks;
     private int _flushes, _commits, _recoveryEvents;
     private long _flushTicks, _commitTicks, _recoveryTicks;
@@ -124,9 +134,30 @@ internal sealed class CopyTelemetry
     private int _currentTransferBytes, _minimumTransferBytes = int.MaxValue, _maximumTransferBytes;
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
+    private long _spillCopyBytes, _spillCopyTicks;
+    private int _destinationDetaches, _lastDetachedSlot = -1;
+    private long _lastDetachOffset = -1;
 
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
         _deviceSchedulers = schedulers.ToArray();
+
+    internal void AttachSpillBudget(FanoutSpillBudget budget) =>
+        _spillBudget = budget ?? throw new ArgumentNullException(nameof(budget));
+
+    internal void RecordDestinationDetached(int slot, long offset)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(slot);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        Interlocked.Exchange(ref _lastDetachOffset, offset);
+        Volatile.Write(ref _lastDetachedSlot, slot);
+        Interlocked.Increment(ref _destinationDetaches);
+    }
+
+    internal void RecordSpillCopy(int bytes, TimeSpan elapsed)
+    {
+        AddBytes(ref _spillCopyBytes, bytes);
+        AddTicks(ref _spillCopyTicks, elapsed);
+    }
 
 
     internal void RecordSourceRead(int bytes, TimeSpan elapsed)
@@ -168,7 +199,6 @@ internal sealed class CopyTelemetry
     }
     internal void RecordSourceHash(int bytes, TimeSpan elapsed) { AddBytes(ref _sourceHashBytes, bytes); AddTicks(ref _sourceHashTicks, elapsed); }
     internal void RecordBufferWait(TimeSpan elapsed) => AddTicks(ref _bufferWaitTicks, elapsed);
-    internal void RecordFanoutWait(TimeSpan elapsed) => AddTicks(ref _fanoutWaitTicks, elapsed);
 
     internal void RecordWrite(int bytes, TimeSpan elapsed)
     {
@@ -226,7 +256,6 @@ internal sealed class CopyTelemetry
             Interlocked.Read(ref _sourceReadBytes), ToTimeSpan(Interlocked.Read(ref _sourceReadTicks)),
             Interlocked.Read(ref _sourceHashBytes), ToTimeSpan(Interlocked.Read(ref _sourceHashTicks)),
             ToTimeSpan(Interlocked.Read(ref _bufferWaitTicks)),
-            ToTimeSpan(Interlocked.Read(ref _fanoutWaitTicks)),
             Interlocked.Read(ref _writtenBytes), Interlocked.Read(ref _writeOperations), ToTimeSpan(Interlocked.Read(ref _writeTicks)),
             Volatile.Read(ref _flushes), ToTimeSpan(Interlocked.Read(ref _flushTicks)),
             Volatile.Read(ref _commits), ToTimeSpan(Interlocked.Read(ref _commitTicks)),
@@ -256,6 +285,14 @@ internal sealed class CopyTelemetry
             MinimumTransferBytes = Volatile.Read(ref _minimumTransferBytes) == int.MaxValue ? 0 : Volatile.Read(ref _minimumTransferBytes),
             MaximumTransferBytes = Volatile.Read(ref _maximumTransferBytes),
             RecentIoRecoveryEvents = _ioRecoveryEvents.ToArray(),
+            SpillCopyBytes = Interlocked.Read(ref _spillCopyBytes),
+            SpillCopyTime = ToTimeSpan(Interlocked.Read(ref _spillCopyTicks)),
+            PeakGlobalSpillBytes = _spillBudget?.PeakUsedBytes ?? 0,
+            GlobalSpillCapacityBytes = _spillBudget?.CapacityBytes ?? 0,
+            PreallocationPolicy = _preallocationPolicy,
+            DestinationDetaches = Volatile.Read(ref _destinationDetaches),
+            LastDetachedSlot = Volatile.Read(ref _lastDetachedSlot),
+            LastDetachOffset = Interlocked.Read(ref _lastDetachOffset),
         };
     }
 

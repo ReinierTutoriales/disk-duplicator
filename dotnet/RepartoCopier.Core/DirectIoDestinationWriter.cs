@@ -5,7 +5,7 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Stable sequential destination writer modeled after ExtremeCopy's active path:
-/// one synchronous physical write at a time per destination, SEQUENTIAL_SCAN and
+/// explicit-offset writes with bounded per-device queue depth, SEQUENTIAL_SCAN and
 /// NO_BUFFERING when safe. The shared FAN-OUT payload is never copied per destination.
 /// </summary>
 internal static class DirectIoDestinationWriter
@@ -14,6 +14,7 @@ internal static class DirectIoDestinationWriter
     private const uint OpenExisting = 3;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
+    private const uint FileFlagOverlapped = 0x40000000;
 
     internal static bool IsEligible(StorageDeviceInfo device, long fileSize)
     {
@@ -44,7 +45,7 @@ internal static class DirectIoDestinationWriter
             FileShare.Read,
             IntPtr.Zero,
             OpenExisting,
-            FileFlagNoBuffering | FileFlagSequentialScan,
+            FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -102,7 +103,7 @@ internal static class DirectIoDestinationWriter
                 {
                     using var io = await scheduler.AcquireIoAsync(alignedLength, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, data[..alignedLength], fileOffset);
+                    await WriteAtOffsetAsync(handle, data[..alignedLength], fileOffset, token).ConfigureAwait(false);
                     operations++;
                 }
 
@@ -117,7 +118,7 @@ internal static class DirectIoDestinationWriter
                     data.Span[alignedLength..].CopyTo(tail.Memory.Span);
                     using var io = await scheduler.AcquireIoAsync(Alignment, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, tail.Memory, checked(fileOffset + alignedLength));
+                    await WriteAtOffsetAsync(handle, tail.Memory, checked(fileOffset + alignedLength), token).ConfigureAwait(false);
                     operations++;
                 }
 
@@ -129,25 +130,26 @@ internal static class DirectIoDestinationWriter
             }
         }
 
-        private static void WriteSynchronous(SafeFileHandle handle, ReadOnlyMemory<byte> data, long offset)
+        private static async ValueTask WriteAtOffsetAsync(
+            SafeFileHandle handle,
+            ReadOnlyMemory<byte> data,
+            long offset,
+            CancellationToken token)
         {
-            if (!MemoryMarshal.TryGetArray(data, out ArraySegment<byte> segment) || segment.Array is null)
-                throw new DirectIoWriteException(87, "El buffer de escritura debe estar respaldado por el pool FAN-OUT fijado.");
-
-            if (!NativeMethods.SetFilePointerEx(handle, offset, out _, 0))
+            // QD > 1 only becomes real concurrency if an admitted write yields while
+            // the device owns the request. The handle is OVERLAPPED and RandomAccess
+            // supplies an explicit offset, so the writer loop can launch the next
+            // admitted block instead of blocking synchronously on the current one.
+            try
             {
-                var code = Marshal.GetLastWin32Error();
-                throw new DirectIoWriteException(code, "No se pudo posicionar el handle síncrono del destino.");
+                await RandomAccess.WriteAsync(handle, data, offset, token).ConfigureAwait(false);
             }
-
-            var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(segment.Array, segment.Offset);
-            if (!NativeMethods.WriteFile(handle, pointer, checked((uint)data.Length), out var written, IntPtr.Zero))
+            catch (IOException ex)
             {
-                var code = Marshal.GetLastWin32Error();
-                throw new DirectIoWriteException(code, "WriteFile síncrono falló.");
+                throw new DirectIoWriteException(
+                    TransientIoErrorClassifier.GetNativeCodeOrZero(ex),
+                    ex.Message);
             }
-            if (written != data.Length)
-                throw new DirectIoWriteException(1117, $"WriteFile escribió {written} de {data.Length} bytes.");
         }
 
         internal void FinalizeLength(long exactLength)
@@ -182,16 +184,6 @@ internal static class DirectIoDestinationWriter
 
     private static class NativeMethods
     {
-        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool SetFilePointerEx(SafeFileHandle hFile, long distanceToMove, out long newFilePointer, uint moveMethod);
-
-        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool WriteFile(SafeFileHandle hFile, IntPtr buffer, uint numberOfBytesToWrite, out uint numberOfBytesWritten, IntPtr overlapped);
-
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
         internal static extern SafeFileHandle CreateFileW(

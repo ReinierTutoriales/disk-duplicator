@@ -242,7 +242,7 @@ public sealed partial class MainWindow : Window
                 var completedWithErrors = failed > 0 || erroredFiles > 0;
                 var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
                 var filesDone = snapshots.Count == 0 ? 0UL : snapshots
-                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                     .Select(item => item.FilesDone)
                     .DefaultIfEmpty(snapshots.Max(item => item.FilesDone))
                     .Min();
@@ -267,6 +267,9 @@ public sealed partial class MainWindow : Window
                 SetEditingEnabled(true);
                 StartButton.IsEnabled = true;
 
+                if (!cancelled && completedWithErrors)
+                    ShowTerminalErrorSummary(snapshots);
+
                 if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
                     await OfferShutdownAsync();
             }
@@ -285,7 +288,7 @@ public sealed partial class MainWindow : Window
         if (verifying)
         {
             var verifyActive = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                 .ToArray();
             var verifyTotal = snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max();
             var verified = verifyActive.Length == 0
@@ -309,19 +312,21 @@ public sealed partial class MainWindow : Window
         else
         {
             var active = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
                 .ToArray();
             var total = snapshots.Select(item => item.Total).DefaultIfEmpty(0UL).Max();
             var written = active.Length == 0
                 ? snapshots.Select(item => item.Written).DefaultIfEmpty(0UL).Max()
                 : active.Min(item => item.Written);
-            var speed = paused ? 0d : _copyProgressRate.Observe(written);
+            var progressSpeed = paused ? 0d : _copyProgressRate.Observe(written);
+            var diagnostics = _job.DiagnosticsSnapshot();
+            var sourceSpeed = paused ? 0d : diagnostics.SourceRead5sBytesPerSecond;
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
             OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
-            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
+            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(sourceSpeed);
             var remaining = total > written ? total - written : 0;
-            RemainingMetricText.Text = !paused && speed > 1
-                ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
+            RemainingMetricText.Text = !paused && progressSpeed > 1
+                ? FormatDuration(TimeSpan.FromSeconds(remaining / progressSpeed))
                 : "--:--:--";
             if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
             {
@@ -334,7 +339,7 @@ public sealed partial class MainWindow : Window
         OverallPercentText.Text = $"{percent:0}%";
 
         var activeFileSnapshots = snapshots
-            .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+            .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled and not DestinationPhase.Releasable)
             .ToArray();
         var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
         var filesDone = activeFileSnapshots.Length == 0
@@ -344,6 +349,12 @@ public sealed partial class MainWindow : Window
 
         if (_copyStartedAt is not null)
             ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
+
+        var releasable = snapshots.Count(item => item.Phase == DestinationPhase.Releasable);
+        if (releasable > 0)
+            StatusText.Text = $"{releasable} destino{(releasable == 1 ? string.Empty : "s")} liberado{(releasable == 1 ? string.Empty : "s")} y listo{(releasable == 1 ? string.Empty : "s")} para retirar · los demás continúan";
+
+        CurrentPathText.Text = FormatDestinationRates(snapshots);
 
         var current = snapshots.Select(item => item.LastFile).FirstOrDefault(path => !string.IsNullOrWhiteSpace(path));
         if (!string.IsNullOrWhiteSpace(current)) CurrentFileText.Text = Path.GetFileName(current);
@@ -645,6 +656,17 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "Ocurrió un error";
     }
 
+    private void ShowTerminalErrorSummary(IReadOnlyList<DestinationSnapshot> snapshots)
+    {
+        var message = TerminalErrorFormatter.FormatSnapshots(snapshots);
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        ErrorBar.Message = message;
+        ErrorBar.IsOpen = true;
+        StatusText.Text = "La copia terminó con errores. Ver detalle arriba.";
+    }
+
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
         _progressTimer.Stop();
@@ -696,6 +718,28 @@ public sealed partial class MainWindow : Window
 
     private static string FormatDuration(TimeSpan value) =>
         $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
+
+    private static string FormatDestinationRates(IReadOnlyList<DestinationSnapshot> snapshots)
+    {
+        if (snapshots.Count == 0)
+            return string.Empty;
+
+        return string.Join("  ·  ", snapshots.Select((snapshot, index) =>
+        {
+            var rate = snapshot.Phase is DestinationPhase.Copying
+                ? snapshot.SustainedWrite5sBytesPerSecond
+                : 0d;
+            var state = snapshot.Phase switch
+            {
+                DestinationPhase.Releasable => "LIBERADO",
+                DestinationPhase.Verifying => "verificando",
+                DestinationPhase.Failed => "falló",
+                DestinationPhase.Cancelled => "cancelado",
+                _ => Throughput.Format(rate),
+            };
+            return $"D{index + 1} {state}";
+        }));
+    }
 
     private static string FormatBytes(ulong bytes)
     {

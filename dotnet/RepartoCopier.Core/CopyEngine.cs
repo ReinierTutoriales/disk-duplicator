@@ -280,8 +280,10 @@ public static class CopyEngine
         using var resources = new ResourceGovernor();
         SharedFanoutBufferPool? bufferPool = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
+        var spillBudget = new FanoutSpillBudget();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
+        job.Telemetry.AttachSpillBudget(spillBudget);
         try
         {
             var skipMasks = options.SkipSame
@@ -293,6 +295,7 @@ public static class CopyEngine
                     skipMasks[fileIndex][slot] |= copy.PreverifiedSkips[fileIndex][slot];
             }
 
+            var activeDestinationCount = copy.DestinationRoots.Length;
             workers = copy.DestinationRoots
                 .Select((root, index) => new DestinationWorker(
                     root,
@@ -300,7 +303,11 @@ public static class CopyEngine
                     progress[index],
                     copy.DestinationDevices[index],
                     deviceSchedulers.For(copy.DestinationDevices[index]),
-                    controlBudget))
+                    controlBudget,
+                    spillBudget,
+                    () => copy.ReleaseStateLease(index),
+                    () => Volatile.Read(ref activeDestinationCount),
+                    () => Interlocked.Decrement(ref activeDestinationCount)))
                 .ToArray();
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
@@ -332,41 +339,81 @@ public static class CopyEngine
                     worker.Channel.Writer.TryComplete(producerError);
             }
 
+            if (producerError is not null)
+            {
+                try { await Task.WhenAll(writerTasks).ConfigureAwait(false); }
+                catch { }
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
+            }
+
             Exception? writerError = null;
+            Exception? verificationError = null;
+            var verifyPhaseStarted = options.Verify ? Stopwatch.GetTimestamp() : 0;
             try
             {
-                await Task.WhenAll(writerTasks).ConfigureAwait(false);
+                if (options.Verify && !token.IsCancellationRequested)
+                {
+                    // The producer is finished, so source reads are no longer competing with COPY.
+                    // Verify destinations in writer-completion batches while slower writers keep
+                    // draining their already-produced fan-out pages. This keeps verification
+                    // source-shared inside each batch without a job-wide writer barrier.
+                    var pendingWriters = writerTasks
+                        .Select((task, slot) => (Task: task, Slot: slot))
+                        .ToList();
+                    while (pendingWriters.Count != 0)
+                    {
+                        var completedTask = await Task.WhenAny(pendingWriters.Select(item => item.Task)).ConfigureAwait(false);
+                        var ready = pendingWriters.Where(item => item.Task.IsCompleted).ToArray();
+                        foreach (var item in ready)
+                        {
+                            pendingWriters.Remove(item);
+                            try { await item.Task.ConfigureAwait(false); }
+                            catch (Exception ex) { writerError ??= ex; }
+                        }
+
+                        var readySlots = ready
+                            .Where(item => workers[item.Slot].IsActive)
+                            .Select(item => item.Slot)
+                            .ToArray();
+                        if (readySlots.Length != 0 && verificationError is null)
+                        {
+                            try
+                            {
+                                await VerifyDestinationsAsync(
+                                    copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler, readySlots).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                // Keep draining every writer before shared FAN-OUT resources
+                                // can be disposed. The first verification error is rethrown only
+                                // after all destination writers have reached their terminal state.
+                                verificationError = ex;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    try { await Task.WhenAll(writerTasks).ConfigureAwait(false); }
+                    catch (Exception ex) { writerError = ex; }
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                writerError = ex;
+                if (options.Verify)
+                    job.Telemetry.RecordVerifyPhase(Stopwatch.GetElapsedTime(verifyPhaseStarted));
             }
 
             job.Telemetry.RecordCopyPhase(Stopwatch.GetElapsedTime(copyPhaseStarted));
+            ValidateFanoutDrain(workers, spillBudget, activeBufferPool);
 
-            if (producerError is not null)
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(producerError).Throw();
             if (writerError is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(writerError).Throw();
+            if (verificationError is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(verificationError).Throw();
 
-            // COPY owns the large 256 MiB page pool. Verification deliberately does not.
-            // Once every writer drained, release that pinned/locked region before VERIFY.
             activeBufferPool.Dispose();
             bufferPool = null;
-
-            if (options.Verify && !token.IsCancellationRequested)
-            {
-                var verifyPhaseStarted = Stopwatch.GetTimestamp();
-                try
-                {
-                    await VerifyDestinationsAsync(
-                        copy, workers, progress, job, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
-                }
-                finally
-                {
-                    job.Telemetry.RecordVerifyPhase(Stopwatch.GetElapsedTime(verifyPhaseStarted));
-                }
-            }
 
             for (var i = 0; i < progress.Length; i++)
             {
@@ -383,7 +430,14 @@ public static class CopyEngine
         }
         catch (Exception ex)
         {
-            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Failed))
+            foreach (var item in progress.Where(p =>
+            {
+                var phase = p.Snapshot().Phase;
+                return phase is not DestinationPhase.Failed
+                    and not DestinationPhase.Releasable
+                    and not DestinationPhase.Done
+                    and not DestinationPhase.Cancelled;
+            }))
                 item.SetPhase(DestinationPhase.Failed, ex.Message);
         }
         finally
@@ -396,6 +450,31 @@ public static class CopyEngine
             bufferPool?.Dispose();
             copy.ReleaseStateLeases();
         }
+    }
+
+    private static void ValidateFanoutDrain(
+        IReadOnlyList<DestinationWorker> workers,
+        FanoutSpillBudget spillBudget,
+        SharedFanoutBufferPool bufferPool)
+    {
+        var failures = new List<string>();
+        foreach (var worker in workers)
+        {
+            if (worker.PendingPayloadBytes != 0)
+                failures.Add($"{worker.Root}: pending={worker.PendingPayloadBytes}");
+            if (worker.SpillBytes != 0)
+                failures.Add($"{worker.Root}: spill={worker.SpillBytes}");
+            if (worker.DeviceScheduler.QueuedBytes != 0)
+                failures.Add($"{worker.Root}: queued={worker.DeviceScheduler.QueuedBytes}");
+        }
+        if (spillBudget.UsedBytes != 0)
+            failures.Add($"spill-global={spillBudget.UsedBytes}");
+        if (bufferPool.UsedBytes != 0)
+            failures.Add($"shared-pool={bufferPool.UsedBytes}");
+
+        if (failures.Count != 0)
+            throw new InvalidOperationException(
+                "FAN-OUT terminó con recursos retenidos: " + string.Join(", ", failures));
     }
 
     private static async Task ProducerLoopAsync(
@@ -411,7 +490,15 @@ public static class CopyEngine
         var token = job.Token;
         try
         {
-            for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+            // Plan once, outside the block hot path: files needed by more destinations
+            // go first so a resumed job maximizes one-read/many-writes fan-out.
+            var fileOrder = Enumerable.Range(0, copy.Files.Count)
+                .OrderByDescending(fileIndex =>
+                    Enumerable.Range(0, workers.Length).Count(slot => !skipMasks[fileIndex][slot]))
+                .ThenBy(fileIndex => fileIndex)
+                .ToArray();
+
+            foreach (var fileIndex in fileOrder)
             {
                 token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(token).ConfigureAwait(false);
@@ -470,6 +557,12 @@ public static class CopyEngine
         }
     }
 
+    // Independent re-reads are only safe where concurrent reads do not degrade the
+    // source: solid-state local media. Rotational, unknown and network sources keep
+    // shared-pool backpressure.
+    private static bool IsDetachEligibleSource(StorageDeviceInfo source) =>
+        source.MediaKind == StorageMediaKind.SolidState && !source.IsNetwork;
+
     private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
@@ -488,36 +581,84 @@ public static class CopyEngine
             if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
                 buffered = OpenSourceStream(entry.SourcePath);
 
+            var detachEligible = IsDetachEligibleSource(sourceDevice);
+            foreach (var worker in active.ToArray())
+            {
+                // Detached for the whole job: the destination reads this file itself.
+                if (worker.IsActive && worker.IsDetached)
+                    await DeliverControlAsync(worker, new DetachMessage(0), job).ConfigureAwait(false);
+            }
+
             long totalRead = 0;
             while (totalRead < entry.Size)
             {
                 job.Token.ThrowIfCancellationRequested();
                 await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
                 active.RemoveAll(worker => !worker.IsActive);
-                if (active.Count == 0)
-                    return null;
+                if (active.Count == 0) return null;
 
-                var reservedReferences = active.Count;
-                var poolStarted = Stopwatch.GetTimestamp();
-                SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
-                    readBufferSize,
-                    transferAlignment,
-                    reservedReferences,
-                    job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
-                job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+                // Detached destinations are outside fan-out: no partition, no spill,
+                // no shared reference. They stay in `active` so End still reaches them.
+                var fanout = active.Where(static worker => !worker.IsDetached).ToList();
+                var activeBySlot = fanout.ToDictionary(static worker => worker.Slot);
+                var partition = FanoutSpillPartitioner.Partition(
+                    fanout.Select(static worker => new FanoutSpillPartitionCandidate(
+                        worker.Slot,
+                        worker.DeviceScheduler.QueuedBytes,
+                        worker.DeviceScheduler.BacklogTargetBytes,
+                        worker.SpillBytes,
+                        worker.SpillController)).ToArray());
+                var normal = partition.NormalSlots.Select(slot => activeBySlot[slot]).ToList();
+                var spilling = partition.SpillingSlots.Select(slot => activeBySlot[slot]).ToList();
 
-                int read;
+                var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                var spillReservations = new Dictionary<DestinationWorker, int>();
+                SharedFanoutBufferPool.Lease? lease = null;
                 try
                 {
-                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                    // Resolve capacity fallbacks before counting shared references. Reserve
+                    // the maximum read size; short reads return the unused reservation.
+                    foreach (var worker in spilling.ToArray())
+                    {
+                        if (!worker.TryReserveSpill(remaining))
+                        {
+                            spilling.Remove(worker);
+                            if (detachEligible)
+                            {
+                                // Sustained lag: hand the rest of the job to the destination's
+                                // own source reader instead of retaining shared-pool pages.
+                                // This block has not been read yet, so totalRead is the first
+                                // byte the destination did not receive.
+                                worker.MarkDetached();
+                                job.Telemetry.RecordDestinationDetached(worker.Slot, totalRead);
+                                Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; traspaso a lectura independiente en offset {totalRead}.");
+                                await DeliverControlAsync(worker, new DetachMessage(totalRead), job).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                worker.SpillController.ExitSpill();
+                                normal.Add(worker);
+                                Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; continúa por shared/backpressure.");
+                            }
+                        }
+                        else
+                            spillReservations.Add(worker, remaining);
+                    }
+
+                    var reservedReferences = Math.Max(1, normal.Count);
+                    var poolStarted = Stopwatch.GetTimestamp();
+                    lease = await bufferPool.RentAsync(
+                        readBufferSize, transferAlignment, reservedReferences, job.Token).ConfigureAwait(false);
+                    job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
+                    job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+
+                    int read;
                     var readStarted = Stopwatch.GetTimestamp();
                     DeviceScheduler.IoLease? sourceIo = null;
                     try
                     {
                         if (sharedSourceScheduler is not null)
                             sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
-
                         if (direct is not null)
                         {
                             try
@@ -536,47 +677,67 @@ public static class CopyEngine
                             }
                         }
                         else
-                        {
                             read = await buffered!.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                        }
                     }
-                    finally
-                    {
-                        sourceIo?.Dispose();
-                    }
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
+                    finally { sourceIo?.Dispose(); }
 
-                    if (read == 0)
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
-
+                    job.Telemetry.RecordSourceRead(read, Stopwatch.GetElapsedTime(readStarted));
+                    if (read == 0) throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
+                    if (read > remaining) throw new IOException($"El origen cambió de tamaño: {entry.RelativePath}");
                     totalRead += read;
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
                     job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
-                    active.RemoveAll(worker => !worker.IsActive);
-                    var releasedBeforeDelivery = reservedReferences - active.Count;
-                    for (var released = 0; released < releasedBeforeDelivery; released++)
-                        lease.ReleaseReference();
-                    if (active.Count == 0)
+
+                    // Private copies are made before shared delivery. They never retain a
+                    // shared-pool reference, so a lagging branch cannot stall fast peers.
+                    foreach (var worker in spilling.ToArray())
                     {
-                        lease = null;
-                        return null;
+                        if (!worker.IsActive) continue;
+                        var reserved = spillReservations[worker];
+                        if (reserved > read)
+                        {
+                            worker.ReleaseSpill(reserved - read);
+                            spillReservations[worker] = read;
+                        }
+                        var spillCopyStarted = Stopwatch.GetTimestamp();
+                        var privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
+                        job.Telemetry.RecordSpillCopy(read, Stopwatch.GetElapsedTime(spillCopyStarted));
+                        spillReservations.Remove(worker);
+
+                        // Ownership (including the spill reservation) transfers to
+                        // delivery before any enqueue operation can fail.
+                        await DeliverSingleDataAsync(
+                            worker,
+                            new DataMessage(new SpillBlock(worker, privateBlock)),
+                            job).ConfigureAwait(false);
                     }
 
-                    var block = new SharedBlock(lease, read);
-                    lease = null;
-                    var deliveryStarted = Stopwatch.GetTimestamp();
-                    await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
-                    var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                    job.Telemetry.RecordFanoutWait(deliveryElapsed);
+                    normal.RemoveAll(worker => !worker.IsActive);
+                    if (normal.Count > 0)
+                    {
+                        var released = reservedReferences - normal.Count;
+                        for (var n = 0; n < released; n++) lease.ReleaseReference();
+                        var block = new SharedBlock(lease, read);
+                        lease = null;
+                        await DeliverDataAsync(normal, new DataMessage(block), job).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // Release either the temporary producer reference or references
+                        // belonging to normal branches that failed before delivery.
+                        for (var n = 0; n < reservedReferences; n++) lease.ReleaseReference();
+                        lease = null;
+                    }
+
                     active.RemoveAll(worker => !worker.IsActive);
-                    if (active.Count == 0)
-                        return null;
+                    if (active.Count == 0) return null;
                 }
                 finally
                 {
                     lease?.Dispose();
+                    foreach (var reservation in spillReservations)
+                        reservation.Key.ReleaseSpill(reservation.Value);
                 }
             }
 
@@ -586,8 +747,38 @@ public static class CopyEngine
         finally
         {
             direct?.Dispose();
-            if (buffered is not null)
-                await buffered.DisposeAsync().ConfigureAwait(false);
+            if (buffered is not null) await buffered.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task DeliverSingleDataAsync(DestinationWorker worker, DataMessage message, CopyJob job)
+    {
+        var payloadOwned = false;
+        var queueOwned = false;
+        var blockOwned = true;
+        try
+        {
+            if (!worker.IsActive) return;
+            worker.DeviceScheduler.ReserveBacklog(message.Block.Length);
+            worker.ReservePendingPayload(message.Block.Length);
+            payloadOwned = true;
+            worker.IncrementQueueDepth();
+            queueOwned = true;
+            if (worker.Channel.Writer.TryWrite(message))
+            {
+                payloadOwned = false;
+                queueOwned = false;
+                blockOwned = false;
+                return;
+            }
+            if (worker.IsActive) worker.Fail("El canal del destino se cerró antes de recibir todos los datos.");
+        }
+        finally
+        {
+            if (queueOwned) worker.DecrementQueueDepth();
+            if (payloadOwned) ReleaseBranchPayload(worker, message.Block.Length);
+            if (blockOwned)
+                message.Block.Release();
         }
     }
 
@@ -745,7 +936,7 @@ public static class CopyEngine
         CopyJob job)
     {
         CurrentFile? current = null;
-        using var recovery = new RecoveryCheckpointWriter(worker.Root);
+        RecoveryCheckpointWriter? recovery = new(worker.Root);
         try
         {
             worker.Progress.SetPhase(DestinationPhase.Copying);
@@ -774,6 +965,22 @@ public static class CopyEngine
                             else if (current.DirectRequested)
                                 job.Telemetry.RecordDirectDestinationFallback();
                             break;
+
+                        case DetachMessage detach when current is not null:
+                            // Commit A: the producer side of detach exists, the independent
+                            // source reader does not yet. Fail explicitly; never ignore.
+                            var detachDrainError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                            FailCurrentFile(
+                                worker,
+                                current,
+                                options,
+                                detachDrainError?.Message
+                                    ?? $"Destino {worker.Root}: lector independiente no implementado para traspaso en offset {detach.Offset}");
+                            break;
+
+                        case DetachMessage detachWithoutFile:
+                            throw new InvalidOperationException(
+                                $"Se recibió DetachMessage(offset {detachWithoutFile.Offset}) sin archivo abierto.");
 
                         case DataMessage chunkData when current is not null:
                             if (current.Failed)
@@ -811,7 +1018,7 @@ public static class CopyEngine
                             if (pendingError is not null)
                                 FailCurrentFile(worker, current, options, pendingError.Message);
                             if (!current.Failed)
-                                FinishFile(worker, current, end.Hash, options, recovery, job);
+                                FinishFile(worker, current, end.Hash, options, recovery!, job);
                             current = null;
                             break;
                     }
@@ -845,6 +1052,40 @@ public static class CopyEngine
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
             DrainAndRelease(worker.Channel.Reader, worker);
+
+            // "Done" must mean the destination is no longer held open by the copy
+            // writer. Flush/close the recovery manifest and journal before releasing
+            // the cross-process state lease so Windows can eject removable media.
+            Exception? recoveryCloseError = null;
+            try
+            {
+                recovery?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                recoveryCloseError = ex;
+                worker.Fail($"No se pudo cerrar el estado de recuperación: {ex.Message}");
+            }
+            finally
+            {
+                recovery = null;
+            }
+
+            // Lease release is unconditional here: even a recovery flush/close failure
+            // must not leave this process holding the destination lock. Releasable,
+            // however, is only advertised after a successful recovery close.
+            if (!options.Verify || !worker.IsActive)
+            {
+                if (worker.IsActive && recoveryCloseError is null)
+                {
+                    worker.MarkSuccessfullyReleased();
+                    worker.Progress.SetPhase(DestinationPhase.Releasable);
+                }
+                else
+                {
+                    worker.ReleaseStateLease();
+                }
+            }
         }
     }
 
@@ -881,7 +1122,7 @@ public static class CopyEngine
     private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
         CurrentFile current,
-        SharedBlock block,
+        FanoutBlock block,
         long offset,
         CopyJob job)
     {
@@ -944,9 +1185,10 @@ public static class CopyEngine
                 job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var writeElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, writeElapsed);
                 current.RecordCompletedWrite(data.Length);
-                worker.Progress.AddWritten(data.Length);
+                worker.Progress.AddWritten(data.Length, writeElapsed, operations);
                 worker.NoteProgress();
                 ReleaseBranchBlock(worker, block);
                 return PendingWriteResult.Success();
@@ -977,9 +1219,10 @@ public static class CopyEngine
 
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var writeElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, writeElapsed);
                 current.RecordCompletedWrite(data.Length);
-                worker.Progress.AddWritten(data.Length);
+                worker.Progress.AddWritten(data.Length, writeElapsed, operations);
                 worker.NoteProgress();
                 ReleaseBranchBlock(worker, block);
                 if (bufferedRetryCount > 0)
@@ -1099,15 +1342,16 @@ public static class CopyEngine
             ReleaseRetryBlock(worker, result.RetryBlock);
     }
 
-    private static void ReleaseRetryBlock(DestinationWorker worker, SharedBlock? block)
+    private static void ReleaseRetryBlock(DestinationWorker worker, FanoutBlock? block)
     {
         if (block is not null)
             ReleaseBranchBlock(worker, block);
     }
 
-    private static void ReleaseBranchBlock(DestinationWorker worker, SharedBlock block)
+    private static void ReleaseBranchBlock(DestinationWorker worker, FanoutBlock block)
     {
-        ReleaseBranchPayload(worker, block.Length);
+        var length = block.Length;
+        ReleaseBranchPayload(worker, length);
         block.Release();
     }
 
@@ -1189,44 +1433,51 @@ public static class CopyEngine
             return;
         }
 
-        if (current.DirectSession is not null)
+        try
         {
-            var flushStarted = Stopwatch.GetTimestamp();
-            current.DirectSession.FinalizeLength(current.Entry.Size);
-            current.DirectSession.FlushToDisk();
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
-            current.DirectSession.Dispose();
-            current.DirectSession = null;
+            if (current.DirectSession is not null)
+            {
+                var flushStarted = Stopwatch.GetTimestamp();
+                current.DirectSession.FinalizeLength(current.Entry.Size);
+                current.DirectSession.FlushToDisk();
+                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+                current.DirectSession.Dispose();
+                current.DirectSession = null;
+            }
+            else if (current.Stream is not null)
+            {
+                var flushStarted = Stopwatch.GetTimestamp();
+                current.Stream.Flush(flushToDisk: true);
+                job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+                current.Stream.Dispose();
+                current.Stream = null;
+            }
+    
+            var actualSize = new FileInfo(current.PartPath).Length;
+            if (actualSize != current.Entry.Size)
+                throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
+    
+            ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
+            var commitStarted = Stopwatch.GetTimestamp();
+            AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
+            job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
+            File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
+            var recoveryStarted = Stopwatch.GetTimestamp();
+            recovery.Append(
+                new RecoveryFile(
+                    current.Entry.SourcePath,
+                    current.Entry.RelativePath,
+                    current.Entry.Size,
+                    current.Entry.ModifiedUnixNanoseconds),
+                expectedHash);
+            job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
+            worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
+            worker.Progress.MarkDone();
         }
-        else if (current.Stream is not null)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            var flushStarted = Stopwatch.GetTimestamp();
-            current.Stream.Flush(flushToDisk: true);
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
-            current.Stream.Dispose();
-            current.Stream = null;
+            FailCurrentFile(worker, current, options, ex.Message);
         }
-
-        var actualSize = new FileInfo(current.PartPath).Length;
-        if (actualSize != current.Entry.Size)
-            throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
-
-        ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
-        var commitStarted = Stopwatch.GetTimestamp();
-        AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
-        job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
-        File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
-        var recoveryStarted = Stopwatch.GetTimestamp();
-        recovery.Append(
-            new RecoveryFile(
-                current.Entry.SourcePath,
-                current.Entry.RelativePath,
-                current.Entry.Size,
-                current.Entry.ModifiedUnixNanoseconds),
-            expectedHash);
-        job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
-        worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
-        worker.Progress.MarkDone();
     }
 
     private static async Task VerifyDestinationsAsync(
@@ -1234,19 +1485,28 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         CopyJob job,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        IReadOnlyCollection<int> eligibleSlots)
     {
+        var eligible = eligibleSlots.ToHashSet();
+        var remainingVerifyFiles = new int[workers.Length];
         for (var slot = 0; slot < workers.Length; slot++)
         {
-            if (!workers[slot].IsActive)
+            if (!eligible.Contains(slot) || !workers[slot].IsActive)
                 continue;
             var entries = copy.Files
                 .Where(entry => workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             var bytes = entries.Aggregate<FileEntry, ulong>(0, (sum, entry) => checked(sum + (ulong)entry.Size));
+            remainingVerifyFiles[slot] = entries.Length;
             progress[slot].SetVerifyWork(bytes, (ulong)entries.Length);
             if (entries.Length > 0)
                 progress[slot].SetPhase(DestinationPhase.Verifying);
+            else
+            {
+                workers[slot].MarkSuccessfullyReleased();
+                progress[slot].SetPhase(DestinationPhase.Releasable);
+            }
         }
 
         foreach (var entry in copy.Files)
@@ -1254,7 +1514,7 @@ public static class CopyEngine
             job.Token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(job.Token).ConfigureAwait(false);
 
-            var slots = Enumerable.Range(0, workers.Length)
+            var slots = eligible
                 .Where(slot => workers[slot].IsActive && workers[slot].CompletedFiles.Contains(PathKey(entry.RelativePath)))
                 .ToArray();
             if (slots.Length == 0)
@@ -1365,13 +1625,28 @@ public static class CopyEngine
                 else
                 {
                     foreach (var target in targets.Where(target => !target.IsSource && workers[target.Slot].IsActive))
+                    {
                         target.Progress!.MarkVerifyFileDone();
+                        Interlocked.Decrement(ref remainingVerifyFiles[target.Slot]);
+                    }
                 }
             }
             finally
             {
+                // Verification handles must be closed before a successful destination
+                // is advertised as safe to remove.
                 foreach (var target in targets)
                     target.Dispose();
+                foreach (var slot in slots)
+                {
+                    if (!workers[slot].IsActive)
+                        workers[slot].ReleaseStateLease();
+                    else if (Volatile.Read(ref remainingVerifyFiles[slot]) == 0)
+                    {
+                        workers[slot].MarkSuccessfullyReleased();
+                        progress[slot].SetPhase(DestinationPhase.Releasable);
+                    }
+                }
             }
         }
     }
@@ -1788,10 +2063,20 @@ public static class CopyEngine
         StorageDeviceInfo[] DestinationDevices,
         DestinationStateLease[] StateLeases)
     {
+        private readonly int[] _releasedStateLeases = new int[StateLeases.Length];
+
+        internal void ReleaseStateLease(int slot)
+        {
+            if ((uint)slot >= (uint)StateLeases.Length)
+                throw new ArgumentOutOfRangeException(nameof(slot));
+            if (Interlocked.Exchange(ref _releasedStateLeases[slot], 1) == 0)
+                StateLeases[slot].Dispose();
+        }
+
         internal void ReleaseStateLeases()
         {
-            foreach (var lease in StateLeases)
-                lease.Dispose();
+            for (var slot = 0; slot < StateLeases.Length; slot++)
+                ReleaseStateLease(slot);
         }
     }
 
@@ -1807,8 +2092,11 @@ public static class CopyEngine
     private abstract record FanoutMessage;
     private abstract record ControlMessage : FanoutMessage;
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
-    private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
+    private sealed record DataMessage(FanoutBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
+    // Detached destinations stop receiving fan-out data at Offset (first byte not
+    // delivered) and must continue the current file from the source on their own.
+    private sealed record DetachMessage(long Offset) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
     {
@@ -1835,7 +2123,34 @@ public static class CopyEngine
         }
     }
 
-    internal sealed class SharedBlock
+    internal abstract class FanoutBlock
+    {
+        internal abstract int Length { get; }
+        internal abstract ReadOnlyMemory<byte> Memory { get; }
+        internal abstract bool IsAlignedFor(int alignment);
+        internal abstract bool IsSpill { get; }
+        internal abstract void Release();
+    }
+
+    private sealed class SpillBlock(DestinationWorker owner, FanoutSpillBlock block) : FanoutBlock
+    {
+        private DestinationWorker? _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+        private FanoutSpillBlock? _block = block ?? throw new ArgumentNullException(nameof(block));
+        internal override int Length => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Length;
+        internal override ReadOnlyMemory<byte> Memory => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).Memory;
+        internal override bool IsAlignedFor(int alignment) => (_block ?? throw new ObjectDisposedException(nameof(SpillBlock))).IsAlignedFor(alignment);
+        internal override bool IsSpill => true;
+        internal override void Release()
+        {
+            var released = Interlocked.Exchange(ref _block, null);
+            if (released is null) return;
+            var length = released.Length;
+            released.Dispose();
+            Interlocked.Exchange(ref _owner, null)?.ReleaseSpill(length);
+        }
+    }
+
+    internal sealed class SharedBlock : FanoutBlock
     {
         private SharedFanoutBufferPool.Lease? _lease;
 
@@ -1848,14 +2163,15 @@ public static class CopyEngine
             Length = length;
         }
 
-        public int Length { get; }
-        public ReadOnlyMemory<byte> Memory =>
+        internal override int Length { get; }
+        internal override ReadOnlyMemory<byte> Memory =>
             (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).Memory[..Length];
 
-        internal bool IsAlignedFor(int alignment) =>
+        internal override bool IsAlignedFor(int alignment) =>
             (_lease ?? throw new ObjectDisposedException(nameof(SharedBlock))).IsAlignedFor(alignment);
+        internal override bool IsSpill => false;
 
-        public void Release()
+        internal override void Release()
         {
             var lease = Volatile.Read(ref _lease)
                 ?? throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
@@ -2037,8 +2353,11 @@ public static class CopyEngine
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
+        private Action? _releaseStateLease;
         private long _pendingPayloadBytes;
         private long _peakPendingPayloadBytes;
+        private long _spillBytes;
+        private long _peakSpillBytes;
         private long _lastProgressTicks = DateTime.UtcNow.Ticks;
 
         public DestinationWorker(
@@ -2047,7 +2366,11 @@ public static class CopyEngine
             DestinationProgress progress,
             StorageDeviceInfo device,
             DeviceScheduler deviceScheduler,
-            AdaptiveControlByteBudget controlBudget)
+            AdaptiveControlByteBudget controlBudget,
+            FanoutSpillBudget spillBudget,
+            Action releaseStateLease,
+            Func<int> activeDestinationCount,
+            Action deactivateDestination)
         {
             Root = root;
             Slot = slot;
@@ -2055,6 +2378,10 @@ public static class CopyEngine
             Device = device;
             DeviceScheduler = deviceScheduler;
             ControlBudget = controlBudget ?? throw new ArgumentNullException(nameof(controlBudget));
+            SpillBudget = spillBudget ?? throw new ArgumentNullException(nameof(spillBudget));
+            _releaseStateLease = releaseStateLease ?? throw new ArgumentNullException(nameof(releaseStateLease));
+            ActiveDestinationCount = activeDestinationCount ?? throw new ArgumentNullException(nameof(activeDestinationCount));
+            DeactivateDestination = deactivateDestination ?? throw new ArgumentNullException(nameof(deactivateDestination));
             Channel = System.Threading.Channels.Channel.CreateUnbounded<FanoutMessage>(new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -2069,6 +2396,22 @@ public static class CopyEngine
         public StorageDeviceInfo Device { get; }
         public DeviceScheduler DeviceScheduler { get; }
         internal AdaptiveControlByteBudget ControlBudget { get; }
+        internal FanoutSpillBudget SpillBudget { get; }
+        internal FanoutSpillController SpillController { get; } = new();
+
+        private int _detached;
+
+        // Once set, stays set for the rest of the job: the producer never again
+        // delivers shared or spill data to this destination.
+        internal bool IsDetached => Volatile.Read(ref _detached) != 0;
+        internal void MarkDetached() => Volatile.Write(ref _detached, 1);
+        private Func<int> ActiveDestinationCount { get; }
+        private Action DeactivateDestination { get; }
+        internal long SpillCeilingBytes => SpillBudget.DestinationCeilingForCurrentActiveCount(
+            ActiveDestinationCount,
+            DeviceScheduler.BacklogTargetBytes);
+        internal long SpillBytes => Interlocked.Read(ref _spillBytes);
+        internal long PeakSpillBytes => Interlocked.Read(ref _peakSpillBytes);
         public Channel<FanoutMessage> Channel { get; }
         public bool IsActive => Volatile.Read(ref _active) != 0;
         public long PendingPayloadBytes => Interlocked.Read(ref _pendingPayloadBytes);
@@ -2076,6 +2419,17 @@ public static class CopyEngine
         public DateTime LastProgressUtc => new(Interlocked.Read(ref _lastProgressTicks), DateTimeKind.Utc);
 
         public void NoteProgress() => Interlocked.Exchange(ref _lastProgressTicks, DateTime.UtcNow.Ticks);
+
+        public void ReleaseStateLease() =>
+            Interlocked.Exchange(ref _releaseStateLease, null)?.Invoke();
+
+        public void MarkSuccessfullyReleased()
+        {
+            ReleaseStateLease();
+            if (Interlocked.Exchange(ref _active, 0) == 0)
+                return;
+            DeactivateDestination();
+        }
 
         public void ReservePendingPayload(int bytes)
         {
@@ -2103,6 +2457,44 @@ public static class CopyEngine
             }
         }
 
+        internal bool TryReserveSpill(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            while (true)
+            {
+                var current = Interlocked.Read(ref _spillBytes);
+                var next = checked(current + bytes);
+                if (next > SpillCeilingBytes || !SpillBudget.TryReserve(bytes))
+                    return false;
+                if (Interlocked.CompareExchange(ref _spillBytes, next, current) == current)
+                {
+                    var peak = Interlocked.Read(ref _peakSpillBytes);
+                    while (next > peak)
+                    {
+                        var observed = Interlocked.CompareExchange(ref _peakSpillBytes, next, peak);
+                        if (observed == peak) break;
+                        peak = observed;
+                    }
+                    return true;
+                }
+                SpillBudget.Release(bytes);
+            }
+        }
+
+        internal void ReleaseSpill(int bytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+            while (true)
+            {
+                var current = Interlocked.Read(ref _spillBytes);
+                if (current < bytes)
+                    throw new InvalidOperationException("El destino intentó liberar más spill del reservado.");
+                if (Interlocked.CompareExchange(ref _spillBytes, current - bytes, current) == current)
+                    break;
+            }
+            SpillBudget.Release(bytes);
+        }
+
         public void IncrementQueueDepth()
         {
             var depth = Interlocked.Increment(ref _queueDepth);
@@ -2123,6 +2515,8 @@ public static class CopyEngine
         public void Fail(string error)
         {
             if (Interlocked.Exchange(ref _active, 0) == 0) return;
+            DeactivateDestination();
+            SpillController.Fail();
             Progress.MarkError(error);
             Progress.SetPhase(DestinationPhase.Failed, error);
             Channel.Writer.TryComplete();
@@ -2138,14 +2532,14 @@ public static class CopyEngine
 
     private sealed record PendingWriteResult(
         PendingWriteStatus Status,
-        SharedBlock? RetryBlock,
+        FanoutBlock? RetryBlock,
         long Offset,
         Exception? Error)
     {
         internal static PendingWriteResult Success() =>
             new(PendingWriteStatus.Success, null, 0, null);
 
-        internal static PendingWriteResult NeedsBufferedRetry(SharedBlock block, long offset, Exception error) =>
+        internal static PendingWriteResult NeedsBufferedRetry(FanoutBlock block, long offset, Exception error) =>
             new(PendingWriteStatus.NeedsBufferedRetry, block, offset, error);
 
         internal static PendingWriteResult Failed(Exception error) =>

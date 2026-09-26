@@ -31,13 +31,17 @@ public sealed class WinUiCompactProgressContractTests
     }
 
     [TestMethod]
-    public void CopySpeedUsesTheSameLogicalCompletionProgressAsTheBar()
+    public void CopyUiSeparatesLogicalProgressFromRealIoRates()
     {
         var root = FindRepositoryRoot();
+        var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(code.Contains("_copyProgressRate.Observe(written)", StringComparison.Ordinal));
-        Assert.IsFalse(code.Contains("diagnostics.SourceRead5sBytesPerSecond", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("var progressSpeed = paused ? 0d : _copyProgressRate.Observe(written)", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("diagnostics.SourceRead5sBytesPerSecond", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("snapshot.SustainedWrite5sBytesPerSecond", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("active.Min(item => item.Written)", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("Velocidad fuente", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("CurrentPathText.Text = FormatDestinationRates(snapshots)", StringComparison.Ordinal));
     }
 
     [TestMethod]

@@ -15,33 +15,34 @@ public sealed class DeviceSchedulerTests
         using var map = DeviceSchedulerMap.Create(source, [first, second]);
         Assert.HasCount(1, map.Schedulers);
         Assert.AreSame(map.For(first), map.For(second));
-        Assert.AreEqual(1, map.For(first).CurrentQueueDepth);
-        Assert.AreEqual(1, map.For(first).ExplorationQueueDepth);
+        Assert.AreEqual(4, map.For(first).CurrentQueueDepth);
+        Assert.AreEqual(4, map.For(first).ExplorationQueueDepth);
     }
 
     [TestMethod]
-    public async Task SecondIoWaitsUntilFirstCompletes()
+    public async Task QueueDepthTwoAllowsTwoIosAndBlocksThird()
     {
-        using var scheduler = new DeviceScheduler("PhysicalDiskUSB", 1, 256L * 1024 * 1024);
+        using var scheduler = new DeviceScheduler("PhysicalDiskHdd", 2, 128L * 1024 * 1024);
         using var first = await scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None);
-        var secondTask = scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None).AsTask();
-        Assert.IsFalse(secondTask.IsCompleted);
+        using var second = await scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None);
+        var thirdTask = scheduler.AcquireIoAsync(8 * 1024 * 1024, CancellationToken.None).AsTask();
+        Assert.IsFalse(thirdTask.IsCompleted);
         first.Dispose();
-        using var second = await secondTask.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.AreEqual(1, scheduler.OutstandingIo);
-        Assert.AreEqual(1, scheduler.PeakOutstandingIo);
+        using var third = await thirdTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(2, scheduler.OutstandingIo);
+        Assert.AreEqual(2, scheduler.PeakOutstandingIo);
     }
 
     [TestMethod]
     public void SnapshotStaysFixedInsteadOfExploring()
     {
-        using var scheduler = new DeviceScheduler("PhysicalDisk", 16, 512L * 1024 * 1024);
+        using var scheduler = new DeviceScheduler("PhysicalDisk", 8, 512L * 1024 * 1024);
         var snapshot = scheduler.Snapshot();
-        Assert.AreEqual(1, snapshot.InitialQueueDepth);
-        Assert.AreEqual(1, snapshot.CurrentQueueDepth);
-        Assert.AreEqual(1, snapshot.ExplorationQueueDepth);
+        Assert.AreEqual(8, snapshot.InitialQueueDepth);
+        Assert.AreEqual(8, snapshot.CurrentQueueDepth);
+        Assert.AreEqual(8, snapshot.ExplorationQueueDepth);
         Assert.AreEqual(0, snapshot.QueueDepthUpshifts);
-        Assert.AreEqual("fixed:extreme-style", snapshot.LastQueueDepthDecision);
+        Assert.AreEqual("fixed:storage-profile", snapshot.LastQueueDepthDecision);
     }
 
     [TestMethod]

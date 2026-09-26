@@ -4,6 +4,8 @@
     <Version>2.1.0</Version>
     <AssemblyVersion>2.1.0.0</AssemblyVersion>
     <FileVersion>2.1.0.0</FileVersion>
+    <SourceRevisionId Condition="'$(SourceRevisionId)' == '' and '$(GITHUB_SHA)' != ''">$(GITHUB_SHA)</SourceRevisionId>
+    <IncludeSourceRevisionInInformationalVersion>true</IncludeSourceRevisionInInformationalVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>14.0</LangVersion>

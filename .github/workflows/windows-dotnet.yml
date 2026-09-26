@@ -6,6 +6,12 @@ name: Windows .NET CI
 # Direct I/O destination writes with buffered fallback, recovery, and the WinUI product.
 on:
   push:
+    branches: [main, feature/fanout-per-destination-spill]
+    paths:
+      - 'dotnet/**'
+      - 'RepartoCopier.sln'
+      - '.github/workflows/windows-dotnet.yml'
+  pull_request:
     branches: [main]
     paths:
       - 'dotnet/**'

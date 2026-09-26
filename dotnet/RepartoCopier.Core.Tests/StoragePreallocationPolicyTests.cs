@@ -6,6 +6,13 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class StoragePreallocationPolicyTests
 {
+    [TestCleanup]
+    public void Cleanup()
+    {
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, null);
+        StoragePreallocationPolicy.ResetDiagnosticsForTests();
+    }
+
     [TestMethod]
     public void SafePreallocationIsRestrictedToLocalNtfsAndRefs()
     {
@@ -34,6 +41,30 @@ public sealed class StoragePreallocationPolicyTests
             expectedAllowed ? 8192L : 0L,
             StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
         Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 0));
+    }
+
+    [TestMethod]
+    public void DiagnosticSwitchDisablesPreallocationWithoutChangingDefaultPolicy()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"repartocopier-prealloc-disabled-{Guid.NewGuid():N}.part");
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, "1");
+
+        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
+        Assert.IsTrue(StoragePreallocationPolicy.PreallocationDisabledForDiagnostics);
+        Assert.AreEqual("disabled_by_env", StoragePreallocationPolicy.DiagnosticState);
+    }
+
+    [TestMethod]
+    public void DiagnosticSwitchIsReadOncePerProcessForAttributableHardwareRuns()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"repartocopier-prealloc-cached-{Guid.NewGuid():N}.part");
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, "1");
+
+        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
+        Environment.SetEnvironmentVariable(StoragePreallocationPolicy.DisablePreallocationEnvironmentVariable, null);
+
+        Assert.IsTrue(StoragePreallocationPolicy.PreallocationDisabledForDiagnostics);
+        Assert.AreEqual(0L, StoragePreallocationPolicy.GetPreallocationSize(path, 8192));
     }
 
     [TestMethod]

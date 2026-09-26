@@ -7,7 +7,7 @@ namespace RepartoCopier.Core.Tests;
 public sealed class StorageIoProfileTests
 {
     [TestMethod]
-    public void AllLocalStorageProfilesUseFixedQueueDepthOne()
+    public void StorageProfilesUseFixedQueueDepthByHardwareClass()
     {
         var profiles = new[]
         {
@@ -16,20 +16,21 @@ public sealed class StorageIoProfileTests
             StorageIoProfile.For(Device("SATA", StorageMediaKind.SolidState, true)),
             StorageIoProfile.For(Device("SATA", StorageMediaKind.Rotational, false)),
             StorageIoProfile.For(Device("NVMe", StorageMediaKind.SolidState, true)),
+            StorageIoProfile.For(Device("Network", StorageMediaKind.Unknown, null, isNetwork: true)),
             StorageIoProfile.For(Device("Unknown", StorageMediaKind.Unknown, null)),
         };
-        foreach (var profile in profiles) Assert.AreEqual(1, profile.InitialQueueDepth);
+        CollectionAssert.AreEqual(new[] { 4, 1, 4, 2, 8, 2, 1 }, profiles.Select(profile => profile.InitialQueueDepth).ToArray());
     }
 
     [TestMethod]
-    public void UsbStillKeepsUsefulBacklogAccountingWithoutIncreasingIoConcurrency()
+    public void UsbSsdUsesQueueDepthFourAndKeepsItsBacklogBudget()
     {
         var usb = StorageIoProfile.For(Device("USB", StorageMediaKind.SolidState, true));
         Assert.AreEqual(StorageProfileKind.UsbSsd, usb.Kind);
-        Assert.AreEqual(1, usb.InitialQueueDepth);
+        Assert.AreEqual(4, usb.InitialQueueDepth);
         Assert.AreEqual(256L * 1024 * 1024, usb.DeviceBacklogTargetBytes);
     }
 
-    private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim) =>
-        new(@"C:\dest", @"C:\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, trim, 0);
+    private static StorageDeviceInfo Device(string bus, StorageMediaKind media, bool? trim, bool isNetwork = false) =>
+        new(@"C:\dest", @"C:\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, isNetwork, true, trim, 0);
 }

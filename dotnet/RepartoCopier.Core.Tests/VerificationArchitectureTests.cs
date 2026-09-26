@@ -18,12 +18,15 @@ public sealed class VerificationArchitectureTests
     }
 
     [TestMethod]
-    public void LargeCopyPoolIsReleasedBeforeVerifyStarts()
+    public void CompletedDestinationsVerifyBeforeSlowWritersDrain()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
-        var release = engine.IndexOf("activeBufferPool.Dispose();", StringComparison.Ordinal);
-        var verify = engine.IndexOf("if (options.Verify && !token.IsCancellationRequested)", StringComparison.Ordinal);
-        Assert.IsTrue(release >= 0 && verify > release);
+        var verify = engine.IndexOf("await VerifyDestinationsAsync(", StringComparison.Ordinal);
+        var release = engine.IndexOf("activeBufferPool.Dispose();", verify, StringComparison.Ordinal);
+        Assert.IsTrue(verify >= 0 && release > verify);
+        Assert.IsTrue(engine.Contains("Task.WhenAny(pendingWriters.Select(item => item.Task))", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("readySlots", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("IReadOnlyCollection<int> eligibleSlots", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("bufferPool?.Dispose();", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("VerificationCrc32C", StringComparison.Ordinal));
     }

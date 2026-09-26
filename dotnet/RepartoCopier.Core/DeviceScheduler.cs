@@ -26,10 +26,9 @@ public sealed record DeviceIoSnapshot(
 }
 
 /// <summary>
-/// Fixed one-I/O gate per physical device. There is deliberately no queue-depth
-/// exploration, throughput probing, multiplicative growth, or latency tuning.
-/// This mirrors ExtremeCopy's stable synchronous destination model while the
-/// shared 256 MiB FAN-OUT pool provides the buffering/backpressure window.
+/// Fixed per-device I/O gate. The queue-depth ceiling is selected once by
+/// StorageIoProfile. There is deliberately no runtime exploration, throughput
+/// probing, multiplicative growth, or latency-based tuning.
 /// </summary>
 internal sealed class DeviceScheduler : IDisposable
 {
@@ -50,12 +49,13 @@ internal sealed class DeviceScheduler : IDisposable
         DeviceId = deviceId;
         BacklogTargetBytes = backlogTargetBytes;
         IdentityConfidence = identityConfidence;
+        InitialQueueDepth = initialQueueDepth;
     }
 
     public string DeviceId { get; }
-    public int InitialQueueDepth => 1;
-    public int CurrentQueueDepth => 1;
-    public int ExplorationQueueDepth => 1;
+    public int InitialQueueDepth { get; }
+    public int CurrentQueueDepth => InitialQueueDepth;
+    public int ExplorationQueueDepth => InitialQueueDepth;
     public long BacklogTargetBytes { get; }
     public DeviceIdentityConfidence IdentityConfidence { get; }
     public int OutstandingIo => Volatile.Read(ref _outstandingIo);
@@ -64,8 +64,8 @@ internal sealed class DeviceScheduler : IDisposable
     public long PeakQueuedBytes => Interlocked.Read(ref _peakQueuedBytes);
 
     public DeviceIoSnapshot Snapshot() => new(
-        DeviceId, 1, 1, 1, OutstandingIo, PeakOutstandingIo,
-        1, 1, 1, 0, 0, "fixed:extreme-style", 0, 0,
+        DeviceId, InitialQueueDepth, InitialQueueDepth, InitialQueueDepth, OutstandingIo, PeakOutstandingIo,
+        InitialQueueDepth, InitialQueueDepth, InitialQueueDepth, 0, 0, "fixed:storage-profile", 0, 0,
         BacklogTargetBytes, QueuedBytes, PeakQueuedBytes, IdentityConfidence);
 
     public ValueTask<IoLease> AcquireIoAsync(int bytes, CancellationToken token)
@@ -75,7 +75,7 @@ internal sealed class DeviceScheduler : IDisposable
         lock (_gate)
         {
             ThrowIfDisposed();
-            if (_outstandingIo == 0 && _waiters.Count == 0)
+            if (_outstandingIo < InitialQueueDepth && _waiters.Count == 0)
                 return ValueTask.FromResult(GrantLeaseLocked(bytes));
             var waiter = new IoWaiter(bytes);
             _waiters.Enqueue(waiter);
@@ -112,8 +112,8 @@ internal sealed class DeviceScheduler : IDisposable
 
     private IoLease GrantLeaseLocked(int bytes)
     {
-        _outstandingIo = 1;
-        if (_peakOutstandingIo < 1) _peakOutstandingIo = 1;
+        _outstandingIo++;
+        if (_peakOutstandingIo < _outstandingIo) _peakOutstandingIo = _outstandingIo;
         return new IoLease(this, bytes);
     }
 
@@ -133,9 +133,9 @@ internal sealed class DeviceScheduler : IDisposable
         IoLease? lease = null;
         lock (_gate)
         {
-            if (_outstandingIo != 1) throw new InvalidOperationException("La contabilidad de I/O físico quedó inválida.");
-            _outstandingIo = 0;
-            while (_waiters.Count > 0)
+            if (_outstandingIo <= 0 || _outstandingIo > InitialQueueDepth) throw new InvalidOperationException("La contabilidad de I/O físico quedó inválida.");
+            _outstandingIo--;
+            while (_outstandingIo < InitialQueueDepth && _waiters.Count > 0)
             {
                 var candidate = _waiters.Dequeue();
                 if (candidate.Cancelled)
@@ -232,7 +232,8 @@ internal sealed class DeviceSchedulerMap : IDisposable
             var profiles = devices.Select(StorageIoProfile.For).ToArray();
             var backlogTarget = profiles.Min(profile => profile.DeviceBacklogTargetBytes);
             var confidence = (DeviceIdentityConfidence)devices.Min(item => (int)StorageDeviceIdentity.ConfidenceFor(item));
-            var scheduler = new DeviceScheduler(group.Key, 1, backlogTarget, confidence);
+            var queueDepth = profiles.Min(profile => profile.InitialQueueDepth);
+            var scheduler = new DeviceScheduler(group.Key, queueDepth, backlogTarget, confidence);
             schedulers.Add(group.Key, scheduler);
             if (source is not null && SharesPhysicalDevice(source, devices[0])) sharedSourceScheduler = scheduler;
         }

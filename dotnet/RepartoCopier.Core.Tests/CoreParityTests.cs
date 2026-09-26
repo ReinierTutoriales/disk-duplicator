@@ -342,6 +342,36 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public void RecoveryCheckpointDisposeReleasesManifestAndJournalHandles()
+    {
+        using var temp = new TempDirectory("recovery-checkpoint-release");
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var file = new RecoveryFile(
+            Path.Combine(destination, "source.bin"),
+            "source.bin",
+            3,
+            123);
+        var hash = new byte[32];
+
+        using (var checkpoint = new RecoveryCheckpointWriter(destination))
+            checkpoint.Append(file, hash);
+
+        using var manifest = new FileStream(
+            StateLayout.ManifestPath(destination),
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        using var journal = new FileStream(
+            StateLayout.JournalPath(destination),
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+
+        Assert.IsTrue(manifest.CanWrite);
+        Assert.IsTrue(journal.CanWrite);
+    }
+
+    [TestMethod]
     public void DestinationStateLeaseRejectsConcurrentOwnerAndRecoversAfterRelease()
     {
         using var temp = new TempDirectory("destination-state-lease");
@@ -452,6 +482,36 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task KeepGoingContinuesAfterPerFileCommitFailure()
+    {
+        using var temp = new TempDirectory("keep-going-commit-failure");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(source, "blocked.txt"), "new-blocked");
+        await File.WriteAllTextAsync(Path.Combine(source, "survivor.txt"), "must-copy");
+
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var destinationRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Origen")).FullName;
+        var blockedDestination = Path.Combine(destinationRoot, "blocked.txt");
+        await File.WriteAllTextAsync(blockedDestination, "old-blocked");
+
+        using (var held = new FileStream(blockedDestination, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: true);
+            await using var job = CopyEngine.Start(
+                plan,
+                new CopyOptions(Verify: false, SkipSame: false, KeepGoing: true));
+            await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.AreEqual(
+                "must-copy",
+                await File.ReadAllTextAsync(Path.Combine(destinationRoot, "survivor.txt")),
+                "KeepGoing=true debe continuar con archivos posteriores después de un fallo por archivo.");
+        }
+
+        Assert.AreEqual("old-blocked", await File.ReadAllTextAsync(blockedDestination));
+    }
+
+    [TestMethod]
     public async Task FanOutStressWithRapidPauseResumePreservesEveryDestination()
     {
         using var temp = new TempDirectory("fanout-pause-stress");
@@ -479,6 +539,70 @@ public sealed class CoreParityTests
         AssertHealthy(job);
         foreach (var destination in destinations)
             CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(destination, "Origen", "stress.bin")));
+    }
+
+    [TestMethod]
+    public async Task ReleasedDestinationCanBeRenamedExclusivelyBeforeJobWideCompletion()
+    {
+        using var temp = new TempDirectory("released-destination-exclusive");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var payload = new byte[32 * 1024 * 1024 + 193];
+        new Random(2026092101).NextBytes(payload);
+        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+
+        var fastBase = Directory.CreateDirectory(Path.Combine(temp.Path, "fast")).FullName;
+        var slowBase = Directory.CreateDirectory(Path.Combine(temp.Path, "slow")).FullName;
+        var plan = CopyPlan.Create(source, [fastBase, slowBase], skipSame: false, keepGoing: false);
+        await using var job = CopyEngine.Start(
+            plan,
+            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        while (!job.Completion.IsCompleted)
+        {
+            timeout.Token.ThrowIfCancellationRequested();
+            var snapshots = job.Snapshot();
+            var released = snapshots
+                .Select((snapshot, slot) => (snapshot, slot))
+                .FirstOrDefault(item => item.snapshot.Phase == DestinationPhase.Releasable);
+            if (released.snapshot is not null)
+            {
+                var releasedBase = released.slot == 0 ? fastBase : slowBase;
+                var releasedRoot = Path.Combine(releasedBase, "Origen");
+                var copied = Path.Combine(releasedRoot, "payload.bin");
+
+                using (var exclusive = new FileStream(
+                    copied,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.AreEqual(payload.LongLength, exclusive.Length);
+
+                using (var manifest = new FileStream(
+                    StateLayout.ManifestPath(releasedRoot),
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.IsTrue(manifest.CanRead);
+
+                using (var journal = new FileStream(
+                    StateLayout.JournalPath(releasedRoot),
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None))
+                    Assert.IsTrue(journal.CanRead);
+
+                using (var reacquired = DestinationStateLease.Acquire(releasedRoot))
+                {
+                }
+
+                break;
+            }
+            await Task.Delay(10, timeout.Token);
+        }
+
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
+        AssertHealthy(job);
     }
 
     [TestMethod]
