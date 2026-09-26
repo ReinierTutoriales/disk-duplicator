@@ -48,23 +48,23 @@ public sealed class TerminalErrorFormatterTests
     {
         var snapshot = new DestinationSnapshot(
             @"E:\Copias",
-            written: 0,
-            total: 1024,
-            filesDone: 0,
-            filesTotal: 1,
-            filesSkipped: 0,
-            filesErrored: 1,
-            verifiedBytes: 0,
-            verifyBytesTotal: 0,
-            verifyFilesDone: 0,
-            verifyFilesTotal: 0,
-            bytesPerSecond: 0,
-            recentBytesPerSecond: 0,
-            phase: DestinationPhase.Failed,
-            error: "Falló la escritura terminal.",
-            lastFile: "imagen.iso",
-            queueDepth: 0,
-            retries: 0);
+            0,
+            1024,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            DestinationPhase.Failed,
+            "Falló la escritura terminal.",
+            "imagen.iso",
+            0,
+            0);
 
         var message = TerminalErrorFormatter.FormatSnapshots([snapshot]);
 
