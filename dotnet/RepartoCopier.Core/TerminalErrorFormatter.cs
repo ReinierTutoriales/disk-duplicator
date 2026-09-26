@@ -71,6 +71,7 @@ public static class TerminalErrorFormatter
             builder.AppendLine($"Archivo: {file}");
         if (!string.IsNullOrWhiteSpace(phase))
             builder.AppendLine($"Fase: {phase}");
+        builder.AppendLine($"preallocation={StoragePreallocationPolicy.DiagnosticState}");
     }
 
     private static Exception Flatten(Exception error)
