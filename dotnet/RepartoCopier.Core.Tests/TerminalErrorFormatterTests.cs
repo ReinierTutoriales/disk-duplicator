@@ -7,6 +7,9 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class TerminalErrorFormatterTests
 {
+    [TestCleanup]
+    public void Cleanup() => TerminalFailureLog.SetLocalLogDirectoryForTests(null);
+
     [TestMethod]
     public void FormatIncludesHResultNativeCodeDestinationAndFile()
     {
@@ -72,9 +75,11 @@ public sealed class TerminalErrorFormatterTests
     }
 
     [TestMethod]
-    public void FailedPhasePersistsTerminalDiagnosticLog()
+    public void FailedPhasePersistsTerminalDiagnosticLogToLocalSinkFirst()
     {
         var root = Path.Combine(Path.GetTempPath(), $"repartocopier-terminal-log-{Guid.NewGuid():N}");
+        var local = Path.Combine(Path.GetTempPath(), $"repartocopier-local-terminal-log-{Guid.NewGuid():N}");
+        TerminalFailureLog.SetLocalLogDirectoryForTests(local);
         try
         {
             Directory.CreateDirectory(root);
@@ -83,16 +88,47 @@ public sealed class TerminalErrorFormatterTests
 
             progress.SetPhase(DestinationPhase.Failed, "Falló la escritura terminal.");
 
-            var log = Path.Combine(StateLayout.StateDirectoryFor(root), "terminal-error.log");
-            Assert.IsTrue(File.Exists(log), "El log terminal debe persistirse síncronamente al pasar a Failed.");
+            var log = Path.Combine(local, TerminalFailureLog.FileName);
+            Assert.IsTrue(File.Exists(log), "El log terminal local debe persistirse síncronamente al pasar a Failed.");
             var text = File.ReadAllText(log);
-            StringAssert.Contains(text, root);
+            StringAssert.Contains(text, "utc=");
+            StringAssert.Contains(text, "head_sha=");
+            StringAssert.Contains(text, $"destination={root}");
             StringAssert.Contains(text, "imagen.iso");
             StringAssert.Contains(text, "Falló la escritura terminal.");
         }
         finally
         {
+            TerminalFailureLog.SetLocalLogDirectoryForTests(null);
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            if (Directory.Exists(local)) Directory.Delete(local, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void TerminalLogFailureDoesNotMaskOriginalTerminalError()
+    {
+        var localParent = Path.Combine(Path.GetTempPath(), $"repartocopier-local-parent-{Guid.NewGuid():N}");
+        var blockingFile = Path.Combine(localParent, "not-a-directory");
+        Directory.CreateDirectory(localParent);
+        File.WriteAllText(blockingFile, "blocks local log directory creation");
+        TerminalFailureLog.SetLocalLogDirectoryForTests(Path.Combine(blockingFile, "child"));
+        try
+        {
+            var original = "Falló la escritura terminal original.";
+            var progress = new DestinationProgress("?:\\destino-invalido", total: 1024, filesTotal: 1);
+            progress.SetLastFile("imagen.iso");
+
+            progress.SetPhase(DestinationPhase.Failed, original);
+
+            var snapshot = progress.Snapshot();
+            Assert.AreEqual(DestinationPhase.Failed, snapshot.Phase);
+            Assert.AreEqual(original, snapshot.Error);
+        }
+        finally
+        {
+            TerminalFailureLog.SetLocalLogDirectoryForTests(null);
+            if (Directory.Exists(localParent)) Directory.Delete(localParent, recursive: true);
         }
     }
 }
