@@ -82,6 +82,7 @@ public sealed record CopyDiagnosticsSnapshot(
     public TimeSpan SpillCopyTime { get; init; }
     public long PeakGlobalSpillBytes { get; init; }
     public long GlobalSpillCapacityBytes { get; init; }
+    public string PreallocationPolicy { get; init; } = "unknown";
     public double SpillCopyBytesPerSecond => Rate(SpillCopyBytes, SpillCopyTime);
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
@@ -108,6 +109,7 @@ public sealed record CopyDiagnosticsSnapshot(
 internal sealed class CopyTelemetry
 {
     private readonly long _started = Stopwatch.GetTimestamp();
+    private readonly string _preallocationPolicy = StoragePreallocationPolicy.DiagnosticState;
     private readonly SlidingByteRateWindow _writeRate = new();
     private readonly SlidingByteRateWindow _sourceReadRate = new();
     private readonly SlidingByteRateWindow _verifyLogicalRate = new();
@@ -273,6 +275,7 @@ internal sealed class CopyTelemetry
             SpillCopyTime = ToTimeSpan(Interlocked.Read(ref _spillCopyTicks)),
             PeakGlobalSpillBytes = _spillBudget?.PeakUsedBytes ?? 0,
             GlobalSpillCapacityBytes = _spillBudget?.CapacityBytes ?? 0,
+            PreallocationPolicy = _preallocationPolicy,
         };
     }
 
