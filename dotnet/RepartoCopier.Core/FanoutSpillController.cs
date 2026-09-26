@@ -10,7 +10,8 @@ internal enum FanoutSpillState
 /// <summary>
 /// Per-destination flow state. Queue depth remains the fixed hardware-class
 /// ceiling. Ordinary recovery requires private payloads to drain and uses
-/// hysteresis; the partitioner may exit spill when no normal peer remains.
+/// hysteresis; explicit fallback exits spill when no normal peer remains or
+/// a block cannot reserve private capacity. Existing queued blocks retain FIFO.
 /// </summary>
 internal sealed class FanoutSpillController
 {

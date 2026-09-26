@@ -2,7 +2,7 @@ namespace RepartoCopier.Core;
 
 /// <summary>
 /// Global bounded budget for per-destination FAN-OUT spill. Reservations are
-/// non-blocking by design: a lagging destination must never stall the producer.
+/// non-blocking; exhausted capacity falls back to shared-pool backpressure.
 /// </summary>
 internal sealed class FanoutSpillBudget
 {

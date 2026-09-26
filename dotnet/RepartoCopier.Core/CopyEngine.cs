@@ -594,20 +594,34 @@ public static class CopyEngine
                 var normal = partition.NormalSlots.Select(slot => activeBySlot[slot]).ToList();
                 var spilling = partition.SpillingSlots.Select(slot => activeBySlot[slot]).ToList();
 
-                // Keep a defensive producer reference if no normal destination remains.
-                // It gives the source a temporary aligned page to read/copy
-                // from without making any slow destination retain the shared pool.
-                var reservedReferences = Math.Max(1, normal.Count);
-                var poolStarted = Stopwatch.GetTimestamp();
-                SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
-                    readBufferSize, transferAlignment, reservedReferences, job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
-                job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
-
-                int read;
+                var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                var spillReservations = new Dictionary<DestinationWorker, int>();
+                SharedFanoutBufferPool.Lease? lease = null;
                 try
                 {
-                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
+                    // Resolve capacity fallbacks before counting shared references. Reserve
+                    // the maximum read size; short reads return the unused reservation.
+                    foreach (var worker in spilling.ToArray())
+                    {
+                        if (!worker.TryReserveSpill(remaining))
+                        {
+                            worker.SpillController.ExitSpill();
+                            spilling.Remove(worker);
+                            normal.Add(worker);
+                            Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; continúa por shared/backpressure.");
+                        }
+                        else
+                            spillReservations.Add(worker, remaining);
+                    }
+
+                    var reservedReferences = Math.Max(1, normal.Count);
+                    var poolStarted = Stopwatch.GetTimestamp();
+                    lease = await bufferPool.RentAsync(
+                        readBufferSize, transferAlignment, reservedReferences, job.Token).ConfigureAwait(false);
+                    job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
+                    job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+
+                    int read;
                     var readStarted = Stopwatch.GetTimestamp();
                     DeviceScheduler.IoLease? sourceIo = null;
                     try
@@ -638,6 +652,7 @@ public static class CopyEngine
 
                     job.Telemetry.RecordSourceRead(read, Stopwatch.GetElapsedTime(readStarted));
                     if (read == 0) throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
+                    if (read > remaining) throw new IOException($"El origen cambió de tamaño: {entry.RelativePath}");
                     totalRead += read;
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
@@ -648,24 +663,16 @@ public static class CopyEngine
                     foreach (var worker in spilling.ToArray())
                     {
                         if (!worker.IsActive) continue;
-                        if (!worker.TryReserveSpill(read))
+                        var reserved = spillReservations[worker];
+                        if (reserved > read)
                         {
-                            worker.Fail($"Destino {worker.Root}: abortado — techo de spill agotado (solicitado: {read} bytes; destino: {worker.SpillBytes}/{worker.SpillCeilingBytes} bytes; global: {worker.SpillBudget.UsedBytes}/{worker.SpillBudget.CapacityBytes} bytes)");
-                            continue;
+                            worker.ReleaseSpill(reserved - read);
+                            spillReservations[worker] = read;
                         }
-
-                        FanoutSpillBlock privateBlock;
-                        try
-                        {
-                            var spillCopyStarted = Stopwatch.GetTimestamp();
-                            privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
-                            job.Telemetry.RecordSpillCopy(read, Stopwatch.GetElapsedTime(spillCopyStarted));
-                        }
-                        catch
-                        {
-                            worker.ReleaseSpill(read);
-                            throw;
-                        }
+                        var spillCopyStarted = Stopwatch.GetTimestamp();
+                        var privateBlock = FanoutSpillBlock.CopyFrom(lease.Memory[..read], transferAlignment);
+                        job.Telemetry.RecordSpillCopy(read, Stopwatch.GetElapsedTime(spillCopyStarted));
+                        spillReservations.Remove(worker);
 
                         // Ownership (including the spill reservation) transfers to
                         // delivery before any enqueue operation can fail.
@@ -695,7 +702,12 @@ public static class CopyEngine
                     active.RemoveAll(worker => !worker.IsActive);
                     if (active.Count == 0) return null;
                 }
-                finally { lease?.Dispose(); }
+                finally
+                {
+                    lease?.Dispose();
+                    foreach (var reservation in spillReservations)
+                        reservation.Key.ReleaseSpill(reservation.Value);
+                }
             }
 
             ValidateCompletedSourceRead(entry, totalRead);

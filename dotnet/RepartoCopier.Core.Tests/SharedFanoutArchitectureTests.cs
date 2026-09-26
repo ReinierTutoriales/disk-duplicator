@@ -29,9 +29,12 @@ public sealed class SharedFanoutArchitectureTests
         Assert.IsTrue(engine.Contains("bufferPool.RentAsync", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("FanoutSpillBlock.CopyFrom", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("Math.Max(1, normal.Count)", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("worker.TryReserveSpill(read)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("worker.TryReserveSpill(remaining)", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("FanoutSpillPartitioner.Partition", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains(".ShouldSpill(", StringComparison.Ordinal));
+        Assert.IsTrue(engine.IndexOf("worker.TryReserveSpill(remaining)", StringComparison.Ordinal) <
+            engine.IndexOf("var reservedReferences", StringComparison.Ordinal));
+        Assert.IsFalse(engine.Contains("abortado — techo de spill agotado", StringComparison.Ordinal));
     }
 
     [TestMethod]
