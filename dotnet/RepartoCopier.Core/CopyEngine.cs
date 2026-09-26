@@ -557,6 +557,12 @@ public static class CopyEngine
         }
     }
 
+    // Independent re-reads are only safe where concurrent reads do not degrade the
+    // source: solid-state local media. Rotational, unknown and network sources keep
+    // shared-pool backpressure.
+    private static bool IsDetachEligibleSource(StorageDeviceInfo source) =>
+        source.MediaKind == StorageMediaKind.SolidState && !source.IsNetwork;
+
     private static async Task<SourceReadResult?> ReadAndFanOutSequentialAsync(
         FileEntry entry,
         StorageDeviceInfo sourceDevice,
@@ -575,6 +581,14 @@ public static class CopyEngine
             if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
                 buffered = OpenSourceStream(entry.SourcePath);
 
+            var detachEligible = IsDetachEligibleSource(sourceDevice);
+            foreach (var worker in active.ToArray())
+            {
+                // Detached for the whole job: the destination reads this file itself.
+                if (worker.IsActive && worker.IsDetached)
+                    await DeliverControlAsync(worker, new DetachMessage(0), job).ConfigureAwait(false);
+            }
+
             long totalRead = 0;
             while (totalRead < entry.Size)
             {
@@ -583,9 +597,12 @@ public static class CopyEngine
                 active.RemoveAll(worker => !worker.IsActive);
                 if (active.Count == 0) return null;
 
-                var activeBySlot = active.ToDictionary(static worker => worker.Slot);
+                // Detached destinations are outside fan-out: no partition, no spill,
+                // no shared reference. They stay in `active` so End still reaches them.
+                var fanout = active.Where(static worker => !worker.IsDetached).ToList();
+                var activeBySlot = fanout.ToDictionary(static worker => worker.Slot);
                 var partition = FanoutSpillPartitioner.Partition(
-                    active.Select(static worker => new FanoutSpillPartitionCandidate(
+                    fanout.Select(static worker => new FanoutSpillPartitionCandidate(
                         worker.Slot,
                         worker.DeviceScheduler.QueuedBytes,
                         worker.DeviceScheduler.BacklogTargetBytes,
@@ -605,10 +622,24 @@ public static class CopyEngine
                     {
                         if (!worker.TryReserveSpill(remaining))
                         {
-                            worker.SpillController.ExitSpill();
                             spilling.Remove(worker);
-                            normal.Add(worker);
-                            Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; continúa por shared/backpressure.");
+                            if (detachEligible)
+                            {
+                                // Sustained lag: hand the rest of the job to the destination's
+                                // own source reader instead of retaining shared-pool pages.
+                                // This block has not been read yet, so totalRead is the first
+                                // byte the destination did not receive.
+                                worker.MarkDetached();
+                                job.Telemetry.RecordDestinationDetached(worker.Slot, totalRead);
+                                Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; traspaso a lectura independiente en offset {totalRead}.");
+                                await DeliverControlAsync(worker, new DetachMessage(totalRead), job).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                worker.SpillController.ExitSpill();
+                                normal.Add(worker);
+                                Trace.WriteLine($"Destino {worker.Root}: techo de spill agotado; continúa por shared/backpressure.");
+                            }
                         }
                         else
                             spillReservations.Add(worker, remaining);
@@ -934,6 +965,22 @@ public static class CopyEngine
                             else if (current.DirectRequested)
                                 job.Telemetry.RecordDirectDestinationFallback();
                             break;
+
+                        case DetachMessage detach when current is not null:
+                            // Commit A: the producer side of detach exists, the independent
+                            // source reader does not yet. Fail explicitly; never ignore.
+                            var detachDrainError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                            FailCurrentFile(
+                                worker,
+                                current,
+                                options,
+                                detachDrainError?.Message
+                                    ?? $"Destino {worker.Root}: lector independiente no implementado para traspaso en offset {detach.Offset}");
+                            break;
+
+                        case DetachMessage detachWithoutFile:
+                            throw new InvalidOperationException(
+                                $"Se recibió DetachMessage(offset {detachWithoutFile.Offset}) sin archivo abierto.");
 
                         case DataMessage chunkData when current is not null:
                             if (current.Failed)
@@ -2047,6 +2094,9 @@ public static class CopyEngine
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
     private sealed record DataMessage(FanoutBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
+    // Detached destinations stop receiving fan-out data at Offset (first byte not
+    // delivered) and must continue the current file from the source on their own.
+    private sealed record DetachMessage(long Offset) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
     {
@@ -2348,6 +2398,13 @@ public static class CopyEngine
         internal AdaptiveControlByteBudget ControlBudget { get; }
         internal FanoutSpillBudget SpillBudget { get; }
         internal FanoutSpillController SpillController { get; } = new();
+
+        private int _detached;
+
+        // Once set, stays set for the rest of the job: the producer never again
+        // delivers shared or spill data to this destination.
+        internal bool IsDetached => Volatile.Read(ref _detached) != 0;
+        internal void MarkDetached() => Volatile.Write(ref _detached, 1);
         private Func<int> ActiveDestinationCount { get; }
         private Action DeactivateDestination { get; }
         internal long SpillCeilingBytes => SpillBudget.DestinationCeilingForCurrentActiveCount(

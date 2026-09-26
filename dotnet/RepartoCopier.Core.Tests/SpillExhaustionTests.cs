@@ -118,10 +118,11 @@ public sealed class SpillExhaustionTests
     [TestMethod]
     public async Task ProducerFinishesFileWhenSlowDestinationExhaustsSpillAndPool()
     {
-        // Contract: once a slow destination exhausts its spill ceiling while a normal
-        // peer remains, the producer must keep feeding the fast peer to EOF. The slow
-        // destination is detached at the first undelivered byte and must not retain
-        // shared-pool pages (pool = 1 block here, so any retained page stalls RentAsync).
+        // Contract: with a detach-eligible source (local solid state), once a slow
+        // destination exhausts its spill ceiling while a normal peer remains, the producer
+        // keeps feeding the fast peer to EOF. The slow destination is detached at the first
+        // undelivered byte, for the rest of the job, and never retains shared-pool pages
+        // (pool = 1 block here, so any retained page stalls RentAsync).
         const int Blocks = 64;
         const int SpillBlocks = 8;
         const long FileBytes = (long)Blocks * BlockSize;
@@ -129,9 +130,9 @@ public sealed class SpillExhaustionTests
         using var fastScheduler = new DeviceScheduler("fast", 1, BlockSize * 16);
         using var pool = new SharedFanoutBufferPool(BlockSize);
         var budget = new FanoutSpillBudget(BlockSize * SpillBlocks);
-        var device = new StorageDeviceInfo("test", "test", null, null, "Unknown", StorageMediaKind.Unknown, null, null, null, false, null);
+        var device = new StorageDeviceInfo("test", "test", null, null, "NVMe", StorageMediaKind.SolidState, false, null, null, false, null, IsNetwork: false);
         object Worker(int slot, DeviceScheduler scheduler) => Activator.CreateInstance(WorkerType, Members, null,
-            new object[] { "test", slot, new DestinationProgress("test", (ulong)FileBytes), device, scheduler,
+            new object[] { "test", slot, new DestinationProgress("test", (ulong)(FileBytes * 2)), device, scheduler,
                 new AdaptiveControlByteBudget(_ => 65536), budget, (Action)(() => { }), (Func<int>)(() => 2), (Action)(() => Assert.Fail("Destination deactivated")) }, null)!;
         var slow = Worker(0, slowScheduler);
         var fast = Worker(1, fastScheduler);
@@ -139,9 +140,12 @@ public sealed class SpillExhaustionTests
         workers.Add(slow);
         workers.Add(fast);
         await using var job = new CopyJob([]);
-        var path = Path.GetTempFileName();
-        var bytes = Enumerable.Range(0, (int)FileBytes).Select(i => (byte)(i * 31 + i / BlockSize)).ToArray();
-        await File.WriteAllBytesAsync(path, bytes);
+        var firstPath = Path.GetTempFileName();
+        var secondPath = Path.GetTempFileName();
+        var first = Enumerable.Range(0, (int)FileBytes).Select(i => (byte)(i * 31 + i / BlockSize)).ToArray();
+        var second = Enumerable.Range(0, (int)FileBytes).Select(i => (byte)(i * 17 + 101 + i / BlockSize)).ToArray();
+        await File.WriteAllBytesAsync(firstPath, first);
+        await File.WriteAllBytesAsync(secondPath, second);
 
         static object? TryTake(object worker)
         {
@@ -149,6 +153,9 @@ public sealed class SpillExhaustionTests
             object?[] args = [null];
             return (bool)reader.GetType().GetMethod("TryRead", Members)!.Invoke(reader, args)! ? args[0] : null;
         }
+        // Control messages travel wrapped in ControlDelivery; data messages travel bare.
+        static object Unwrap(object message) =>
+            message.GetType().Name == "ControlDelivery" ? Property(message, "Message") : message;
         static CopyEngine.FanoutBlock? BlockOf(object message) =>
             message.GetType().GetProperty("Block", Members)?.GetValue(message) as CopyEngine.FanoutBlock;
         static void Release(object worker, CopyEngine.FanoutBlock block)
@@ -157,6 +164,13 @@ public sealed class SpillExhaustionTests
             Call(worker, "ReleasePendingPayload", block.Length);
             Call(worker, "DecrementQueueDepth");
             block.Release();
+        }
+        List<object> DrainSlow()
+        {
+            var items = new List<object>();
+            for (var message = TryTake(slow); message is not null; message = TryTake(slow))
+                items.Add(message);
+            return items;
         }
 
         var fastBytes = new MemoryStream();
@@ -177,77 +191,122 @@ public sealed class SpillExhaustionTests
                 var block = BlockOf(message);
                 if (block is null)
                 {
-                    fastUnexpected.Add(message.GetType().Name);
+                    fastUnexpected.Add(Unwrap(message).GetType().Name);
                     continue;
                 }
-                fastBytes.Write(block.Memory.Span);
-                fastBlocks++;
+                // Copy, release, then count: a counted block has already returned its page.
+                var copy = block.Memory.ToArray();
                 Release(fast, block);
+                lock (fastBytes)
+                {
+                    fastBytes.Write(copy);
+                    fastBlocks++;
+                }
             }
         });
 
-        // Slow destination starts under full backlog pressure and never drains.
-        slowScheduler.ReserveBacklog((int)slowScheduler.BacklogTargetBytes);
-        var slowItems = new List<object>();
-        try
+        var entryType = typeof(CopyEngine).GetNestedType("FileEntry", BindingFlags.NonPublic)!;
+        var method = typeof(CopyEngine).GetMethod("ReadAndFanOutSequentialAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
+        async Task Produce(string path, string label)
         {
-            var entryType = typeof(CopyEngine).GetNestedType("FileEntry", BindingFlags.NonPublic)!;
             var entry = Activator.CreateInstance(entryType, Members, null,
                 new object[] { path, "source", FileBytes, File.GetLastWriteTimeUtc(path),
                     (File.GetLastWriteTimeUtc(path).Ticks - DateTime.UnixEpoch.Ticks) * 100 }, null)!;
-            var method = typeof(CopyEngine).GetMethod("ReadAndFanOutSequentialAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
             var producer = (Task)method.Invoke(null, new object?[] { entry, device, workers, BlockSize, 4096, pool, job, null })!;
-
-            var finished = await Task.WhenAny(producer, Task.Delay(TimeSpan.FromSeconds(10))) == producer;
-            if (!finished)
+            if (await Task.WhenAny(producer, Task.Delay(TimeSpan.FromSeconds(10))) != producer)
             {
-                var diagnostic = $"Productor bloqueado tras agotar spill + pool: fastBlocks={fastBlocks}/{Blocks}, " +
+                int blocksSeen;
+                lock (fastBytes) blocksSeen = fastBlocks;
+                var diagnostic = $"Productor bloqueado tras agotar spill + pool ({label}): fastBlocks={blocksSeen}, " +
                     $"pool.UsedBytes={pool.UsedBytes}, spill.UsedBytes={budget.UsedBytes}, " +
                     $"slow.State={((FanoutSpillController)Property(slow, "SpillController")).State}";
                 job.RequestCancel();
                 try { await producer; } catch (OperationCanceledException) { }
                 Assert.Fail(diagnostic);
             }
-
             await producer;
-            stopDrain.Cancel();
-            await drainer;
+        }
+        async Task WaitForFastBlocks(int expected)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (true)
+            {
+                lock (fastBytes)
+                {
+                    if (fastBlocks >= expected) return;
+                }
+                if (DateTime.UtcNow > deadline) Assert.Fail($"El rápido no recibió {expected} bloques.");
+                await Task.Delay(1);
+            }
+        }
 
-            Assert.AreEqual(0, fastUnexpected.Count, "Mensajes inesperados en el rápido: " + string.Join(", ", fastUnexpected));
-            Assert.AreEqual(Blocks, fastBlocks, "El rápido debe recibir el archivo completo.");
-            CollectionAssert.AreEqual(bytes, fastBytes.ToArray(), "El rápido debe recibir los bytes en orden.");
+        // Slow destination starts under full backlog pressure and never drains.
+        slowScheduler.ReserveBacklog((int)slowScheduler.BacklogTargetBytes);
+        var slowItems = new List<object>();
+        try
+        {
+            // File 1: 8 spill blocks, then detach at the first undelivered byte.
+            await Produce(firstPath, "archivo 1");
+            await WaitForFastBlocks(Blocks);
+
             Assert.IsTrue((bool)Property(slow, "IsActive"), "El lento no debe fallar.");
+            Assert.IsTrue((bool)Property(slow, "IsDetached"), "El lento queda separado tras agotar spill.");
             Assert.AreEqual(0, pool.UsedBytes, "El lento no debe retener páginas del pool compartido.");
             Assert.AreEqual((long)SpillBlocks * BlockSize, budget.UsedBytes,
                 "Sólo el spill entregado queda reservado; la reserva del bloque no entregado se libera.");
 
-            for (var message = TryTake(slow); message is not null; message = TryTake(slow))
-                slowItems.Add(message);
-            var slowBlocks = slowItems.Select(BlockOf).Where(block => block is not null).Select(block => block!).ToList();
-            Assert.AreEqual(0, slowBlocks.Count(block => !block.IsSpill), "Sin fallback a shared tras agotar spill.");
-            Assert.AreEqual(SpillBlocks, slowBlocks.Count, "El lento conserva sólo el spill previo al traspaso.");
+            var firstItems = DrainSlow();
+            slowItems.AddRange(firstItems);
+            var firstBlocks = firstItems.Select(BlockOf).Where(block => block is not null).Select(block => block!).ToList();
+            Assert.AreEqual(0, firstBlocks.Count(block => !block.IsSpill), "Sin fallback a shared tras agotar spill.");
+            Assert.AreEqual(SpillBlocks, firstBlocks.Count, "El lento conserva sólo el spill previo al traspaso.");
             CollectionAssert.AreEqual(
-                bytes.AsSpan(0, SpillBlocks * BlockSize).ToArray(),
-                slowBlocks.SelectMany(block => block.Memory.ToArray()).ToArray());
-            var detaches = slowItems.Where(message => message.GetType().Name == "DetachMessage").ToList();
-            Assert.AreEqual(1, detaches.Count, "Un único traspaso por archivo.");
-            Assert.AreSame(detaches[0], slowItems[^1], "El traspaso va detrás de todos los bloques entregados (FIFO).");
-            Assert.AreEqual((long)SpillBlocks * BlockSize, Convert.ToInt64(Property(detaches[0], "Offset")),
+                first.AsSpan(0, SpillBlocks * BlockSize).ToArray(),
+                firstBlocks.SelectMany(block => block.Memory.ToArray()).ToArray());
+            var firstDetaches = firstItems.Select(Unwrap).Where(message => message.GetType().Name == "DetachMessage").ToList();
+            Assert.AreEqual(1, firstDetaches.Count, "Un único traspaso en el archivo 1.");
+            Assert.AreSame(firstDetaches[0], Unwrap(firstItems[^1]), "El traspaso va detrás de todos los bloques entregados (FIFO).");
+            Assert.AreEqual((long)SpillBlocks * BlockSize, Convert.ToInt64(Property(firstDetaches[0], "Offset")),
                 "Offset = primer byte no entregado.");
+
+            // File 2: the slow destination stays detached for the rest of the job.
+            await Produce(secondPath, "archivo 2");
+            await WaitForFastBlocks(Blocks * 2);
+            stopDrain.Cancel();
+            await drainer;
+
+            Assert.AreEqual(0, fastUnexpected.Count, "Mensajes inesperados en el rápido: " + string.Join(", ", fastUnexpected));
+            Assert.AreEqual(Blocks * 2, fastBlocks, "El rápido debe recibir los dos archivos completos.");
+            CollectionAssert.AreEqual(first.Concat(second).ToArray(), fastBytes.ToArray(), "El rápido debe recibir los bytes en orden.");
+            Assert.AreEqual(0, pool.UsedBytes, "El lento separado no debe retener páginas en el archivo 2.");
+
+            var secondItems = DrainSlow();
+            slowItems.AddRange(secondItems);
+            Assert.AreEqual(1, secondItems.Count, "Archivo 2: el lento separado sólo recibe el traspaso.");
+            var secondDetach = Unwrap(secondItems[0]);
+            Assert.AreEqual("DetachMessage", secondDetach.GetType().Name);
+            Assert.AreEqual(0L, Convert.ToInt64(Property(secondDetach, "Offset")), "Archivo 2: lectura independiente desde el inicio.");
+
+            var diagnostics = job.Telemetry.Snapshot();
+            Assert.AreEqual(1, diagnostics.DestinationDetaches, "Un traspaso por destino y job, no por archivo.");
+            Assert.AreEqual(0, diagnostics.LastDetachedSlot);
+            Assert.AreEqual((long)SpillBlocks * BlockSize, diagnostics.LastDetachOffset);
         }
         finally
         {
             stopDrain.Cancel();
             await drainer;
-            for (var message = TryTake(slow); message is not null; message = TryTake(slow))
-                slowItems.Add(message);
+            slowItems.AddRange(DrainSlow());
             foreach (var message in slowItems)
             {
                 if (BlockOf(message) is { } block)
                     Release(slow, block);
+                else if (message.GetType().Name == "ControlDelivery")
+                    Call(message, "ReleaseBudget");
             }
             slowScheduler.ReleaseBacklog((int)slowScheduler.BacklogTargetBytes);
-            File.Delete(path);
+            File.Delete(firstPath);
+            File.Delete(secondPath);
         }
     }
 }

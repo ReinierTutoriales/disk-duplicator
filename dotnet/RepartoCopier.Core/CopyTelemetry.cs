@@ -83,6 +83,9 @@ public sealed record CopyDiagnosticsSnapshot(
     public long PeakGlobalSpillBytes { get; init; }
     public long GlobalSpillCapacityBytes { get; init; }
     public string PreallocationPolicy { get; init; } = "unknown";
+    public int DestinationDetaches { get; init; }
+    public int LastDetachedSlot { get; init; } = -1;
+    public long LastDetachOffset { get; init; } = -1;
     public double SpillCopyBytesPerSecond => Rate(SpillCopyBytes, SpillCopyTime);
 
     private static double Rate(long bytes, TimeSpan elapsed) =>
@@ -132,12 +135,23 @@ internal sealed class CopyTelemetry
     private long _peakBufferedBytes, _maxObservedBufferTargetBytes;
     private long _copyPhaseTicks, _verifyPhaseTicks;
     private long _spillCopyBytes, _spillCopyTicks;
+    private int _destinationDetaches, _lastDetachedSlot = -1;
+    private long _lastDetachOffset = -1;
 
     internal void AttachDeviceSchedulers(IReadOnlyCollection<DeviceScheduler> schedulers) =>
         _deviceSchedulers = schedulers.ToArray();
 
     internal void AttachSpillBudget(FanoutSpillBudget budget) =>
         _spillBudget = budget ?? throw new ArgumentNullException(nameof(budget));
+
+    internal void RecordDestinationDetached(int slot, long offset)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(slot);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        Interlocked.Exchange(ref _lastDetachOffset, offset);
+        Volatile.Write(ref _lastDetachedSlot, slot);
+        Interlocked.Increment(ref _destinationDetaches);
+    }
 
     internal void RecordSpillCopy(int bytes, TimeSpan elapsed)
     {
@@ -276,6 +290,9 @@ internal sealed class CopyTelemetry
             PeakGlobalSpillBytes = _spillBudget?.PeakUsedBytes ?? 0,
             GlobalSpillCapacityBytes = _spillBudget?.CapacityBytes ?? 0,
             PreallocationPolicy = _preallocationPolicy,
+            DestinationDetaches = Volatile.Read(ref _destinationDetaches),
+            LastDetachedSlot = Volatile.Read(ref _lastDetachedSlot),
+            LastDetachOffset = Interlocked.Read(ref _lastDetachOffset),
         };
     }
 
