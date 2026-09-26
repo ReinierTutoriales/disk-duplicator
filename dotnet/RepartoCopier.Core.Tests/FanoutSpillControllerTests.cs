@@ -28,6 +28,19 @@ public sealed class FanoutSpillControllerTests
     }
 
     [TestMethod]
+    public void SingleDestinationUnderPressureBackpressuresInsteadOfSpilling()
+    {
+        var flow = new FanoutSpillController();
+
+        var shouldSpill = flow.ShouldSpill(Target, Target, 0);
+
+        Assert.IsFalse(
+            shouldSpill,
+            "Un destino único no tiene pares rápidos que proteger; debe aplicar backpressure al productor en vez de entrar en spill privado y agotar un techo fijo.");
+        Assert.AreEqual(FanoutSpillState.Normal, flow.State);
+    }
+
+    [TestMethod]
     public void SpillDoesNotOscillateAtTheEntryThreshold()
     {
         var flow = new FanoutSpillController();
