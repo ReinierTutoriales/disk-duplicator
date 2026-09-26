@@ -35,6 +35,7 @@ internal static class TerminalFailureLog
         $"utc={DateTimeOffset.UtcNow:O}{Environment.NewLine}" +
         $"head_sha={HeadSha()}{Environment.NewLine}" +
         $"destination={destinationRoot}{Environment.NewLine}" +
+        $"preallocation={StoragePreallocationPolicy.DiagnosticState}{Environment.NewLine}" +
         $"{message}{Environment.NewLine}{Environment.NewLine}";
 
     private static void WriteLocalFirst(string payload)
