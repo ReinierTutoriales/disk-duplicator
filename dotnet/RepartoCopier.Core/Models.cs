@@ -12,6 +12,9 @@ public enum DestinationPhase
     Cancelled,
 }
 
+/// <summary>One phase transition of a destination, as an offset from the creation of its progress tracker.</summary>
+public sealed record DestinationPhaseMark(DestinationPhase Phase, TimeSpan Offset);
+
 public sealed record CopyOptions(
     bool Verify = false,
     bool SkipSame = true,
@@ -39,6 +42,42 @@ public sealed record DestinationSnapshot(
 {
     public double SustainedWrite5sBytesPerSecond { get; init; }
     public double SustainedWrite10sBytesPerSecond { get; init; }
+
+    // Identification of the physical device that receives this destination.
+    public string DeviceId { get; init; } = string.Empty;
+    public uint? PhysicalDeviceNumber { get; init; }
+    public string BusType { get; init; } = string.Empty;
+    public StorageMediaKind MediaKind { get; init; }
+    public bool? Removable { get; init; }
+    public bool SharesPhysicalDevice { get; init; }
+
+    // Accumulated duration of this destination's write calls (not wall time).
+    public TimeSpan WriteTime { get; init; }
+    public ulong DurableFlushes { get; init; }
+    public TimeSpan DurableFlushTime { get; init; }
+
+    // Offsets from the creation of this destination's progress tracker. A null value means
+    // the event did not happen (it is never filled in for failed or cancelled work).
+    public TimeSpan? CopyStartedAt { get; init; }
+    public DateTimeOffset? TrackingStartedAt { get; init; }
+    public TimeSpan? CopyFinishedAt { get; init; }
+    public TimeSpan? VerifyStartedAt { get; init; }
+    public TimeSpan? VerifyFinishedAt { get; init; }
+    public IReadOnlyList<DestinationPhaseMark> PhaseMarks { get; init; } = [];
+
+    public TimeSpan? CopyDuration =>
+        CopyStartedAt is { } started && CopyFinishedAt is { } finished ? finished - started : null;
+
+    public TimeSpan? VerifyDuration =>
+        VerifyStartedAt is { } started && VerifyFinishedAt is { } finished ? finished - started : null;
+
+    public string Outcome => Phase switch
+    {
+        DestinationPhase.Done => FilesErrored > 0 ? "CompletedWithErrors" : "Completed",
+        DestinationPhase.Failed => "Failed",
+        DestinationPhase.Cancelled => "Cancelled",
+        _ => "InProgress",
+    };
 
     public DestinationSnapshot(
         string label,
@@ -95,6 +134,18 @@ internal sealed class DestinationProgress
     private ulong _verifyBytesTotal;
     private ulong _verifyFilesDone;
     private ulong _verifyFilesTotal;
+    private readonly DateTimeOffset _trackingStartedAt = DateTimeOffset.UtcNow;
+    private readonly long _originTick = Stopwatch.GetTimestamp();
+    private readonly List<DestinationPhaseMark> _phaseMarks = [];
+    private TimeSpan _writeTime;
+    private ulong _durableFlushes;
+    private TimeSpan _durableFlushTime;
+    private TimeSpan? _copyStartedAt;
+    private TimeSpan? _copyFinishedAt;
+    private TimeSpan? _verifyStartedAt;
+    private TimeSpan? _verifyFinishedAt;
+    private string _deviceId = string.Empty;
+    private StorageDeviceInfo? _device;
 
     public DestinationProgress(string label, ulong total, ulong filesTotal = 0)
     {
@@ -122,6 +173,45 @@ internal sealed class DestinationProgress
         {
             Phase = phase;
             if (error is not null) Error = error;
+            RecordPhaseMarkLocked(phase);
+        }
+    }
+
+    internal void SetDevice(string deviceId, StorageDeviceInfo device)
+    {
+        lock (_gate)
+        {
+            _deviceId = deviceId;
+            _device = device;
+        }
+    }
+
+    // Accumulates the duration of one write call of this destination. Instrumentation only.
+    internal void AddWriteTime(TimeSpan elapsed)
+    {
+        if (elapsed <= TimeSpan.Zero) return;
+        lock (_gate) _writeTime += elapsed;
+    }
+
+    internal void AddDurableFlush(TimeSpan elapsed)
+    {
+        lock (_gate)
+        {
+            _durableFlushes++;
+            _durableFlushTime += elapsed;
+        }
+    }
+
+    // Marks the end of this destination's COPY work. It is recorded only when the destination
+    // is still copying and every file was either finished, skipped or reported as an error, so
+    // a failed, cancelled or interrupted destination never receives a completion mark.
+    internal void MarkCopyFinished()
+    {
+        lock (_gate)
+        {
+            if (Phase is not DestinationPhase.Copying || _copyFinishedAt is not null) return;
+            if (FilesDone + FilesErrored < FilesTotal) return;
+            _copyFinishedAt = ElapsedLocked();
         }
     }
 
@@ -203,7 +293,11 @@ internal sealed class DestinationProgress
     public void MarkVerifyFileDone()
     {
         lock (_gate)
+        {
             _verifyFilesDone = Math.Min(_verifyFilesTotal, _verifyFilesDone + 1);
+            if (Phase is DestinationPhase.Verifying && _verifyFinishedAt is null && _verifyFilesDone >= _verifyFilesTotal)
+                _verifyFinishedAt = ElapsedLocked();
+        }
     }
 
     public DestinationSnapshot Snapshot() => Snapshot(Stopwatch.GetTimestamp());
@@ -236,8 +330,34 @@ internal sealed class DestinationProgress
             {
                 SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
                 SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
+                DeviceId = _deviceId,
+                PhysicalDeviceNumber = _device?.PhysicalDeviceNumber,
+                BusType = _device?.BusType ?? string.Empty,
+                MediaKind = _device?.MediaKind ?? StorageMediaKind.Unknown,
+                Removable = _device?.Removable,
+                SharesPhysicalDevice = _device?.SharesPhysicalDevice ?? false,
+                WriteTime = _writeTime,
+                DurableFlushes = _durableFlushes,
+                DurableFlushTime = _durableFlushTime,
+                CopyStartedAt = _copyStartedAt,
+                TrackingStartedAt = _trackingStartedAt,
+                CopyFinishedAt = _copyFinishedAt,
+                VerifyStartedAt = _verifyStartedAt,
+                VerifyFinishedAt = _verifyFinishedAt,
+                PhaseMarks = _phaseMarks.ToArray(),
             };
         }
+    }
+
+    private TimeSpan ElapsedLocked() => Stopwatch.GetElapsedTime(_originTick);
+
+    private void RecordPhaseMarkLocked(DestinationPhase phase)
+    {
+        if (_phaseMarks.Count > 0 && _phaseMarks[^1].Phase == phase) return;
+        var offset = ElapsedLocked();
+        _phaseMarks.Add(new DestinationPhaseMark(phase, offset));
+        if (phase is DestinationPhase.Copying) _copyStartedAt ??= offset;
+        if (phase is DestinationPhase.Verifying) _verifyStartedAt ??= offset;
     }
 
     internal SlidingByteRateSnapshot SustainedWriteRateSnapshot() =>

@@ -2,6 +2,10 @@
 
 ## Unreleased — main
 
+- Diagnóstico JSON `SchemaVersion` 2, solo instrumentación: identificación del disco físico por destino (`DeviceId`, `PhysicalDeviceNumber`, bus, tipo de medio, extraíble, disco compartido), `WriteTime`, `DurableFlushes` y `DurableFlushTime` acumulados por destino, marcas de fase (`PhaseMarks`), `CopyFinishedAt`/`VerifyFinishedAt`, duraciones y `Outcome`. Los destinos cancelados o fallidos conservan su estado y nunca reciben marca de finalización. `MeasurementNotes` documenta qué tiempos incluyen esperas y cuáles son acumulados entre destinos.
+- El SHA del commit se incorpora al compilar (`BuildRevision`, desde `SourceRevisionId`; la CI pasa el SHA del commit descargado (merge provisional en PR, commit de main en push) y los builds locales lo leen de git). `ApplicationVersion` se conserva.
+- Sin cambios en QD, bloques, pool, lectura, escritura ni planificación de VERIFY.
+
 ## v2.1.1 — 2026-09-16
 
 - FAN-OUT productivo simplificado al modelo compartido: una lectura del origen, bloques de 8 MiB con refcount y pool activo de 256 MiB para todos los destinos.

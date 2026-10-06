@@ -318,6 +318,8 @@ public static class CopyEngine
                     deviceSchedulers.For(copy.DestinationDevices[index]),
                     controlBudget))
                 .ToArray();
+            foreach (var worker in workers)
+                worker.Progress.SetDevice(worker.DeviceScheduler.DeviceId, worker.Device);
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
             var activeBufferPool = bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
@@ -863,6 +865,10 @@ public static class CopyEngine
                     controlDelivery?.ReleaseBudget();
                 }
             }
+
+            // The channel drained normally: record the end of COPY only for work that really finished.
+            if (current is null && !job.Token.IsCancellationRequested)
+                worker.Progress.MarkCopyFinished();
         }
         catch (OperationCanceledException)
         {
@@ -996,7 +1002,9 @@ public static class CopyEngine
                 job.Telemetry.RecordDirectDestinationWrite(data.Length, operations);
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var directWriteElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, directWriteElapsed);
+                worker.Progress.AddWriteTime(directWriteElapsed);
                 current.RecordCompletedWrite(data.Length);
                 worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
@@ -1029,7 +1037,9 @@ public static class CopyEngine
 
                 for (var operation = 0; operation < operations; operation++)
                     job.Telemetry.RecordWriteOperation();
-                job.Telemetry.RecordWrite(data.Length, Stopwatch.GetElapsedTime(started));
+                var bufferedWriteElapsed = Stopwatch.GetElapsedTime(started);
+                job.Telemetry.RecordWrite(data.Length, bufferedWriteElapsed);
+                worker.Progress.AddWriteTime(bufferedWriteElapsed);
                 current.RecordCompletedWrite(data.Length);
                 worker.Progress.AddWritten(data.Length);
                 worker.NoteProgress();
@@ -1254,7 +1264,9 @@ public static class CopyEngine
             var flushStarted = Stopwatch.GetTimestamp();
             current.DirectSession.FinalizeLength(current.Entry.Size);
             current.DirectSession.FlushToDisk();
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+            var flushElapsed = Stopwatch.GetElapsedTime(flushStarted);
+            job.Telemetry.RecordFlush(flushElapsed);
+            worker.Progress.AddDurableFlush(flushElapsed);
             current.DirectSession.Dispose();
             current.DirectSession = null;
         }
@@ -1262,7 +1274,9 @@ public static class CopyEngine
         {
             var flushStarted = Stopwatch.GetTimestamp();
             current.Stream.Flush(flushToDisk: true);
-            job.Telemetry.RecordFlush(Stopwatch.GetElapsedTime(flushStarted));
+            var flushElapsed = Stopwatch.GetElapsedTime(flushStarted);
+            job.Telemetry.RecordFlush(flushElapsed);
+            worker.Progress.AddDurableFlush(flushElapsed);
             current.Stream.Dispose();
             current.Stream = null;
         }
