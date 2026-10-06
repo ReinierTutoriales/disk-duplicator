@@ -1,10 +1,41 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace RepartoCopier.Core.Tests;
 
 [TestClass]
 public sealed class SharedFanoutBufferPoolTests
 {
+    [TestMethod]
+    public void DisposedPoolDoesNotRetainPinnedStorageWhileOwnerRemainsAlive()
+    {
+        using var pool = new SharedFanoutBufferPool(8 * Environment.SystemPageSize);
+        var storage = CaptureStorage(pool);
+        pool.Dispose();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.IsFalse(storage.IsAlive, "The disposed COPY pool must not retain its backing array during VERIFY.");
+        GC.KeepAlive(pool);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference CaptureStorage(SharedFanoutBufferPool pool) =>
+        new(typeof(SharedFanoutBufferPool).GetField("_buffer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(pool)!);
+
+    [TestMethod]
+    public async Task DisposalRejectsOutstandingReferencesAndRentAfterRelease()
+    {
+        using var pool = new SharedFanoutBufferPool(2 * Environment.SystemPageSize);
+        var lease = await pool.RentAsync(Environment.SystemPageSize, Environment.SystemPageSize, 1, CancellationToken.None);
+        Assert.ThrowsExactly<InvalidOperationException>(() => pool.Dispose());
+        Assert.IsTrue(lease.ReleaseReference());
+        pool.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+            await pool.RentAsync(Environment.SystemPageSize, Environment.SystemPageSize, 1, CancellationToken.None));
+    }
+
     [TestMethod]
     public async Task PagesRecycleOnlyAfterEveryDestinationReleases()
     {
@@ -34,6 +65,30 @@ public sealed class SharedFanoutBufferPoolTests
         Assert.IsTrue(first.ReleaseReference());
         var second = await blocked.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.AreEqual(page, pool.UsedBytes);
+        Assert.IsTrue(second.ReleaseReference());
+        Assert.AreEqual(0, pool.UsedBytes);
+    }
+
+    [TestMethod]
+    public async Task FastDestinationCannotFreeTheSourceWindowWhileSlowDestinationStillOwnsBlocks()
+    {
+        var page = Environment.SystemPageSize;
+        using var pool = new SharedFanoutBufferPool(4 * page);
+        var first = await pool.RentAsync(2 * page, page, 2, CancellationToken.None);
+        var second = await pool.RentAsync(2 * page, page, 2, CancellationToken.None);
+
+        Assert.IsFalse(first.ReleaseReference()); // Fast destination finished block one.
+        Assert.IsFalse(second.ReleaseReference()); // Fast destination finished block two.
+        Assert.AreEqual(pool.CapacityBytes, pool.UsedBytes);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var nextSourceRead = pool.RentAsync(2 * page, page, 2, timeout.Token).AsTask();
+        Assert.IsFalse(nextSourceRead.IsCompleted, "One slow branch retains the entire shared window.");
+
+        Assert.IsTrue(first.ReleaseReference()); // Slow destination finally finishes one block.
+        var third = await nextSourceRead.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.IsFalse(third.ReleaseReference());
+        Assert.IsTrue(third.ReleaseReference());
         Assert.IsTrue(second.ReleaseReference());
         Assert.AreEqual(0, pool.UsedBytes);
     }

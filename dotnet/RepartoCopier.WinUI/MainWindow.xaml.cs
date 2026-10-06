@@ -1,5 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -18,6 +21,12 @@ public sealed partial class MainWindow : Window
     private readonly ObservableCollection<DestinationRow> _destinations = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private CopyJob? _job;
+    private CancellationTokenSource? _preparationCancel;
+    private bool _closeRequested;
+    private bool _cancellationRequested;
+    private readonly SemaphoreSlim _dialogGate = new(1, 1);
+    private IReadOnlyList<DestinationSnapshot> _lastResult = [];
+    private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
     private readonly LogicalProgressRate _copyProgressRate = new();
 
@@ -27,7 +36,7 @@ public sealed partial class MainWindow : Window
         DestinationList.ItemsSource = _destinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        AppWindow.Resize(new SizeInt32(720, 320));
+        ResizeForCurrentDpi(new SizeInt32(720, 320));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();
@@ -35,8 +44,20 @@ public sealed partial class MainWindow : Window
         ApplySavedTheme();
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
+        AppWindow.Closing += MainWindow_Closing;
         TryLoadLaunchSource();
     }
+
+    private void ResizeForCurrentDpi(SizeInt32 size)
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var scale = Math.Max(96u, GetDpiForWindow(hwnd)) / 96.0;
+        AppWindow.Resize(new SizeInt32((int)Math.Ceiling(size.Width * scale), (int)Math.Ceiling(size.Height * scale)));
+    }
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
 
     private void ConfigureNativeWindowChrome()
     {
@@ -142,7 +163,7 @@ public sealed partial class MainWindow : Window
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
-        if (_job is not null) return;
+        if (_job is not null || _preparationCancel is not null) return;
         try
         {
             ErrorBar.IsOpen = false;
@@ -157,7 +178,15 @@ public sealed partial class MainWindow : Window
                 KeepGoing: plan.KeepGoing);
 
             SetEditingEnabled(false);
+            _preparationCancel = new CancellationTokenSource();
+            _cancellationRequested = false;
+            NewCopyButton.Visibility = Visibility.Collapsed;
+            ResultDetailsButton.Visibility = Visibility.Collapsed;
+            _lastResult = [];
+            _lastDiagnostics = null;
             StartButton.IsEnabled = false;
+            PauseButton.IsEnabled = false;
+            CancelButton.IsEnabled = true;
             StatusText.Text = "Preparando la copia…";
             ShowRunningView();
             OperationIcon.Glyph = "\uE8A5";
@@ -175,13 +204,27 @@ public sealed partial class MainWindow : Window
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
 
-            _job = await CopyEngine.StartAsync(plan, options);
-            PauseButton.IsEnabled = true;
-            CancelButton.IsEnabled = true;
-            StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
-            OperationTitleText.Text = "Copiando...";
+            _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
+            if (_cancellationRequested) _job.RequestCancel();
+            PauseButton.IsEnabled = !_cancellationRequested;
+            CancelButton.IsEnabled = !_cancellationRequested;
+            if (!_cancellationRequested)
+            {
+                StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
+                OperationTitleText.Text = "Copiando...";
+            }
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
+        }
+        catch (OperationCanceledException)
+        {
+            _job = null;
+            _copyStartedAt = null;
+            ShowPreparationView();
+            SetEditingEnabled(true);
+            StartButton.IsEnabled = true;
+            CancelButton.IsEnabled = false;
+            StatusText.Text = "Preparación cancelada";
         }
         catch (Exception ex)
         {
@@ -191,6 +234,12 @@ public sealed partial class MainWindow : Window
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
             ShowError(ex.Message);
+        }
+        finally
+        {
+            _preparationCancel?.Dispose();
+            _preparationCancel = null;
+            if (_closeRequested && _job is null) Close();
         }
     }
 
@@ -216,8 +265,10 @@ public sealed partial class MainWindow : Window
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
-        if (_job is null) return;
-        _job.RequestCancel();
+        if (_job is null && _preparationCancel is null) return;
+        _cancellationRequested = true;
+        _preparationCancel?.Cancel();
+        _job?.RequestCancel();
         CancelButton.IsEnabled = false;
         PauseButton.IsEnabled = false;
         OperationTitleText.Text = "Cancelando...";
@@ -236,6 +287,8 @@ public sealed partial class MainWindow : Window
                 RefreshProgress();
                 _progressTimer.Stop();
                 var snapshots = observed.Snapshot();
+                _lastResult = snapshots;
+                _lastDiagnostics = observed.DiagnosticsSnapshot();
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
@@ -266,9 +319,18 @@ public sealed partial class MainWindow : Window
                 _job = null;
                 SetEditingEnabled(true);
                 StartButton.IsEnabled = true;
+                NewCopyButton.Visibility = Visibility.Visible;
+                ResultDetailsButton.Visibility = Visibility.Visible;
 
-                if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
-                    await OfferShutdownAsync();
+                if (_closeRequested)
+                {
+                    Close();
+                }
+                else if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
+                {
+                    try { await OfferShutdownAsync(); }
+                    catch (Exception ex) { ShowError(ex.Message); }
+                }
             }
         }
     }
@@ -285,22 +347,23 @@ public sealed partial class MainWindow : Window
         if (verifying)
         {
             var verifyActive = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled && item.VerifyBytesTotal > 0)
                 .ToArray();
-            var verifyTotal = snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max();
-            var verified = verifyActive.Length == 0
-                ? snapshots.Select(item => item.VerifiedBytes).DefaultIfEmpty(0UL).Max()
-                : verifyActive.Min(item => item.VerifiedBytes);
+            var verifyTotal = verifyActive.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifyBytesTotal));
+            var verified = verifyActive.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifiedBytes));
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
             var diagnostics = _job.DiagnosticsSnapshot();
             var speed = paused ? 0d : diagnostics.VerifyLogical5sBytesPerSecond;
             SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
-            var remaining = verifyTotal > verified ? verifyTotal - verified : 0;
+            // Logical throughput counts a source block once. Estimate with the
+            // largest remaining branch rather than multiplying ETA by destinations.
+            var remaining = verifyActive.Select(item => item.VerifyBytesTotal > item.VerifiedBytes
+                ? item.VerifyBytesTotal - item.VerifiedBytes : 0UL).DefaultIfEmpty(0UL).Max();
             RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
-            if (!_job.IsPaused)
+            if (!_job.IsPaused && !_cancellationRequested)
             {
                 OperationTitleText.Text = "Comprobando integridad...";
                 StatusText.Text = "Verificando integridad de los destinos…";
@@ -323,7 +386,7 @@ public sealed partial class MainWindow : Window
             RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
-            if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
+            if (!_job.IsPaused && !_cancellationRequested && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
             {
                 OperationTitleText.Text = "Copiando...";
                 StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
@@ -351,7 +414,7 @@ public sealed partial class MainWindow : Window
 
     private async void LoadProfile_Click(object sender, RoutedEventArgs e)
     {
-        if (_job is not null) return;
+        if (_job is not null || _preparationCancel is not null) return;
         try
         {
             var picker = new FileOpenPicker(AppWindow.Id)
@@ -406,6 +469,12 @@ public sealed partial class MainWindow : Window
 
     private async void Settings_Click(object sender, RoutedEventArgs e)
     {
+        try { await ShowSettingsAsync(); }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private async Task ShowSettingsAsync()
+    {
         var themeBox = new ComboBox { Header = "Tema", Width = 300 };
         themeBox.Items.Add(new ComboBoxItem { Content = "Sistema", Tag = "Default" });
         themeBox.Items.Add(new ComboBoxItem { Content = "Claro", Tag = "Light" });
@@ -436,7 +505,7 @@ public sealed partial class MainWindow : Window
             Content = content,
         };
 
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary ||
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary ||
             themeBox.SelectedItem is not ComboBoxItem item)
             return;
 
@@ -456,6 +525,12 @@ public sealed partial class MainWindow : Window
     }
 
     private async void About_Click(object sender, RoutedEventArgs e)
+    {
+        try { await ShowAboutAsync(); }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private async Task ShowAboutAsync()
     {
         var previousBackground = AboutMenuButton.Background;
         AboutMenuButton.Background = ResolveBrush("AccentFillColorSecondaryBrush");
@@ -582,7 +657,7 @@ public sealed partial class MainWindow : Window
             Grid.SetRow(body, 2);
             root.Children.Add(body);
             dialog.Content = root;
-            await dialog.ShowAsync();
+            await ShowDialogAsync(dialog);
         }
         finally
         {
@@ -599,7 +674,11 @@ public sealed partial class MainWindow : Window
         catch { }
     }
 
-    private void Exit_Click(object sender, RoutedEventArgs e) => Close();
+    private void Exit_Click(object sender, RoutedEventArgs e)
+    {
+        if (_job is null && _preparationCancel is null) Close();
+        else BeginSafeClose();
+    }
 
     private async Task OfferShutdownAsync()
     {
@@ -612,7 +691,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = "No apagar",
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
             Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
     }
 
@@ -632,6 +711,10 @@ public sealed partial class MainWindow : Window
 
     private void SetEditingEnabled(bool enabled)
     {
+        PickSourceFileButton.IsEnabled = enabled;
+        PickSourceFolderButton.IsEnabled = enabled;
+        AddDestinationsButton.IsEnabled = enabled;
+        ClearDestinationsButton.IsEnabled = enabled;
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
@@ -649,6 +732,109 @@ public sealed partial class MainWindow : Window
     {
         _progressTimer.Stop();
         _job?.RequestCancel();
+    }
+
+    private void MainWindow_Closing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        if (_job is null && _preparationCancel is null) return;
+        args.Cancel = true;
+        BeginSafeClose();
+    }
+
+    private void BeginSafeClose()
+    {
+        _closeRequested = true;
+        _cancellationRequested = true;
+        _preparationCancel?.Cancel();
+        _job?.RequestCancel();
+        PauseButton.IsEnabled = false;
+        CancelButton.IsEnabled = false;
+        AppMenuButton.IsEnabled = false;
+        StatusText.Text = "Cerrando de forma segura…";
+    }
+
+    private void NewCopy_Click(object sender, RoutedEventArgs e)
+    {
+        if (_job is not null || _preparationCancel is not null) return;
+        ShowPreparationView();
+        StatusText.Text = "Listo";
+    }
+
+    private async void ResultDetails_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var destinations = _lastResult;
+            var diagnostics = _lastDiagnostics;
+            var startedAt = _copyStartedAt;
+            var details = string.Join(Environment.NewLine + Environment.NewLine, destinations.Select(item =>
+                $"{item.Label}\nEstado: {FormatPhase(item.Phase)} · Archivos: {item.FilesDone}/{item.FilesTotal} · Errores: {item.FilesErrored}" +
+                (string.IsNullOrWhiteSpace(item.Error) ? string.Empty : $"\n{item.Error}")));
+            var result = await ShowDialogAsync(new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = "Resultado por destino",
+                PrimaryButtonText = "Guardar diagnóstico",
+                IsPrimaryButtonEnabled = diagnostics is not null,
+                CloseButtonText = "Cerrar",
+                Content = new ScrollViewer
+                {
+                    MaxHeight = 360,
+                    Content = new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
+                },
+            });
+            if (result == ContentDialogResult.Primary && diagnostics is not null)
+            {
+                var picker = new FileSavePicker(AppWindow.Id)
+                {
+                    Title = "Guardar diagnóstico de copia",
+                    SuggestedFileName = "diagnostico-copia",
+                    DefaultFileExtension = ".json",
+                    FileTypeChoices = { { "Diagnóstico JSON", new List<string> { ".json" } } },
+                };
+                var file = await picker.PickSaveFileAsync();
+                if (file is null) return;
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                options.Converters.Add(new JsonStringEnumConverter());
+                var json = JsonSerializer.Serialize(new
+                {
+                    SchemaVersion = 1,
+                    ApplicationVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(),
+                    StartedAt = startedAt,
+                    Diagnostics = diagnostics,
+                    Destinations = destinations,
+                    MeasurementNotes = new[]
+                    {
+                        "Durations are TimeSpan strings; byte rates use bytes per second.",
+                        "BufferWaitTime measures the complete RentAsync call, including immediate rentals.",
+                        "SourceReadTime includes source scheduler acquisition when a device is shared.",
+                        "WriteTime and flush times aggregate concurrent destinations; they are not COPY wall time.",
+                        "This final snapshot does not record a time series or individual destination completion times.",
+                    },
+                }, options);
+                await File.WriteAllTextAsync(file.Path, json);
+            }
+        }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private static string FormatPhase(DestinationPhase phase) => phase switch
+    {
+        DestinationPhase.Done => "Completado",
+        DestinationPhase.Failed => "Fallido",
+        DestinationPhase.Cancelled => "Cancelado",
+        _ => phase.ToString(),
+    };
+
+    private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        await _dialogGate.WaitAsync();
+        try
+        {
+            if (_closeRequested) return ContentDialogResult.None;
+            return await dialog.ShowAsync();
+        }
+        finally { _dialogGate.Release(); }
     }
 
     private sealed class LogicalProgressRate
