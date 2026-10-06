@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
     private CopyJob? _job;
     private CancellationTokenSource? _preparationCancel;
     private bool _closeRequested;
+    private bool _cancellationRequested;
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
     private IReadOnlyList<DestinationSnapshot> _lastResult = [];
     private DateTimeOffset? _copyStartedAt;
@@ -175,6 +176,7 @@ public sealed partial class MainWindow : Window
 
             SetEditingEnabled(false);
             _preparationCancel = new CancellationTokenSource();
+            _cancellationRequested = false;
             NewCopyButton.Visibility = Visibility.Collapsed;
             ResultDetailsButton.Visibility = Visibility.Collapsed;
             _lastResult = [];
@@ -199,11 +201,14 @@ public sealed partial class MainWindow : Window
             _copyProgressRate.Reset();
 
             _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
-            if (_closeRequested) _job.RequestCancel();
-            PauseButton.IsEnabled = true;
-            CancelButton.IsEnabled = true;
-            StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
-            OperationTitleText.Text = "Copiando...";
+            if (_cancellationRequested) _job.RequestCancel();
+            PauseButton.IsEnabled = !_cancellationRequested;
+            CancelButton.IsEnabled = !_cancellationRequested;
+            if (!_cancellationRequested)
+            {
+                StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
+                OperationTitleText.Text = "Copiando...";
+            }
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
         }
@@ -257,6 +262,7 @@ public sealed partial class MainWindow : Window
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
         if (_job is null && _preparationCancel is null) return;
+        _cancellationRequested = true;
         _preparationCancel?.Cancel();
         _job?.RequestCancel();
         CancelButton.IsEnabled = false;
@@ -337,22 +343,23 @@ public sealed partial class MainWindow : Window
         if (verifying)
         {
             var verifyActive = snapshots
-                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled && item.VerifyBytesTotal > 0)
                 .ToArray();
-            var verifyTotal = snapshots.Select(item => item.VerifyBytesTotal).DefaultIfEmpty(0UL).Max();
-            var verified = verifyActive.Length == 0
-                ? snapshots.Select(item => item.VerifiedBytes).DefaultIfEmpty(0UL).Max()
-                : verifyActive.Min(item => item.VerifiedBytes);
+            var verifyTotal = verifyActive.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifyBytesTotal));
+            var verified = verifyActive.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.VerifiedBytes));
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
             var diagnostics = _job.DiagnosticsSnapshot();
             var speed = paused ? 0d : diagnostics.VerifyLogical5sBytesPerSecond;
             SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
-            var remaining = verifyTotal > verified ? verifyTotal - verified : 0;
+            // Logical throughput counts a source block once. Estimate with the
+            // largest remaining branch rather than multiplying ETA by destinations.
+            var remaining = verifyActive.Select(item => item.VerifyBytesTotal > item.VerifiedBytes
+                ? item.VerifyBytesTotal - item.VerifiedBytes : 0UL).DefaultIfEmpty(0UL).Max();
             RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
-            if (!_job.IsPaused)
+            if (!_job.IsPaused && !_cancellationRequested)
             {
                 OperationTitleText.Text = "Comprobando integridad...";
                 StatusText.Text = "Verificando integridad de los destinos…";
@@ -375,7 +382,7 @@ public sealed partial class MainWindow : Window
             RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
-            if (!_job.IsPaused && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
+            if (!_job.IsPaused && !_cancellationRequested && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
             {
                 OperationTitleText.Text = "Copiando...";
                 StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
@@ -721,6 +728,7 @@ public sealed partial class MainWindow : Window
         if (_job is null && _preparationCancel is null) return;
         args.Cancel = true;
         _closeRequested = true;
+        _cancellationRequested = true;
         _preparationCancel?.Cancel();
         _job?.RequestCancel();
         PauseButton.IsEnabled = false;

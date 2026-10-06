@@ -13,7 +13,7 @@ internal sealed class SharedFanoutBufferPool : IDisposable
     private const int MaxSupportedAlignment = 64 * 1024;
 
     private readonly object _gate = new();
-    private readonly byte[] _buffer;
+    private byte[]? _buffer;
     private readonly ushort[] _pageReferences;
     private readonly int _baseOffset;
     private readonly int _pageSize;
@@ -93,9 +93,10 @@ internal sealed class SharedFanoutBufferPool : IDisposable
                 ThrowIfDisposed();
                 if (TryAllocateLocked(pageCount, alignment, checked((ushort)references), out var pageIndex))
                 {
+                    var storage = _buffer ?? throw new ObjectDisposedException(nameof(SharedFanoutBufferPool));
                     var offset = checked(_baseOffset + pageIndex * _pageSize);
-                    var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, offset);
-                    var buffer = SourceBufferLease.BorrowPinned(_buffer, offset, requestedBytes, pointer);
+                    var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(storage, offset);
+                    var buffer = SourceBufferLease.BorrowPinned(storage, offset, requestedBytes, pointer);
                     return new Lease(this, buffer, pageIndex, pageCount, references);
                 }
                 wait = _spaceAvailable.Task;
@@ -141,6 +142,7 @@ internal sealed class SharedFanoutBufferPool : IDisposable
         int alignment,
         out int pageIndex)
     {
+        var storage = _buffer ?? throw new ObjectDisposedException(nameof(SharedFanoutBufferPool));
         var index = begin;
         while (index + pageCount <= end)
         {
@@ -150,7 +152,7 @@ internal sealed class SharedFanoutBufferPool : IDisposable
                 break;
 
             var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(
-                _buffer,
+                storage,
                 checked(_baseOffset + index * _pageSize));
             if (pointer.ToInt64() % alignment != 0)
             {
@@ -216,6 +218,7 @@ internal sealed class SharedFanoutBufferPool : IDisposable
     public void Dispose()
     {
         TaskCompletionSource? signal;
+        byte[]? storage;
         lock (_gate)
         {
             if (_disposed)
@@ -223,6 +226,10 @@ internal sealed class SharedFanoutBufferPool : IDisposable
             if (_usedPages != 0)
                 throw new InvalidOperationException("No se puede liberar el pool FAN-OUT mientras existan páginas referenciadas.");
             _disposed = true;
+            storage = _buffer;
+            // COPY's async scope may retain this disposed object during VERIFY.
+            // Let GC reclaim the pinned storage even while the pool stays alive.
+            _buffer = null;
             signal = _spaceAvailable;
             _spaceAvailable = NewSignal();
         }
@@ -230,10 +237,11 @@ internal sealed class SharedFanoutBufferPool : IDisposable
         signal.TrySetException(new ObjectDisposedException(nameof(SharedFanoutBufferPool)));
         if (_virtualLocked && OperatingSystem.IsWindows())
         {
-            var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, _baseOffset);
+            var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(storage!, _baseOffset);
             NativeMethods.VirtualUnlock(pointer, (nuint)_capacityBytes);
             _virtualLocked = false;
         }
+        GC.KeepAlive(storage);
     }
 
     internal sealed class Lease : IDisposable

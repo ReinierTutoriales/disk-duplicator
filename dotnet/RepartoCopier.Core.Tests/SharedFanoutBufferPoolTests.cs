@@ -1,10 +1,41 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace RepartoCopier.Core.Tests;
 
 [TestClass]
 public sealed class SharedFanoutBufferPoolTests
 {
+    [TestMethod]
+    public void DisposedPoolDoesNotRetainPinnedStorageWhileOwnerRemainsAlive()
+    {
+        using var pool = new SharedFanoutBufferPool(8 * Environment.SystemPageSize);
+        var storage = CaptureStorage(pool);
+        pool.Dispose();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        Assert.IsFalse(storage.IsAlive, "The disposed COPY pool must not retain its backing array during VERIFY.");
+        GC.KeepAlive(pool);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference CaptureStorage(SharedFanoutBufferPool pool) =>
+        new(typeof(SharedFanoutBufferPool).GetField("_buffer", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(pool)!);
+
+    [TestMethod]
+    public async Task DisposalRejectsOutstandingReferencesAndRentAfterRelease()
+    {
+        using var pool = new SharedFanoutBufferPool(2 * Environment.SystemPageSize);
+        var lease = await pool.RentAsync(Environment.SystemPageSize, Environment.SystemPageSize, 1, CancellationToken.None);
+        Assert.ThrowsExactly<InvalidOperationException>(() => pool.Dispose());
+        Assert.IsTrue(lease.ReleaseReference());
+        pool.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
+            await pool.RentAsync(Environment.SystemPageSize, Environment.SystemPageSize, 1, CancellationToken.None));
+    }
+
     [TestMethod]
     public async Task PagesRecycleOnlyAfterEveryDestinationReleases()
     {
