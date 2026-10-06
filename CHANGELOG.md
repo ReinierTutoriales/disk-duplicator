@@ -2,6 +2,8 @@
 
 ## Unreleased — main
 
+- Verificación final opcional desde WinUI, desactivada inicialmente para medir y usar COPY sin la relectura final. Se conserva la verificación completa al seleccionarla y la elección en perfiles. Los indicadores distinguen Copiado de Verificado; el diagnóstico SchemaVersion 3 añade VerificationRequested, sin alterar los contadores reales. No cambia el motor de escritura, pool, hash del origen, flush, commit ni recovery.
+
 - Diagnóstico JSON `SchemaVersion` 2, solo instrumentación: identificación del disco físico por destino (`DeviceId`, `PhysicalDeviceNumber`, bus, tipo de medio, extraíble, disco compartido), `WriteTime`, `DurableFlushes` y `DurableFlushTime` acumulados por destino, marcas de fase (`PhaseMarks`), `CopyFinishedAt`/`VerifyFinishedAt`, duraciones y `Outcome`. Los destinos cancelados o fallidos conservan su estado y nunca reciben marca de finalización. `MeasurementNotes` documenta qué tiempos incluyen esperas y cuáles son acumulados entre destinos.
 - El SHA del commit se incorpora al compilar (`BuildRevision`, desde `SourceRevisionId`; la CI pasa el SHA del commit descargado (merge provisional en PR, commit de main en push) y los builds locales lo leen de git). `ApplicationVersion` se conserva.
 - Sin cambios en QD, bloques, pool, lectura, escritura ni planificación de VERIFY.

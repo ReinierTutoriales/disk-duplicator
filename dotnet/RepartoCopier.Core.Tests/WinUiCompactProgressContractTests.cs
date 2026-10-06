@@ -41,7 +41,7 @@ public sealed class WinUiCompactProgressContractTests
     }
 
     [TestMethod]
-    public void DestinationChipsAreDenseAndVerificationIsNotAUserToggle()
+    public void DestinationChipsStayDenseWithOptionalVerification()
     {
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
@@ -49,9 +49,9 @@ public sealed class WinUiCompactProgressContractTests
         Assert.IsTrue(xaml.Contains("MinWidth=\"56\" MaxWidth=\"148\" Height=\"30\" Padding=\"5,0,2,0\"", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("Width=\"24\" Height=\"24\" Padding=\"0\"", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("Margin\" Value=\"0,0,2,0\"", StringComparison.Ordinal));
-        Assert.IsFalse(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
-        Assert.IsFalse(code.Contains("VerifyCheck", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("Verify: true", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("VerifyCheck", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("Verify: VerifyCheck.IsChecked == true", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("Interval = TimeSpan.FromMilliseconds(250)", StringComparison.Ordinal));
         Assert.IsFalse(xaml.Contains("Width=\"86\"", StringComparison.Ordinal));
     }

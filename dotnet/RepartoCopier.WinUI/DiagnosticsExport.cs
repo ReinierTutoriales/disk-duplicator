@@ -12,13 +12,15 @@ internal sealed record DiagnosticsDocument(
     DateTimeOffset? StartedAt,
     CopyDiagnosticsSnapshot? Diagnostics,
     IReadOnlyList<DestinationSnapshot> Destinations,
-    IReadOnlyList<string> MeasurementNotes);
+    IReadOnlyList<string> MeasurementNotes,
+    bool? VerificationRequested);
 
 internal static class DiagnosticsExport
 {
     // 2: adds BuildRevision/BuildInformationalVersion and, per destination, device identification,
     // WriteTime, durable flush counts/times, phase marks, CopyFinishedAt/VerifyFinishedAt, durations and Outcome.
-    internal const int SchemaVersion = 2;
+    // 3: adds VerificationRequested to distinguish copied from verified jobs.
+    internal const int SchemaVersion = 3;
 
     internal static IReadOnlyList<string> MeasurementNotes { get; } =
     [
@@ -35,6 +37,7 @@ internal static class DiagnosticsExport
         "Destinations[].Outcome is Completed, CompletedWithErrors, Failed, Cancelled or InProgress, derived from the final Phase and FilesErrored.",
         "BuildRevision is the commit SHA embedded at build time (SourceRevisionId) and is null when the build had none.",
         "This final snapshot does not record a time series.",
+        "VerificationRequested records the final full-content reread choice (null if unknown). Outcome=Completed means the requested operation completed, not that verification ran. VerifyFinishedAt and verification counters record actual verification. Without verification, source hashing, write checks, durable flush and atomic commit still run; destination content is not checked by final reread.",
     ];
 
     internal static DiagnosticsDocument Create(
@@ -42,7 +45,8 @@ internal static class DiagnosticsExport
         string? informationalVersion,
         DateTimeOffset? startedAt,
         CopyDiagnosticsSnapshot? diagnostics,
-        IReadOnlyList<DestinationSnapshot> destinations) =>
+        IReadOnlyList<DestinationSnapshot> destinations,
+        bool? verificationRequested = null) =>
         new(
             SchemaVersion,
             applicationVersion,
@@ -51,7 +55,8 @@ internal static class DiagnosticsExport
             startedAt,
             diagnostics,
             destinations,
-            MeasurementNotes);
+            MeasurementNotes,
+            verificationRequested);
 
     internal static string Serialize(DiagnosticsDocument document)
     {
