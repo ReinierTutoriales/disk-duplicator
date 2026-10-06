@@ -60,7 +60,7 @@ jobs:
         run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
 
       - name: Build WinUI Release x64
-        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore
+        run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore -p:SourceRevisionId=${{ github.sha }}
 
       - name: Assert C#/.NET-only product sources
         shell: pwsh
@@ -71,8 +71,20 @@ jobs:
             throw 'Repository must remain C#/.NET-only.'
           }
 
+      - name: Verify embedded build revision
+        shell: pwsh
+        run: |
+          $assemblies = @(Get-ChildItem 'dotnet/RepartoCopier.WinUI/bin/Release' -Recurse -Filter 'RepartoCopier.WinUI.dll')
+          if ($assemblies.Count -eq 0) { throw 'Built WinUI assembly not found.' }
+          foreach ($assembly in $assemblies) {
+            $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($assembly.FullName).ProductVersion
+            if (-not $version.EndsWith('+${{ github.sha }}', [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Incorrect embedded build revision: $version"
+            }
+          }
+
       - name: Publish portable self-contained build
-        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier -p:SourceRevisionId=${{ github.sha }}
 
       - name: Smoke-test standalone executable startup and close
         shell: pwsh
