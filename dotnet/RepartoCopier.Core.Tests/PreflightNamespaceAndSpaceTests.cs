@@ -34,6 +34,8 @@ public sealed class PreflightNamespaceAndSpaceTests
             Path.Combine(root, "source.bin"), [destination, StateLayout.StateDirectoryFor(destination)]));
         PreflightSafety.ValidateRecoveryPaths(Path.Combine(root, "source.bin"),
             [destination, Path.Combine(root, "copy2")]);
+        PreflightSafety.ValidateRecoveryPaths(Path.Combine(root, "source.bin"),
+            [Path.GetPathRoot(root)!]); // Single-file destinations can be drive roots.
     }
 
     [TestMethod]
