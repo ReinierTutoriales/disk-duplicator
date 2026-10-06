@@ -79,10 +79,12 @@ Las pruebas automatizadas cubren aislamiento lógico, cancelación, recovery y f
 ## Validación de las correcciones de auditoría
 
 - Cancelar durante el recorrido inicial y durante el hash de recuperación; comprobar que la UI vuelve a preparación y permite comenzar de nuevo.
-- Cerrar durante preparación, copia, pausa y verify; la ventana espera a que termine la cancelación y se liberen los leases.
+- Cerrar con la X y con Menú → Salir durante preparación, copia, pausa y verify; la ventana espera a que termine la cancelación y se liberen los leases.
 - Completar/cancelar una operación y usar **Nueva copia** sin reiniciar ni cargar un perfil.
 - Con **Continuar ante error**, bloquear el reemplazo del primer archivo: conservar el antiguo, copiar el siguiente y mostrar el error en **Detalles**; después liberar el bloqueo y comprobar recuperación.
 - Provocar fallo de apertura/lectura de un destino durante verify: mostrar fallo únicamente en ese destino; los demás deben completar la comprobación.
 - Con **Apagar al terminar**, dejar abierto Ajustes/Acerca de al finalizar: los diálogos se serializan, sin excepción por dos ContentDialog simultáneos.
 - Probar 100/125/150/200 % de escala y ventana reducida: los controles y el resumen siguen accesibles mediante desplazamiento.
 - Comparar throughput y diagnósticos con v2.1.1 usando el protocolo físico anterior. Bloques, pool, colas y políticas de flush permanecen en el baseline.
+
+El CI de Windows también publica el ejecutable, lo inicia desde una carpeta aislada que contiene únicamente ese archivo y comprueba su cierre normal. Esta prueba detecta dependencias omitidas del paquete descargable; no sustituye las pruebas visuales ni las de almacenamiento físico.
