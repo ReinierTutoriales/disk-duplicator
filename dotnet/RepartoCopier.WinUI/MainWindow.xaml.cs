@@ -188,6 +188,7 @@ public sealed partial class MainWindow : Window
             _lastResult = [];
             _lastDiagnostics = null;
             _runningDestinations.Clear();
+            RunningDestinationScroll.Visibility = Visibility.Collapsed;
             StartButton.IsEnabled = false;
             PauseButton.IsEnabled = false;
             CancelButton.IsEnabled = true;
@@ -346,6 +347,7 @@ public sealed partial class MainWindow : Window
     {
         if (_job is null) return;
         var snapshots = _job.Snapshot();
+        RunningDestinationScroll.Visibility = snapshots.Count >= 2 ? Visibility.Visible : Visibility.Collapsed;
         for (var index = 0; index < snapshots.Count; index++)
         {
             if (index >= _runningDestinations.Count)
@@ -391,7 +393,9 @@ public sealed partial class MainWindow : Window
                 : active.Min(item => item.Written);
             var speed = paused ? 0d : _copyProgressRate.Observe(written);
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
-            OverallDetailText.Text = $"{FormatBytes(written)} de {FormatBytes(total)}";
+            OverallDetailText.Text = snapshots.Count >= 2
+                ? $"Destino más lento: {FormatBytes(written)} de {FormatBytes(total)}"
+                : $"{FormatBytes(written)} de {FormatBytes(total)}";
             SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
             var remaining = total > written ? total - written : 0;
             RemainingMetricText.Text = !paused && speed > 1
@@ -921,18 +925,7 @@ public sealed partial class MainWindow : Window
 
         public void Update(DestinationSnapshot snapshot)
         {
-            static int Percent(ulong bytes, ulong total) => total == 0
-                ? 0 : (int)Math.Clamp(Math.Floor(bytes * 100d / total), 0, 100);
-
-            var progress = snapshot.Phase switch
-            {
-                DestinationPhase.Copying => $"Copia {Percent(snapshot.Written, snapshot.Total)}%",
-                DestinationPhase.Verifying => $"Verif. {Percent(snapshot.VerifiedBytes, snapshot.VerifyBytesTotal)}%",
-                DestinationPhase.Done => snapshot.FilesErrored > 0 ? "Con errores" : "Completado",
-                DestinationPhase.Failed => "Error",
-                DestinationPhase.Cancelled => "Cancelado",
-                _ => "Preparando",
-            };
+            var progress = DestinationProgressText.Format(snapshot);
             var detail = $"{Label}\n{progress}\nCopiados: {FormatBytes(snapshot.Written)} de {FormatBytes(snapshot.Total)}";
             if (snapshot.VerifyBytesTotal > 0)
                 detail += $"\nVerificados: {FormatBytes(snapshot.VerifiedBytes)} de {FormatBytes(snapshot.VerifyBytesTotal)}";

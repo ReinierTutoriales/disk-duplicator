@@ -229,7 +229,7 @@
                         </Grid>
                     </Grid>
                 </Border>
-                <ScrollViewer Grid.Row="1" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto"
+                <ScrollViewer x:Name="RunningDestinationScroll" Grid.Row="1" Visibility="Collapsed" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto"
                               VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
                     <ItemsControl x:Name="RunningDestinationList">
                         <ItemsControl.ItemsPanel>
