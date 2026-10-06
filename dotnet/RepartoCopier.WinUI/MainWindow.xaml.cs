@@ -320,9 +320,8 @@ public sealed partial class MainWindow : Window
                 if (_closeRequested)
                 {
                     Close();
-                    return;
                 }
-                if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
+                else if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
                 {
                     try { await OfferShutdownAsync(); }
                     catch (Exception ex) { ShowError(ex.Message); }
