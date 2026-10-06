@@ -30,6 +30,7 @@ public sealed partial class MainWindow : Window
     private IReadOnlyList<DestinationSnapshot> _lastResult = [];
     private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
+    private bool _verificationRequested;
     private readonly LogicalProgressRate _copyProgressRate = new();
 
     public MainWindow()
@@ -176,11 +177,12 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
-                Verify: true,
+                Verify: VerifyCheck.IsChecked == true,
                 SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
             SetEditingEnabled(false);
+            _verificationRequested = options.Verify;
             _preparationCancel = new CancellationTokenSource();
             _cancellationRequested = false;
             NewCopyButton.Visibility = Visibility.Collapsed;
@@ -203,7 +205,9 @@ public sealed partial class MainWindow : Window
             FilesMetricText.Text = "0/0";
             OverallProgressBar.Value = 0;
             OverallPercentText.Text = "0%";
-            OverallDetailText.Text = "Preparando copia con verificación rápida...";
+            OverallDetailText.Text = options.Verify
+                ? "Preparando copia con verificación completa..."
+                : "Preparando copia sin verificación final...";
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
@@ -310,11 +314,13 @@ public sealed partial class MainWindow : Window
 
                 OperationTitleText.Text = cancelled
                     ? "Cancelado"
-                    : completedWithErrors ? "Completado con errores" : "Completado";
+                    : completedWithErrors ? "Completado con errores"
+                    : _verificationRequested ? "Copia y verificación terminadas" : "Copiado · sin verificación";
                 OperationIcon.Glyph = cancelled || completedWithErrors ? "\uE783" : "\uE73E";
                 StatusText.Text = cancelled
                     ? "Copia cancelada"
-                    : completedWithErrors ? "La copia terminó con algunos errores" : "Copia completada";
+                    : completedWithErrors ? "La copia terminó con algunos errores"
+                    : _verificationRequested ? "Copia y verificación completadas" : "Copia completada sin verificación final";
                 CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
                 CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
                 SpeedMetricText.Text = "0.0 B/s";
@@ -447,6 +453,7 @@ public sealed partial class MainWindow : Window
             DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             SkipSameCheck.IsChecked = profile.SkipExisting;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
+            VerifyCheck.IsChecked = profile.VerifyAfterCopy;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
             StatusText.Text = "Configuración cargada";
             ShowPreparationView();
@@ -465,7 +472,7 @@ public sealed partial class MainWindow : Window
                 SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true,
                 ShutdownCheck.IsChecked == true,
-                true);
+                VerifyCheck.IsChecked == true);
             var picker = new FileSavePicker(AppWindow.Id)
             {
                 Title = "Guardar copia",
@@ -734,6 +741,7 @@ public sealed partial class MainWindow : Window
         DestinationList.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
+        VerifyCheck.IsEnabled = enabled;
     }
 
     private void ShowError(string message)
@@ -782,8 +790,10 @@ public sealed partial class MainWindow : Window
             var destinations = _lastResult;
             var diagnostics = _lastDiagnostics;
             var startedAt = _copyStartedAt;
+            var verificationRequested = _verificationRequested;
             var details = string.Join(Environment.NewLine + Environment.NewLine, destinations.Select(item =>
                 $"{item.Label}\nEstado: {FormatPhase(item.Phase)} · Archivos: {item.FilesDone}/{item.FilesTotal} · Errores: {item.FilesErrored}" +
+                $"\nVerificación final: {(verificationRequested ? DestinationProgressText.Verification(item) : "No solicitada")}" +
                 (string.IsNullOrWhiteSpace(item.Error) ? string.Empty : $"\n{item.Error}")));
             var result = await ShowDialogAsync(new ContentDialog
             {
@@ -815,7 +825,8 @@ public sealed partial class MainWindow : Window
                     BuildInfo.InformationalVersion(assembly),
                     startedAt,
                     diagnostics,
-                    destinations));
+                    destinations,
+                    verificationRequested));
                 await File.WriteAllTextAsync(file.Path, json);
             }
         }

@@ -6,25 +6,26 @@ namespace RepartoCopier.Core.Tests;
 public sealed class WinUiVerifyContractTests
 {
     [TestMethod]
-    public void VerificationIsAlwaysEnabledAndHiddenFromThePrimaryUi()
+    public void VerificationChoiceIsVisibleAndPassedToTheEngine()
     {
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var codeBehind = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsFalse(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
-        Assert.IsFalse(codeBehind.Contains("VerifyCheck", StringComparison.Ordinal));
-        Assert.IsTrue(codeBehind.Contains("Verify: true", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("x:Name=\"VerifyCheck\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("IsChecked=\"False\"", StringComparison.Ordinal));
+        Assert.IsTrue(codeBehind.Contains("VerifyCheck.IsEnabled = enabled", StringComparison.Ordinal));
+        Assert.IsTrue(codeBehind.Contains("Verify: VerifyCheck.IsChecked == true", StringComparison.Ordinal));
     }
 
     [TestMethod]
-    public void LegacyProfileVerificationChoiceCannotDisableMandatoryVerification()
+    public void ProfilesPreserveTheirVerificationChoice()
     {
         var root = FindRepositoryRoot();
         var profile = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "CopyProfile.cs"));
         var codeBehind = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
         Assert.IsTrue(profile.Contains("bool VerifyAfterCopy = true", StringComparison.Ordinal));
-        Assert.IsFalse(codeBehind.Contains("profile.VerifyAfterCopy", StringComparison.Ordinal));
-        Assert.IsTrue(codeBehind.Contains("Verify: true", StringComparison.Ordinal));
+        Assert.IsTrue(codeBehind.Contains("VerifyCheck.IsChecked = profile.VerifyAfterCopy", StringComparison.Ordinal));
+        Assert.IsTrue(codeBehind.Contains("Verify: VerifyCheck.IsChecked == true", StringComparison.Ordinal));
     }
 
     private static string FindRepositoryRoot()
