@@ -44,7 +44,11 @@ internal static class PreflightSafety
                 if (PathsOverlap(source, ownedPath))
                     throw new IOException($"El origen se solapa con el estado de recuperación: {ownedPath}");
                 foreach (var destination in destinations)
-                    if (PathsOverlap(destination, ownedPath))
+                    // A single-file copy may target a drive/share root, whose
+                    // state necessarily lives beneath that root. Directory copies
+                    // already use a named child as their effective destination.
+                    if (PathsOverlap(destination, ownedPath) &&
+                        !WindowsPath.SamePath(destination, Path.GetPathRoot(destination)!))
                         throw new IOException($"El destino se solapa con el estado de recuperación: {ownedPath}");
             }
         }
