@@ -1046,7 +1046,15 @@ public static class CopyEngine
                 job.Telemetry.RecordIoRecovery(
                     "copy-write", current.Entry.RelativePath, "buffered", lastBufferedTransientCode,
                     failedQueueDepth, bufferedRetryCount, offset, recovered: false);
-                await DelayTransientRetryAsync(bufferedRetryCount, job.Token).ConfigureAwait(false);
+                try
+                {
+                    await DelayTransientRetryAsync(bufferedRetryCount, job.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException cancelled)
+                {
+                    ReleaseBranchBlock(worker, block);
+                    return PendingWriteResult.Failed(cancelled);
+                }
             }
         }
 
