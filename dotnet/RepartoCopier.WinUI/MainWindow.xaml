@@ -178,6 +178,7 @@
             </Grid>
 
             <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="4" MaxWidth="712" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,4,0,0">
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Style="{StaticResource SurfaceCardStyle}" Padding="6,5">
                     <Grid RowSpacing="6">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -228,6 +229,27 @@
                         </Grid>
                     </Grid>
                 </Border>
+                <ScrollViewer Grid.Row="1" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+                    <ItemsControl x:Name="RunningDestinationList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="4"/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Padding="6,4" CornerRadius="5" Background="{ThemeResource ControlFillColorDefaultBrush}"
+                                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
+                                        ToolTipService.ToolTip="{Binding Detail}" AutomationProperties.Name="{Binding Detail}">
+                                    <StackPanel Orientation="Horizontal" Spacing="5">
+                                        <FontIcon Glyph="&#xEDA2;" FontSize="12" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding Label}" FontSize="12" MaxWidth="90" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding Progress}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
             </Grid>
         </Grid>
         </ScrollViewer>
