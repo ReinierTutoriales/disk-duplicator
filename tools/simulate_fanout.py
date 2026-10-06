@@ -4,6 +4,11 @@ Units are MiB and seconds. Rates are *effective measured* rates, not device labe
 No caching, verification, controller sharing, filesystem overhead or queue-depth gain is
 assumed. The optional spool is a separate idealized device; replay reads are free,
 so its result is an upper bound, not a proposed production implementation.
+
+``hash_rate`` models the source hash that CopyEngine computes inline after every read
+(CopyEngine.cs, read loop: read -> hasher.UpdateWithJoin -> deliver). Read and hash are
+serial in the producer, so its effective rate is 1 / (1/source_rate + 1/hash_rate).
+Omit it (None) to reproduce the previous model exactly.
 """
 from __future__ import annotations
 
@@ -51,8 +56,9 @@ def service_end(start: float, amount: float, rate: float, stall_start: float = -
 def simulate(size: float, source_rate: float, targets: list[Target], pool: float = 256,
              block_size: float = 8, spool_target: str | None = None,
              spool_rate: float = 1200, spool_capacity: float = 0,
-             source_latency_ms: float = 0) -> dict:
-    if size <= 0 or pool < block_size or block_size <= 0 or source_rate <= 0 or source_latency_ms < 0:
+             source_latency_ms: float = 0, hash_rate: float | None = None) -> dict:
+    if size <= 0 or pool < block_size or block_size <= 0 or source_rate <= 0 or source_latency_ms < 0 \
+            or (hash_rate is not None and hash_rate <= 0):
         raise ValueError("Tamaño, origen, bloque y pool deben ser positivos y compatibles")
     if not targets or len({t.name for t in targets}) != len(targets) or any(t.rate <= 0 or t.latency_ms < 0 for t in targets):
         raise ValueError("Se requieren destinos únicos con tasas positivas")
@@ -89,7 +95,8 @@ def simulate(size: float, source_rate: float, targets: list[Target], pool: float
         if source_busy or amount <= 1e-8 or used + amount > pool + 1e-8:
             return
         source_busy = True
-        schedule(clock + amount / source_rate + source_latency_ms / 1000, "read", amount)
+        hash_s = amount / hash_rate if hash_rate else 0.0
+        schedule(clock + amount / source_rate + hash_s + source_latency_ms / 1000, "read", amount)
 
     def start_target(t: Target) -> None:
         if t.busy or not t.queue:
@@ -168,7 +175,7 @@ def simulate(size: float, source_rate: float, targets: list[Target], pool: float
                 break
     if any(t.finished_at is None for t in targets):
         raise RuntimeError("La simulación no terminó")
-    return {"size_mib": size, "source_rate_mib_s": source_rate,
+    return {"size_mib": size, "source_rate_mib_s": source_rate, "hash_rate_mib_s": hash_rate,
             "pool_mib": pool, "peak_pool_mib": round(peak_used, 3),
             "spool_capacity_mib": spool_capacity if spool_target else 0,
             "peak_spool_mib": round(peak_spool, 3),
@@ -188,6 +195,8 @@ def main() -> None:
     parser.add_argument("--source-latency-ms", type=float, default=0, help="latency per source read")
     parser.add_argument("--fast-latency-ms", type=float, default=0, help="latency per fast write")
     parser.add_argument("--slow-latency-ms", type=float, default=0, help="latency per USB write")
+    parser.add_argument("--hash-rate", type=float, default=0,
+                        help="inline source hash MiB/s, serial with the read; zero disables")
     parser.add_argument("--pool", type=float, default=256, help="shared pool MiB")
     parser.add_argument("--block", type=float, default=8, help="block MiB")
     parser.add_argument("--stall-start", type=float, default=-1, help="USB stall start in seconds")
@@ -199,7 +208,8 @@ def main() -> None:
                       [Target("NVMe", args.fast, latency_ms=args.fast_latency_ms),
                        Target("USB", args.slow, args.stall_start, args.stall_end, args.slow_latency_ms)],
                       args.pool, args.block, "USB" if args.spool_capacity else None,
-                      args.spool_rate, args.spool_capacity, args.source_latency_ms)
+                      args.spool_rate, args.spool_capacity, args.source_latency_ms,
+                      args.hash_rate or None)
     print(json.dumps(result, indent=2))
 
 
