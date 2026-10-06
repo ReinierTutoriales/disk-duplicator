@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -19,6 +20,7 @@ public sealed partial class MainWindow : Window
     private const string LicenseUrl = "https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE";
 
     private readonly ObservableCollection<DestinationRow> _destinations = [];
+    private readonly ObservableCollection<RunningDestinationRow> _runningDestinations = [];
     private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private CopyJob? _job;
     private CancellationTokenSource? _preparationCancel;
@@ -34,6 +36,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         DestinationList.ItemsSource = _destinations;
+        RunningDestinationList.ItemsSource = _runningDestinations;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         ResizeForCurrentDpi(new SizeInt32(720, 320));
@@ -184,6 +187,7 @@ public sealed partial class MainWindow : Window
             ResultDetailsButton.Visibility = Visibility.Collapsed;
             _lastResult = [];
             _lastDiagnostics = null;
+            _runningDestinations.Clear();
             StartButton.IsEnabled = false;
             PauseButton.IsEnabled = false;
             CancelButton.IsEnabled = true;
@@ -205,6 +209,7 @@ public sealed partial class MainWindow : Window
             _copyProgressRate.Reset();
 
             _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
+            RefreshProgress();
             if (_cancellationRequested) _job.RequestCancel();
             PauseButton.IsEnabled = !_cancellationRequested;
             CancelButton.IsEnabled = !_cancellationRequested;
@@ -341,6 +346,12 @@ public sealed partial class MainWindow : Window
     {
         if (_job is null) return;
         var snapshots = _job.Snapshot();
+        for (var index = 0; index < snapshots.Count; index++)
+        {
+            if (index >= _runningDestinations.Count)
+                _runningDestinations.Add(new RunningDestinationRow(snapshots[index].Label));
+            _runningDestinations[index].Update(snapshots[index]);
+        }
         var paused = _job.IsPaused;
         var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
         double percent;
@@ -900,5 +911,43 @@ public sealed partial class MainWindow : Window
         (Brush)Application.Current.Resources[resourceKey];
 
     public sealed record DestinationRow(string Path);
+
+    public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
+    {
+        public string Label { get; } = path;
+        public string Progress { get; private set; } = "Preparando";
+        public string Detail { get; private set; } = path;
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void Update(DestinationSnapshot snapshot)
+        {
+            static int Percent(ulong bytes, ulong total) => total == 0
+                ? 0 : (int)Math.Clamp(Math.Floor(bytes * 100d / total), 0, 100);
+
+            var progress = snapshot.Phase switch
+            {
+                DestinationPhase.Copying => $"Copia {Percent(snapshot.Written, snapshot.Total)}%",
+                DestinationPhase.Verifying => $"Verif. {Percent(snapshot.VerifiedBytes, snapshot.VerifyBytesTotal)}%",
+                DestinationPhase.Done => snapshot.FilesErrored > 0 ? "Con errores" : "Completado",
+                DestinationPhase.Failed => "Error",
+                DestinationPhase.Cancelled => "Cancelado",
+                _ => "Preparando",
+            };
+            var detail = $"{Label}\n{progress}\nCopiados: {FormatBytes(snapshot.Written)} de {FormatBytes(snapshot.Total)}";
+            if (snapshot.VerifyBytesTotal > 0)
+                detail += $"\nVerificados: {FormatBytes(snapshot.VerifiedBytes)} de {FormatBytes(snapshot.VerifyBytesTotal)}";
+            if (!string.IsNullOrWhiteSpace(snapshot.Error)) detail += $"\n{snapshot.Error}";
+            if (Progress != progress)
+            {
+                Progress = progress;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Progress)));
+            }
+            if (Detail != detail)
+            {
+                Detail = detail;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Detail)));
+            }
+        }
+    }
 
 }
