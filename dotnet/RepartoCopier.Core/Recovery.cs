@@ -122,16 +122,19 @@ internal static class RecoveryManager
     internal static HashSet<string> PrepareAndNormalize(
         string sourceRoot,
         string destinationRoot,
-        IReadOnlyList<RecoveryFile> files)
+        IReadOnlyList<RecoveryFile> files,
+        CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         MigrateStateDirectory(destinationRoot);
         StateLayout.PrepareTempDirectory(destinationRoot);
-        CleanupOwnedStaleFiles(destinationRoot, files);
-        CleanupOwnedOrphanParts(destinationRoot);
+        CleanupOwnedStaleFiles(destinationRoot, files, token);
+        CleanupOwnedOrphanParts(destinationRoot, token);
         RecoverCompletedRewrite(destinationRoot);
         RecoverManifestRewrite(destinationRoot);
-        var valid = NormalizeCompletedState(destinationRoot, files);
-        CompactManifest(destinationRoot, files);
+        var valid = NormalizeCompletedState(destinationRoot, files, token);
+        token.ThrowIfCancellationRequested();
+        CompactManifest(destinationRoot, files, token);
         return valid;
     }
 
@@ -150,7 +153,7 @@ internal static class RecoveryManager
     internal static string LegacyManifestKey(string relativePath) =>
         relativePath.Replace('\\', '/');
 
-    internal static Dictionary<string, byte[]> LoadManifestHashes(string destinationRoot)
+    internal static Dictionary<string, byte[]> LoadManifestHashes(string destinationRoot, CancellationToken token = default)
     {
         var path = StateLayout.ManifestPath(destinationRoot);
         var hashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
@@ -160,6 +163,7 @@ internal static class RecoveryManager
         EnsureOwnedRegularFile(path, "manifest");
         foreach (var line in File.ReadLines(path))
         {
+            token.ThrowIfCancellationRequested();
             var separator = line.IndexOf("  ", StringComparison.Ordinal);
             if (separator <= 0)
                 continue;
@@ -181,7 +185,7 @@ internal static class RecoveryManager
         return hashes;
     }
 
-    internal static HashSet<string> LoadCompleted(string destinationRoot)
+    internal static HashSet<string> LoadCompleted(string destinationRoot, CancellationToken token = default)
     {
         var path = StateLayout.JournalPath(destinationRoot);
         var keys = new HashSet<string>(StringComparer.Ordinal);
@@ -191,6 +195,7 @@ internal static class RecoveryManager
         EnsureOwnedRegularFile(path, "journal");
         foreach (var line in File.ReadLines(path))
         {
+            token.ThrowIfCancellationRequested();
             const string marker = "\"key\":\"";
             var start = line.IndexOf(marker, StringComparison.Ordinal);
             if (start < 0)
@@ -203,7 +208,7 @@ internal static class RecoveryManager
         return keys;
     }
 
-    internal static void RewriteCompleted(string destinationRoot, HashSet<string> keys)
+    internal static void RewriteCompleted(string destinationRoot, HashSet<string> keys, CancellationToken token = default)
     {
         StateLayout.PrepareStateDirectory(destinationRoot);
         RecoverCompletedRewrite(destinationRoot);
@@ -217,7 +222,10 @@ internal static class RecoveryManager
         using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 64 * 1024, leaveOpen: true))
         {
             foreach (var key in keys.OrderBy(value => value, StringComparer.Ordinal))
+            {
+                token.ThrowIfCancellationRequested();
                 writer.WriteLine($"{{\"key\":\"{key}\"}}");
+            }
             writer.Flush();
             stream.Flush(flushToDisk: true);
         }
@@ -279,7 +287,8 @@ internal static class RecoveryManager
 
     internal static void CompactManifest(
         string destinationRoot,
-        IReadOnlyList<RecoveryFile> files)
+        IReadOnlyList<RecoveryFile> files,
+        CancellationToken token = default)
     {
         RecoverManifestRewrite(destinationRoot);
         var path = StateLayout.ManifestPath(destinationRoot);
@@ -287,10 +296,11 @@ internal static class RecoveryManager
             return;
         EnsureOwnedRegularFile(path, "manifest");
 
-        var hashes = LoadManifestHashes(destinationRoot);
+        var hashes = LoadManifestHashes(destinationRoot, token);
         var entries = new List<(string Key, byte[] Hash)>();
         foreach (var file in files)
         {
+            token.ThrowIfCancellationRequested();
             var current = ManifestKey(file.RelativePath);
             if (hashes.TryGetValue(current, out var hash)
                 || hashes.TryGetValue(LegacyManifestKey(file.RelativePath), out hash))
@@ -309,7 +319,10 @@ internal static class RecoveryManager
         using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 64 * 1024, leaveOpen: true))
         {
             foreach (var (key, hash) in entries)
+            {
+                token.ThrowIfCancellationRequested();
                 writer.WriteLine($"{Convert.ToHexString(hash).ToLowerInvariant()}  {key}");
+            }
             writer.Flush();
             stream.Flush(flushToDisk: true);
         }
@@ -364,17 +377,19 @@ internal static class RecoveryManager
 
     private static HashSet<string> NormalizeCompletedState(
         string destinationRoot,
-        IReadOnlyList<RecoveryFile> files)
+        IReadOnlyList<RecoveryFile> files,
+        CancellationToken token)
     {
-        var loaded = LoadCompleted(destinationRoot);
+        var loaded = LoadCompleted(destinationRoot, token);
         if (loaded.Count == 0)
             return loaded;
 
-        var manifest = LoadManifestHashes(destinationRoot);
+        var manifest = LoadManifestHashes(destinationRoot, token);
         var valid = new HashSet<string>(StringComparer.Ordinal);
         var sourceHashes = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
+            token.ThrowIfCancellationRequested();
             var currentKey = StateKey(file);
             var oldKey = LegacyStateKey(file);
             if (!loaded.Contains(currentKey) && !loaded.Contains(oldKey))
@@ -386,7 +401,7 @@ internal static class RecoveryManager
 
             if (!sourceHashes.TryGetValue(file.RelativePath, out var sourceHash))
             {
-                sourceHash = HashFile(file.SourcePath);
+                sourceHash = HashFile(file.SourcePath, token);
                 sourceHashes[file.RelativePath] = sourceHash;
             }
             if (!sourceHash.AsSpan().SequenceEqual(expected))
@@ -399,22 +414,24 @@ internal static class RecoveryManager
                 continue;
             if (new FileInfo(destination).Length != file.Size)
                 continue;
-            var destinationHash = HashFile(destination);
+            var destinationHash = HashFile(destination, token);
             if (destinationHash.AsSpan().SequenceEqual(expected))
                 valid.Add(currentKey);
         }
 
         if (!valid.SetEquals(loaded))
-            RewriteCompleted(destinationRoot, valid);
+            RewriteCompleted(destinationRoot, valid, token);
         return valid;
     }
 
     private static void CleanupOwnedStaleFiles(
         string destinationRoot,
-        IReadOnlyList<RecoveryFile> files)
+        IReadOnlyList<RecoveryFile> files,
+        CancellationToken token = default)
     {
         foreach (var file in files)
         {
+            token.ThrowIfCancellationRequested();
             var destination = Path.Combine(destinationRoot, file.RelativePath);
             foreach (var part in PartCandidates(destinationRoot, destination))
                 DeleteOwnedFileIfPresent(part, "temporal");
@@ -441,7 +458,7 @@ internal static class RecoveryManager
         }
     }
 
-    internal static void CleanupOwnedOrphanParts(string destinationRoot)
+    internal static void CleanupOwnedOrphanParts(string destinationRoot, CancellationToken token = default)
     {
         var tmp = Path.Combine(StateLayout.StateDirectoryFor(destinationRoot), "tmp");
         if (!Directory.Exists(tmp))
@@ -450,6 +467,7 @@ internal static class RecoveryManager
 
         foreach (var entry in Directory.EnumerateFileSystemEntries(tmp))
         {
+            token.ThrowIfCancellationRequested();
             var name = Path.GetFileName(entry);
             if (!IsOwnedTransientPartName(name))
                 continue;
@@ -547,7 +565,7 @@ internal static class RecoveryManager
         return hex[..chars];
     }
 
-    private static byte[] HashFile(string path)
+    private static byte[] HashFile(string path, CancellationToken token)
     {
         WindowsPath.EnsureRegularFile(path, "El archivo para verificación");
         using var hasher = Hasher.New();
@@ -565,6 +583,7 @@ internal static class RecoveryManager
         {
             while (true)
             {
+                token.ThrowIfCancellationRequested();
                 var read = stream.Read(buffer, 0, bufferSize);
                 if (read == 0)
                     break;
@@ -596,4 +615,3 @@ internal static class RecoveryManager
         File.Delete(path);
     }
 }
-

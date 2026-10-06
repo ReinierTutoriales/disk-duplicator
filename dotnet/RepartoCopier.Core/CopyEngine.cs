@@ -133,7 +133,7 @@ public static class CopyEngine
                     SkipSame: plan.SkipSame,
                     KeepGoing: plan.KeepGoing);
 
-        var prepared = await Task.Run(() => Preflight(plan), cancellationToken).ConfigureAwait(false);
+        var prepared = await Task.Run(() => Preflight(plan, cancellationToken), cancellationToken).ConfigureAwait(false);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -151,8 +151,9 @@ public static class CopyEngine
         }
     }
 
-    private static PreparedCopy Preflight(CopyPlan plan)
+    private static PreparedCopy Preflight(CopyPlan plan, CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         var requestedSource = Path.GetFullPath(plan.Source);
         var sourceIsDirectory = Directory.Exists(requestedSource);
         var sourceIsFile = File.Exists(requestedSource);
@@ -172,7 +173,7 @@ public static class CopyEngine
             .ToArray();
         var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
             source,
-            effectiveDestinations);
+            effectiveDestinations, token);
 
         var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
         var destinationDevices = destinationTopology.Destinations.ToArray();
@@ -188,7 +189,7 @@ public static class CopyEngine
         SourceTreeScan scan;
         if (sourceIsDirectory)
         {
-            scan = PreflightSafety.ScanDirectory(source);
+            scan = PreflightSafety.ScanDirectory(source, token);
         }
         else
         {
@@ -228,24 +229,32 @@ public static class CopyEngine
         try
         {
             foreach (var root in destinationRoots)
+            {
+                token.ThrowIfCancellationRequested();
                 stateLeases.Add(DestinationStateLease.Acquire(root));
+            }
 
             for (var slot = 0; slot < destinationRoots.Length; slot++)
             {
+                token.ThrowIfCancellationRequested();
                 var root = destinationRoots[slot];
-                PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files);
-                var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles);
+                PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
+                var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles, token);
                 var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
                 {
+                    token.ThrowIfCancellationRequested();
                     if (!completed.Contains(RecoveryManager.StateKey(recoveryFiles[fileIndex])))
                         continue;
                     preverifiedSkips[fileIndex][slot] = true;
                     skippedPaths.Add(files[fileIndex].RelativePath);
                 }
-                PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths);
+                PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths, token);
                 foreach (var relative in directories)
+                {
+                    token.ThrowIfCancellationRequested();
                     EnsureDestinationDirectory(root, relative);
+                }
             }
 
             return new PreparedCopy(
@@ -458,7 +467,7 @@ public static class CopyEngine
             }
 
             if (copy.SourceScan is not null)
-                PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan);
+                PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token);
         }
         finally
         {
@@ -745,6 +754,7 @@ public static class CopyEngine
         CopyJob job)
     {
         CurrentFile? current = null;
+        var skippingFailedFile = false;
         using var recovery = new RecoveryCheckpointWriter(worker.Root);
         try
         {
@@ -766,9 +776,18 @@ public static class CopyEngine
                     switch (effectiveMessage)
                     {
                         case BeginMessage begin:
-                            if (current is not null)
+                            if (current is not null || skippingFailedFile)
                                 throw new InvalidOperationException("Se recibió Begin antes de cerrar el archivo anterior.");
-                            current = BeginFile(worker, begin.Entry);
+                            try
+                            {
+                                current = BeginFile(worker, begin.Entry);
+                            }
+                            catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex))
+                            {
+                                worker.Progress.MarkError($"{begin.Entry.RelativePath}: {ex.Message}");
+                                skippingFailedFile = true;
+                                break;
+                            }
                             if (current.DirectSession is not null)
                                 job.Telemetry.RecordDirectDestinationFile();
                             else if (current.DirectRequested)
@@ -806,12 +825,25 @@ public static class CopyEngine
                         case DataMessage:
                             break;
 
+                        case EndMessage when skippingFailedFile:
+                            skippingFailedFile = false;
+                            break;
+
                         case EndMessage end when current is not null:
                             var pendingError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
                             if (pendingError is not null)
                                 FailCurrentFile(worker, current, options, pendingError.Message);
                             if (!current.Failed)
-                                FinishFile(worker, current, end.Hash, options, recovery, job);
+                            {
+                                try
+                                {
+                                    FinishFile(worker, current, end.Hash, options, recovery, job);
+                                }
+                                catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex))
+                                {
+                                    FailCurrentFile(worker, current, options, $"{current.Entry.RelativePath}: {ex.Message}");
+                                }
+                            }
                             current = null;
                             break;
                     }
@@ -841,7 +873,7 @@ public static class CopyEngine
                 current.Stream?.Dispose();
                 current.DirectSession?.Dispose();
                 TryDelete(current.PartPath);
-                if (current.Copied > 0 && !current.Failed)
+                if (current.Copied > 0 && !current.Failed && !current.Committed)
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
             DrainAndRelease(worker.Channel.Reader, worker);
@@ -865,18 +897,31 @@ public static class CopyEngine
         var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size);
         FileStream? stream = null;
         DirectIoDestinationWriter.Session? directSession = null;
-        if (directRequested)
+        try
         {
-            using (OpenPartStream(part, FileMode.CreateNew, preallocationSize)) { }
-            if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
-                stream = ReopenPart(part);
+            if (directRequested)
+            {
+                using (OpenPartStream(part, FileMode.CreateNew, preallocationSize)) { }
+                if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
+                    stream = ReopenPart(part);
+            }
+            else
+            {
+                stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
+            }
+            return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
         }
-        else
+        catch
         {
-            stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
+            stream?.Dispose();
+            directSession?.Dispose();
+            TryDelete(part);
+            throw;
         }
-        return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
     }
+
+    private static bool IsFileIoError(Exception error) =>
+        error is IOException or UnauthorizedAccessException;
 
     private static async Task<PendingWriteResult> WriteBlockAtOffsetAsync(
         DestinationWorker worker,
@@ -1156,7 +1201,7 @@ public static class CopyEngine
         current.DirectSession?.Dispose();
         current.DirectSession = null;
         TryDelete(current.PartPath);
-        if (current.Copied > 0)
+        if (current.Copied > 0 && !current.Committed)
             worker.Progress.RollbackWritten((ulong)current.Copied);
         if (options.KeepGoing)
             worker.Progress.MarkError(error);
@@ -1214,6 +1259,8 @@ public static class CopyEngine
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         var commitStarted = Stopwatch.GetTimestamp();
         AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
+        current.Committed = true;
+        worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
         job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
         File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         var recoveryStarted = Stopwatch.GetTimestamp();
@@ -1225,7 +1272,6 @@ public static class CopyEngine
                 current.Entry.ModifiedUnixNanoseconds),
             expectedHash);
         job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
-        worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
         worker.Progress.MarkDone();
     }
 
@@ -1275,24 +1321,31 @@ public static class CopyEngine
                 {
                     progress[slot].SetLastFile(entry.RelativePath);
                     var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                    if (!File.Exists(destination))
+                    try
                     {
-                        workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
-                        continue;
+                        if (!File.Exists(destination))
+                        {
+                            workers[slot].Fail($"Falta el archivo durante verificación: {destination}");
+                            continue;
+                        }
+                        ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                        WindowsPath.EnsureRegularFile(destination, "El archivo durante verificación");
+                        if (new FileInfo(destination).Length != entry.Size)
+                        {
+                            workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
+                            continue;
+                        }
+                        targets.Add(new CoordinatedVerifyTarget(
+                            slot,
+                            destination,
+                            copy.DestinationDevices[slot],
+                            workers[slot].DeviceScheduler,
+                            progress[slot]));
                     }
-                    ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
-                    WindowsPath.EnsureRegularFile(destination, "El archivo durante verificación");
-                    if (new FileInfo(destination).Length != entry.Size)
+                    catch (Exception ex) when (IsFileIoError(ex))
                     {
-                        workers[slot].Fail($"Tamaño no coincide durante verificación: {destination}");
-                        continue;
+                        workers[slot].Fail($"{destination}: {ex.Message}");
                     }
-                    targets.Add(new CoordinatedVerifyTarget(
-                        slot,
-                        destination,
-                        copy.DestinationDevices[slot],
-                        workers[slot].DeviceScheduler,
-                        progress[slot]));
                 }
 
                 if (targets.Count <= 1)
@@ -1301,7 +1354,16 @@ public static class CopyEngine
                 using var workspace = new VerificationWorkspace(targets);
                 var perStreamBytes = workspace.PerStreamBytes;
                 for (var index = 0; index < targets.Count; index++)
-                    targets[index].Open(workspace.RentSlice(index));
+                {
+                    try
+                    {
+                        targets[index].Open(workspace.RentSlice(index));
+                    }
+                    catch (Exception ex) when (!targets[index].IsSource && IsFileIoError(ex))
+                    {
+                        workers[targets[index].Slot].Fail($"{targets[index].Path}: {ex.Message}");
+                    }
+                }
 
                 long offset = 0;
                 while (offset < entry.Size)
@@ -1317,7 +1379,7 @@ public static class CopyEngine
 
                     var expectedBytes = (int)Math.Min(perStreamBytes, entry.Size - offset);
                     var reads = activeTargets
-                        .Select(target => ReadVerifyTargetAsync(target, expectedBytes, offset, job))
+                        .Select(target => ReadIsolatedVerifyTargetAsync(target, expectedBytes, offset, job, workers))
                         .ToArray();
                     var results = await Task.WhenAll(reads).ConfigureAwait(false);
 
@@ -1376,6 +1438,21 @@ public static class CopyEngine
         }
     }
 
+    private static async Task<int> ReadIsolatedVerifyTargetAsync(
+        CoordinatedVerifyTarget target, int expectedBytes, long offset,
+        CopyJob job, DestinationWorker[] workers)
+    {
+        try
+        {
+            return await ReadVerifyTargetAsync(target, expectedBytes, offset, job).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!target.IsSource && IsFileIoError(ex))
+        {
+            workers[target.Slot].Fail($"{target.Path}: {ex.Message}");
+            return 0;
+        }
+    }
+
     private static async Task<int> ReadVerifyTargetAsync(
         CoordinatedVerifyTarget target,
         int expectedBytes,
@@ -1413,7 +1490,7 @@ public static class CopyEngine
                     }
                     else
                     {
-                        read = await RandomAccess.ReadAsync(
+                        read = await BufferedVerificationReader.ReadBlockAsync(
                             target.BufferedHandle!,
                             target.Buffer!.Memory[..expectedBytes],
                             offset,
@@ -2177,6 +2254,7 @@ public static class CopyEngine
         public long Copied => Interlocked.Read(ref _copied);
         public bool DirectFallbackRequested => Volatile.Read(ref _directFallbackRequested) != 0;
         public bool Failed { get; set; }
+        public bool Committed { get; set; }
 
         public long ReserveWriteOffset(int length)
         {

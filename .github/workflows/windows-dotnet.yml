@@ -5,6 +5,12 @@ name: Windows .NET CI
 # fixed-workspace streaming verification, overlapped Direct I/O source/verify paths,
 # Direct I/O destination writes with buffered fallback, recovery, and the WinUI product.
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dotnet/**'
+      - 'RepartoCopier.sln'
+      - '.github/workflows/windows-dotnet.yml'
   push:
     branches: [main]
     paths:

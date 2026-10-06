@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RepartoCopier.Core;
 
 namespace RepartoCopier.WinUI;
 
@@ -32,9 +33,9 @@ internal static class CopyProfileSerializer
             throw new InvalidDataException($"Esta configuración usa una versión no compatible ({profile.Version}).");
         if (string.IsNullOrWhiteSpace(profile.Source))
             throw new InvalidDataException("La configuración no contiene un origen.");
-        if (profile.Destinations.Count == 0)
+        if (profile.Destinations is null || profile.Destinations.Count == 0)
             throw new InvalidDataException("La configuración no contiene destinos.");
+        _ = CopyPlan.Create(profile.Source, profile.Destinations, profile.SkipExisting, profile.ContinueOnError);
         return profile;
     }
 }
-
