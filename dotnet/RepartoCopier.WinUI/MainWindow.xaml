@@ -33,6 +33,7 @@
 
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="20" />
         </Grid.RowDefinitions>
@@ -63,9 +64,10 @@
             </TitleBar.RightHeader>
         </TitleBar>
 
-        <Grid Grid.Row="1" Margin="4,0,4,2" MaxWidth="720" HorizontalAlignment="Stretch">
-            <InfoBar x:Name="ErrorBar" VerticalAlignment="Top" Margin="0,0,0,8" IsOpen="False"
-                     Severity="Error" IsClosable="True" Canvas.ZIndex="10" />
+        <InfoBar x:Name="ErrorBar" Grid.Row="1" IsOpen="False" Severity="Error" IsClosable="True" />
+        <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled"
+                      VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
+        <Grid Margin="4,0,4,2" MinWidth="540" MaxWidth="720" HorizontalAlignment="Stretch">
 
             <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="4" MaxWidth="712" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
@@ -219,13 +221,18 @@
                             <Button x:Name="CancelButton" Grid.Column="1" Style="{StaticResource CompactButtonStyle}" MinWidth="96" IsEnabled="False" Click="Cancel_Click">
                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE711;" FontSize="12"/><TextBlock Text="Cancelar"/></StackPanel>
                             </Button>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="7" HorizontalAlignment="Right">
+                                <Button x:Name="ResultDetailsButton" Style="{StaticResource CompactButtonStyle}" Content="Detalles" Visibility="Collapsed" Click="ResultDetails_Click" />
+                                <Button x:Name="NewCopyButton" Style="{StaticResource CompactButtonStyle}" Content="Nueva copia" Visibility="Collapsed" Click="NewCopy_Click" />
+                            </StackPanel>
                         </Grid>
                     </Grid>
                 </Border>
             </Grid>
         </Grid>
+        </ScrollViewer>
 
-        <Border Grid.Row="2" Padding="6,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        <Border Grid.Row="3" Padding="6,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <Grid>
                 <TextBlock x:Name="StatusText" Text="Listo" FontSize="10" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>

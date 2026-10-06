@@ -415,6 +415,45 @@ public sealed class CoreParityTests
     }
 
     [TestMethod]
+    public async Task KeepGoingPreservesLockedFileAndCopiesNextFileThenRecovers()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Requires Windows file sharing and replacement semantics.");
+            return;
+        }
+        using var temp = new TempDirectory("keep-going-commit");
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Origen")).FullName;
+        var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
+        var root = Directory.CreateDirectory(Path.Combine(destination, "Origen")).FullName;
+        File.WriteAllText(Path.Combine(source, "a-locked.txt"), "new-content");
+        File.WriteAllText(Path.Combine(source, "b-next.txt"), "next-content");
+        var locked = Path.Combine(root, "a-locked.txt");
+        File.WriteAllText(locked, "old-content");
+
+        using (var held = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            await using var job = CopyEngine.Start(CopyPlan.Create(source, [destination], false, true),
+                new CopyOptions(Verify: true, SkipSame: false, KeepGoing: true));
+            await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+            var result = job.Snapshot().Single();
+            Assert.AreEqual(DestinationPhase.Done, result.Phase);
+            Assert.AreEqual(1UL, result.FilesErrored);
+            Assert.AreEqual(1UL, result.FilesDone);
+            Assert.AreEqual(1UL, result.VerifyFilesDone);
+            Assert.AreEqual("old-content", File.ReadAllText(locked));
+            Assert.AreEqual("next-content", File.ReadAllText(Path.Combine(root, "b-next.txt")));
+        }
+
+        await using var retry = CopyEngine.Start(CopyPlan.Create(source, [destination], false, true),
+            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: true));
+        await retry.Completion.WaitAsync(TimeSpan.FromSeconds(45));
+        AssertHealthy(retry);
+        Assert.AreEqual(0UL, retry.Snapshot().Single().FilesErrored);
+        Assert.AreEqual("new-content", File.ReadAllText(locked));
+    }
+
+    [TestMethod]
     public async Task LockedDestinationCommitFailsOnlyThatBranchAndHealthyBranchCompletes()
     {
         using var temp = new TempDirectory("branch-fault-isolation");
@@ -945,4 +984,3 @@ public sealed class CoreParityTests
         }
     }
 }
-

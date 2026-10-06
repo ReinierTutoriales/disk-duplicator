@@ -22,7 +22,7 @@ dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r
 - Cálculo de espacio con reserva y granularidad de asignación.
 - Recovery: journal/manifest, rewrites interrumpidos, backup, corrupción, estado legacy, `.part` huérfanos, lease exclusivo por destino y validación BLAKE3 física.
 - Pausa, continuación, cancelación desde pausa, fallo aislado por destino y recuperación/reintento posterior de la rama fallida.
-- Replay por rama lenta: ubicación física segura, identidad exacta, histéresis y degradación a memoria si el spill no está disponible.
+- Backpressure del pool compartido, liberación de referencias y aislamiento de destinos fallidos; el hot path actual no utiliza replay/spill.
 - Gobernadores adaptativos: RAM por bytes, prefetch, backpressure y trabajo CPU-bound.
 - Telemetría: source read/hash, buffer wait, FAN-OUT/backpressure, write, flush, commit, recovery y verify.
 
@@ -47,7 +47,7 @@ Ejecutar en Windows real. Para cada combinación origen/destino disponible (USB 
 - **Secuencial grande:** uno o varios archivos suficientemente grandes para superar ampliamente caché/prefetch y observar throughput sostenido.
 - **Mixto:** archivos pequeños, medianos y grandes con subdirectorios y carpetas vacías.
 - **Small-file:** miles de archivos pequeños para ejercer metadata, commit y recovery.
-- **Verificación:** la aplicación verifica automáticamente; medir por separado copia, verificación y tiempo total. Los tests internos pueden desactivar `Verify` solo para aislar la fase de copia.
+- **Verificación:** la aplicación verifica automáticamente y relee el origen; medir por separado copia, verificación y tiempo total. Los tests internos pueden desactivar `Verify` solo para aislar la fase de copia.
 - **Contención:** cuando sea posible, destinos que compartan y que no compartan controlador/hub para distinguir límite del motor de límite del bus.
 
 Para cada ejecución conservar:
@@ -75,3 +75,14 @@ Antes de comparar dos cambios, usar el mismo dataset, origen, destinos, opciones
 Además del benchmark, validar desconexión de un destino, cancelación durante lectura/escritura/commit, pausa/reanudación prolongada, falta de espacio, paths Unicode/UNC y recuperación después de una interrupción. Ninguna mejora de rendimiento puede reducir estas garantías.
 
 Las pruebas automatizadas cubren aislamiento lógico, cancelación, recovery y fallos de commit reproducibles. La desconexión física real de USB/SATA/NVMe y el comportamiento del controlador siguen siendo un gate de hardware: no deben considerarse sustituidos por mocks o CI.
+
+## Validación de las correcciones de auditoría
+
+- Cancelar durante el recorrido inicial y durante el hash de recuperación; comprobar que la UI vuelve a preparación y permite comenzar de nuevo.
+- Cerrar durante preparación, copia, pausa y verify; la ventana espera a que termine la cancelación y se liberen los leases.
+- Completar/cancelar una operación y usar **Nueva copia** sin reiniciar ni cargar un perfil.
+- Con **Continuar ante error**, bloquear el reemplazo del primer archivo: conservar el antiguo, copiar el siguiente y mostrar el error en **Detalles**; después liberar el bloqueo y comprobar recuperación.
+- Provocar fallo de apertura/lectura de un destino durante verify: mostrar fallo únicamente en ese destino; los demás deben completar la comprobación.
+- Con **Apagar al terminar**, dejar abierto Ajustes/Acerca de al finalizar: los diálogos se serializan, sin excepción por dos ContentDialog simultáneos.
+- Probar 100/125/150/200 % de escala y ventana reducida: los controles y el resumen siguen accesibles mediante desplazamiento.
+- Comparar throughput y diagnósticos con v2.1.1 usando el protocolo físico anterior. Bloques, pool, colas y políticas de flush permanecen en el baseline.
