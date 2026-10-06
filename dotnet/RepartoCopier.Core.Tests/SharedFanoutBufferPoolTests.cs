@@ -8,6 +8,18 @@ namespace RepartoCopier.Core.Tests;
 public sealed class SharedFanoutBufferPoolTests
 {
     [TestMethod]
+    public async Task FreeRunCrossingSearchCursorCanBeRentedWithoutWaiting()
+    {
+        var page = Math.Max(4096, Environment.SystemPageSize);
+        using var pool = new SharedFanoutBufferPool(2 * page);
+        var first = await pool.RentAsync(page, page, 1, CancellationToken.None);
+        first.ReleaseReference(); // Cursor is in the middle of an entirely free pool.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var whole = await pool.RentAsync(2 * page, page, 1, timeout.Token);
+        Assert.AreEqual(pool.CapacityBytes, pool.UsedBytes);
+    }
+
+    [TestMethod]
     public void DisposedPoolDoesNotRetainPinnedStorageWhileOwnerRemainsAlive()
     {
         using var pool = new SharedFanoutBufferPool(8 * Environment.SystemPageSize);

@@ -174,6 +174,7 @@ public static class CopyEngine
         var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
             source,
             effectiveDestinations, token);
+        PreflightSafety.ValidateRecoveryPaths(source, destinationRoots);
 
         var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
         var destinationDevices = destinationTopology.Destinations.ToArray();
@@ -226,6 +227,7 @@ public static class CopyEngine
             .ToArray();
         var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
         var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
+        var spaceRequirements = new List<DestinationSpaceRequirement>(destinationRoots.Length);
         try
         {
             foreach (var root in destinationRoots)
@@ -249,7 +251,12 @@ public static class CopyEngine
                     preverifiedSkips[fileIndex][slot] = true;
                     skippedPaths.Add(files[fileIndex].RelativePath);
                 }
-                PreflightSafety.EnsureFreeSpace(root, scan.Files, skippedPaths, token);
+                if (scan.Files.Count > 0)
+                    spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
+            }
+            PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
+            foreach (var root in destinationRoots)
+            {
                 foreach (var relative in directories)
                 {
                     token.ThrowIfCancellationRequested();
