@@ -101,10 +101,10 @@
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <TextBox x:Name="SourcePathBox" Height="32" PlaceholderText="Archivo o carpeta de origen" IsReadOnly="True" CornerRadius="6" />
-                            <Button Grid.Column="1" Style="{StaticResource CompactButtonStyle}" Click="PickSourceFile_Click" ToolTipService.ToolTip="Elegir archivo">
+                            <Button x:Name="PickSourceFileButton" Grid.Column="1" Style="{StaticResource CompactButtonStyle}" Click="PickSourceFile_Click" ToolTipService.ToolTip="Elegir archivo">
                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8A5;" FontSize="13"/><TextBlock Text="Archivo"/></StackPanel>
                             </Button>
-                            <Button Grid.Column="2" Style="{StaticResource CompactButtonStyle}" Click="PickSourceFolder_Click" ToolTipService.ToolTip="Elegir carpeta">
+                            <Button x:Name="PickSourceFolderButton" Grid.Column="2" Style="{StaticResource CompactButtonStyle}" Click="PickSourceFolder_Click" ToolTipService.ToolTip="Elegir carpeta">
                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon Glyph="&#xE8B7;" FontSize="13"/><TextBlock Text="Carpeta"/></StackPanel>
                             </Button>
                         </Grid>
@@ -117,10 +117,10 @@
                                 <TextBlock x:Name="DestinationCountText" Text="0 destinos" Opacity="0.58" FontSize="11" VerticalAlignment="Center"/>
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
-                                <Button Height="28" Padding="9,0" CornerRadius="6" Click="AddDestinations_Click">
+                                <Button x:Name="AddDestinationsButton" Height="28" Padding="9,0" CornerRadius="6" Click="AddDestinations_Click">
                                     <StackPanel Orientation="Horizontal" Spacing="5"><FontIcon Glyph="&#xE710;" FontSize="12"/><TextBlock Text="Agregar"/></StackPanel>
                                 </Button>
-                                <Button Width="28" Height="28" Padding="0" CornerRadius="6" Click="ClearDestinations_Click" ToolTipService.ToolTip="Quitar todos">
+                                <Button x:Name="ClearDestinationsButton" Width="28" Height="28" Padding="0" CornerRadius="6" Click="ClearDestinations_Click" ToolTipService.ToolTip="Quitar todos">
                                     <FontIcon Glyph="&#xE74D;" FontSize="12"/>
                                 </Button>
                             </StackPanel>
