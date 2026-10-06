@@ -70,6 +70,30 @@ public sealed class SharedFanoutBufferPoolTests
     }
 
     [TestMethod]
+    public async Task FastDestinationCannotFreeTheSourceWindowWhileSlowDestinationStillOwnsBlocks()
+    {
+        var page = Environment.SystemPageSize;
+        using var pool = new SharedFanoutBufferPool(4 * page);
+        var first = await pool.RentAsync(2 * page, page, 2, CancellationToken.None);
+        var second = await pool.RentAsync(2 * page, page, 2, CancellationToken.None);
+
+        Assert.IsFalse(first.ReleaseReference()); // Fast destination finished block one.
+        Assert.IsFalse(second.ReleaseReference()); // Fast destination finished block two.
+        Assert.AreEqual(pool.CapacityBytes, pool.UsedBytes);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var nextSourceRead = pool.RentAsync(2 * page, page, 2, timeout.Token).AsTask();
+        Assert.IsFalse(nextSourceRead.IsCompleted, "One slow branch retains the entire shared window.");
+
+        Assert.IsTrue(first.ReleaseReference()); // Slow destination finally finishes one block.
+        var third = await nextSourceRead.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.IsFalse(third.ReleaseReference());
+        Assert.IsTrue(third.ReleaseReference());
+        Assert.IsTrue(second.ReleaseReference());
+        Assert.AreEqual(0, pool.UsedBytes);
+    }
+
+    [TestMethod]
     public async Task LeasesArePinnedAndRespectDirectIoAlignment()
     {
         var page = Environment.SystemPageSize;

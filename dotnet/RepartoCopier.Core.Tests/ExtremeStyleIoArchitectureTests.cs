@@ -43,7 +43,7 @@ public sealed class ExtremeStyleIoArchitectureTests
     }
 
     [TestMethod]
-    public void DestinationPathUsesSynchronousSequentialWritesWithoutOverlapped()
+    public void BufferedDestinationUsesAsyncOffsetsWhileDirectPathRetainsItsExistingWriteMode()
     {
         var root = FindRepositoryRoot();
         var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
@@ -52,9 +52,8 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
         Assert.IsTrue(direct.Contains("WriteFile(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("FileFlagOverlapped", StringComparison.Ordinal));
-        Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
-        Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));
+        Assert.IsTrue(coordinator.Contains("await RandomAccess.WriteAsync(handle, data, offset, token)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("var options = FileOptions.Asynchronous | FileOptions.SequentialScan;", StringComparison.Ordinal));
     }
 
     [TestMethod]

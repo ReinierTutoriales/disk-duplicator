@@ -1820,7 +1820,7 @@ public static class CopyEngine
         FileMode mode,
         long preallocationSize)
     {
-        var options = FileOptions.SequentialScan;
+        var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
         return new FileStream(path, new FileStreamOptions
         {
             Mode = mode,
