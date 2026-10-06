@@ -167,9 +167,13 @@
                         </ListView>
 
                         <Expander Grid.Row="4" Header="Opciones" IsExpanded="False" MinHeight="28" HorizontalAlignment="Stretch">
-                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="0,3,0,0">
+                            <StackPanel Spacing="3" Padding="0,3,0,0">
+                              <StackPanel Orientation="Horizontal" Spacing="10">
                                 <CheckBox x:Name="SkipSameCheck" Content="Omitir iguales"/>
                                 <CheckBox x:Name="KeepGoingCheck" Content="Continuar ante error"/>
+                              </StackPanel>
+                                <CheckBox x:Name="VerifyCheck" Content="Verificar contenido al terminar" IsChecked="False"
+                                          ToolTipService.ToolTip="Relee todo el origen y los destinos. Sin esta opción, la copia termina tras escribir y confirmar los archivos, sin comprobar su contenido mediante relectura."/>
                             </StackPanel>
                         </Expander>
                     </Grid>
