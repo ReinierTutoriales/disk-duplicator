@@ -118,7 +118,7 @@ internal sealed class SharedFanoutBufferPool : IDisposable
         }
 
         if (TryFindRunLocked(_cursorPage, _pageReferences.Length, pageCount, alignment, out pageIndex) ||
-            (_cursorPage > 0 && TryFindRunLocked(0, _cursorPage, pageCount, alignment, out pageIndex)))
+            (_cursorPage > 0 && TryFindRunLocked(0, _pageReferences.Length, pageCount, alignment, out pageIndex)))
         {
             for (var page = pageIndex; page < pageIndex + pageCount; page++)
             {
