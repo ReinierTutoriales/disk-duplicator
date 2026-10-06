@@ -809,24 +809,13 @@ public sealed partial class MainWindow : Window
                 };
                 var file = await picker.PickSaveFileAsync();
                 if (file is null) return;
-                var options = new JsonSerializerOptions { WriteIndented = true };
-                options.Converters.Add(new JsonStringEnumConverter());
-                var json = JsonSerializer.Serialize(new
-                {
-                    SchemaVersion = 1,
-                    ApplicationVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(),
-                    StartedAt = startedAt,
-                    Diagnostics = diagnostics,
-                    Destinations = destinations,
-                    MeasurementNotes = new[]
-                    {
-                        "Durations are TimeSpan strings; byte rates use bytes per second.",
-                        "BufferWaitTime measures the complete RentAsync call, including immediate rentals.",
-                        "SourceReadTime includes source scheduler acquisition when a device is shared.",
-                        "WriteTime and flush times aggregate concurrent destinations; they are not COPY wall time.",
-                        "This final snapshot does not record a time series or individual destination completion times.",
-                    },
-                }, options);
+                var assembly = typeof(MainWindow).Assembly;
+                var json = DiagnosticsExport.Serialize(DiagnosticsExport.Create(
+                    assembly.GetName().Version?.ToString(),
+                    BuildInfo.InformationalVersion(assembly),
+                    startedAt,
+                    diagnostics,
+                    destinations));
                 await File.WriteAllTextAsync(file.Path, json);
             }
         }

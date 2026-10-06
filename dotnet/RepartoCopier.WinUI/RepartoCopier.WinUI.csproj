@@ -48,4 +48,14 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
+  <!-- Embeds the full commit SHA in AssemblyInformationalVersion. CI passes -p:SourceRevisionId with
+       the SHA of the actual checked-out commit; local builds fall back to git when it is empty. -->
+  <Target Name="ResolveBuildRevisionFromGit" BeforeTargets="InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git rev-parse --verify HEAD" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_RepartoGitRevision" />
+    </Exec>
+    <PropertyGroup Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(_RepartoGitRevision)', '^[0-9a-f]{40}$'))">
+      <SourceRevisionId>$(_RepartoGitRevision)</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
 </Project>
