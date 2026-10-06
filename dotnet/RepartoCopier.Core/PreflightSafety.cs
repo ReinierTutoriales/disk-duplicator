@@ -18,13 +18,41 @@ internal sealed record SourceTreeScan(
 internal readonly record struct VolumeMetrics(
     ulong AvailableBytes,
     ulong TotalBytes,
-    ulong AllocationGranularity);
+    ulong AllocationGranularity,
+    string VolumeId);
+
+internal sealed record DestinationSpaceRequirement(
+    string DestinationRoot,
+    VolumeMetrics Volume,
+    ulong PeakExtraBytes,
+    ulong BytesToWrite);
 
 internal static class PreflightSafety
 {
     private const ulong GiB = 1024UL * 1024UL * 1024UL;
     private const ulong MinFreeReserve = 1UL * GiB;
     private const ulong MaxFreeReserve = 16UL * GiB;
+
+    internal static void ValidateRecoveryPaths(string source, IReadOnlyList<string> destinations)
+    {
+        foreach (var root in destinations)
+        {
+            var state = StateLayout.StateDirectoryFor(root);
+            var locks = Path.Combine(Path.GetDirectoryName(state)!, ".locks");
+            foreach (var ownedPath in new[] { state, locks })
+            {
+                if (PathsOverlap(source, ownedPath))
+                    throw new IOException($"El origen se solapa con el estado de recuperación: {ownedPath}");
+                foreach (var destination in destinations)
+                    // A single-file copy may target a drive/share root, whose
+                    // state necessarily lives beneath that root. Directory copies
+                    // already use a named child as their effective destination.
+                    if (PathsOverlap(destination, ownedPath) &&
+                        !WindowsPath.SamePath(destination, Path.GetPathRoot(destination)!))
+                        throw new IOException($"El destino se solapa con el estado de recuperación: {ownedPath}");
+            }
+        }
+    }
 
     internal static string CanonicalExisting(string path, string label)
     {
@@ -240,8 +268,16 @@ internal static class PreflightSafety
         IReadOnlySet<string>? skippedRelativePaths = null,
         CancellationToken token = default)
     {
-        if (files.Count == 0)
-            return;
+        if (files.Count > 0)
+            EnsureFreeSpaceForVolumes([EstimateDestinationSpace(destinationRoot, files, skippedRelativePaths, token)]);
+    }
+
+    internal static DestinationSpaceRequirement EstimateDestinationSpace(
+        string destinationRoot,
+        IReadOnlyList<ScannedFile> files,
+        IReadOnlySet<string>? skippedRelativePaths = null,
+        CancellationToken token = default)
+    {
 
         var volume = WindowsNative.GetVolumeMetrics(destinationRoot);
         var granularity = Math.Max(1UL, volume.AllocationGranularity);
@@ -280,14 +316,25 @@ internal static class PreflightSafety
             : peakExtra >= (Int128)ulong.MaxValue
                 ? ulong.MaxValue
                 : (ulong)peakExtra;
-        var reserve = bytesToWrite == 0 ? 0UL : ReserveForVolume(volume.TotalBytes);
-        var required = SaturatingAdd(peak, reserve);
-        if (volume.AvailableBytes >= required)
-            return;
+        return new DestinationSpaceRequirement(destinationRoot, volume, peak, bytesToWrite);
+    }
 
-        var missing = required - volume.AvailableBytes;
-        throw new IOException(
-            $"Espacio insuficiente en {destinationRoot}. Pico requerido: {peak} bytes + reserva: {reserve} bytes; disponible: {volume.AvailableBytes} bytes; faltan: {missing} bytes.");
+    internal static void EnsureFreeSpaceForVolumes(IEnumerable<DestinationSpaceRequirement> requirements)
+    {
+        foreach (var group in requirements.GroupBy(item => item.Volume.VolumeId, StringComparer.OrdinalIgnoreCase))
+        {
+            // Writers progress independently. Sum their individual peaks as a
+            // conservative simultaneous upper bound, with one reserve per volume.
+            var peak = group.Aggregate(0UL, (sum, item) => SaturatingAdd(sum, item.PeakExtraBytes));
+            var available = group.Min(item => item.Volume.AvailableBytes);
+            var reserve = group.Any(item => item.BytesToWrite > 0)
+                ? ReserveForVolume(group.Max(item => item.Volume.TotalBytes)) : 0UL;
+            var required = SaturatingAdd(peak, reserve);
+            if (available >= required) continue;
+            throw new IOException(
+                $"Espacio insuficiente en {string.Join(", ", group.Select(item => item.DestinationRoot))}. " +
+                $"Pico conjunto requerido: {peak} bytes + reserva: {reserve} bytes; disponible: {available} bytes; faltan: {required - available} bytes.");
+        }
     }
 
     internal static ulong RoundUp(ulong value, ulong granularity)
@@ -415,9 +462,14 @@ internal static class WindowsNative
 
     internal static VolumeMetrics GetVolumeMetrics(string path)
     {
-        var root = Path.GetPathRoot(path);
-        if (string.IsNullOrWhiteSpace(root))
-            throw new IOException($"No se pudo determinar el volumen de {path}.");
+        var mountPath = new StringBuilder(32768);
+        if (!GetVolumePathNameW(Path.GetFullPath(path), mountPath, (uint)mountPath.Capacity))
+            throw new IOException($"No se pudo determinar el volumen de {path}: {new Win32Exception(Marshal.GetLastWin32Error()).Message}");
+        var root = mountPath.ToString();
+        var volumeName = new StringBuilder(64);
+        // Remote shares do not have a local volume GUID. Keep their share root.
+        var volumeId = GetVolumeNameForVolumeMountPointW(root, volumeName, (uint)volumeName.Capacity)
+            ? volumeName.ToString() : root;
 
         if (!GetDiskFreeSpaceExW(root, out var available, out var total, out _))
             throw new IOException(
@@ -432,10 +484,20 @@ internal static class WindowsNative
                 $"No se pudo consultar granularidad de asignación en {path}: {new Win32Exception(Marshal.GetLastWin32Error()).Message}");
 
         var granularity = checked((ulong)sectorsPerCluster * bytesPerSector);
-        return new VolumeMetrics(available, total, granularity);
+        return new VolumeMetrics(available, total, granularity, volumeId);
     }
 
 #pragma warning disable SYSLIB1054 // StringBuilder marshaling is clearer here than hand-written buffers.
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumePathNameW(string path, StringBuilder volumePath, uint length);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumeNameForVolumeMountPointW(string mountPoint, StringBuilder volumeName, uint length);
+
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(
