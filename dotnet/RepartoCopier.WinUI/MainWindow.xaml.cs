@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -24,6 +26,7 @@ public sealed partial class MainWindow : Window
     private bool _cancellationRequested;
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
     private IReadOnlyList<DestinationSnapshot> _lastResult = [];
+    private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
     private readonly LogicalProgressRate _copyProgressRate = new();
 
@@ -180,6 +183,7 @@ public sealed partial class MainWindow : Window
             NewCopyButton.Visibility = Visibility.Collapsed;
             ResultDetailsButton.Visibility = Visibility.Collapsed;
             _lastResult = [];
+            _lastDiagnostics = null;
             StartButton.IsEnabled = false;
             PauseButton.IsEnabled = false;
             CancelButton.IsEnabled = true;
@@ -284,6 +288,7 @@ public sealed partial class MainWindow : Window
                 _progressTimer.Stop();
                 var snapshots = observed.Snapshot();
                 _lastResult = snapshots;
+                _lastDiagnostics = observed.DiagnosticsSnapshot();
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
@@ -759,13 +764,18 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            var details = string.Join(Environment.NewLine + Environment.NewLine, _lastResult.Select(item =>
+            var destinations = _lastResult;
+            var diagnostics = _lastDiagnostics;
+            var startedAt = _copyStartedAt;
+            var details = string.Join(Environment.NewLine + Environment.NewLine, destinations.Select(item =>
                 $"{item.Label}\nEstado: {FormatPhase(item.Phase)} · Archivos: {item.FilesDone}/{item.FilesTotal} · Errores: {item.FilesErrored}" +
                 (string.IsNullOrWhiteSpace(item.Error) ? string.Empty : $"\n{item.Error}")));
-            await ShowDialogAsync(new ContentDialog
+            var result = await ShowDialogAsync(new ContentDialog
             {
                 XamlRoot = Root.XamlRoot,
                 Title = "Resultado por destino",
+                PrimaryButtonText = "Guardar diagnóstico",
+                IsPrimaryButtonEnabled = diagnostics is not null,
                 CloseButtonText = "Cerrar",
                 Content = new ScrollViewer
                 {
@@ -773,6 +783,37 @@ public sealed partial class MainWindow : Window
                     Content = new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
                 },
             });
+            if (result == ContentDialogResult.Primary && diagnostics is not null)
+            {
+                var picker = new FileSavePicker(AppWindow.Id)
+                {
+                    Title = "Guardar diagnóstico de copia",
+                    SuggestedFileName = "diagnostico-copia",
+                    DefaultFileExtension = ".json",
+                    FileTypeChoices = { { "Diagnóstico JSON", new List<string> { ".json" } } },
+                };
+                var file = await picker.PickSaveFileAsync();
+                if (file is null) return;
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                options.Converters.Add(new JsonStringEnumConverter());
+                var json = JsonSerializer.Serialize(new
+                {
+                    SchemaVersion = 1,
+                    ApplicationVersion = typeof(MainWindow).Assembly.GetName().Version?.ToString(),
+                    StartedAt = startedAt,
+                    Diagnostics = diagnostics,
+                    Destinations = destinations,
+                    MeasurementNotes = new[]
+                    {
+                        "Durations are TimeSpan strings; byte rates use bytes per second.",
+                        "BufferWaitTime measures the complete RentAsync call, including immediate rentals.",
+                        "SourceReadTime includes source scheduler acquisition when a device is shared.",
+                        "WriteTime and flush times aggregate concurrent destinations; they are not COPY wall time.",
+                        "This final snapshot does not record a time series or individual destination completion times.",
+                    },
+                }, options);
+                await File.WriteAllTextAsync(file.Path, json);
+            }
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
