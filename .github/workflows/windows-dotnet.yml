@@ -61,6 +61,34 @@ jobs:
       - name: Publish portable self-contained build
         run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier
 
+      - name: Smoke-test standalone executable startup and close
+        shell: pwsh
+        run: |
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP "RepartoCopier-smoke-$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Path $smokeDirectory -Force | Out-Null
+          $smokeExe = Join-Path $smokeDirectory 'RepartoCopier.WinUI.exe'
+          Copy-Item 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' $smokeExe
+          $appProcess = $null
+          try {
+            $appProcess = Start-Process -FilePath $smokeExe -WorkingDirectory $smokeDirectory -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $ready = $false
+            while ([DateTime]::UtcNow -lt $deadline) {
+              $appProcess.Refresh()
+              if ($appProcess.HasExited) { throw "Standalone app exited during startup: $($appProcess.ExitCode)" }
+              if ($appProcess.MainWindowHandle -ne [IntPtr]::Zero) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
+            }
+            if (-not $ready) { throw 'Standalone app did not create its window.' }
+            if (-not $appProcess.CloseMainWindow()) { throw 'Standalone app did not accept a normal close request.' }
+            if (-not $appProcess.WaitForExit(10000)) { throw 'Standalone app did not finish normal close.' }
+            if ($appProcess.ExitCode -ne 0) { throw "Standalone app failed on close: $($appProcess.ExitCode)" }
+          }
+          finally {
+            if ($null -ne $appProcess -and -not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
+            Remove-Item $smokeDirectory -Recurse -Force
+          }
+
       - name: Upload downloadable test build
         uses: actions/upload-artifact@v6
         with:
