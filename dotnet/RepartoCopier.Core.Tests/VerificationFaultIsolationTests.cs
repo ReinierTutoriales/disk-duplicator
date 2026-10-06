@@ -30,7 +30,7 @@ public sealed class VerificationFaultIsolationTests
             File.WriteAllBytes(sourceFile, payload);
             var plan = CopyPlan.Create(source, [Path.Combine(root, "blocked"), Path.Combine(root, "healthy")], false, false);
             prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, [plan, CancellationToken.None])!;
+                .Invoke(null, [plan, true, CancellationToken.None])!;
             var preparedType = prepared.GetType();
             var roots = (string[])preparedType.GetProperty("DestinationRoots")!.GetValue(prepared)!;
             var devices = (StorageDeviceInfo[])preparedType.GetProperty("DestinationDevices")!.GetValue(prepared)!;

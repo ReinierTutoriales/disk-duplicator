@@ -30,6 +30,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 - El estado interno vive fuera del árbol copiado en `.disk-duplicator-state` por compatibilidad con recovery existente.
 - La verificación CRC32C final es opcional mediante «Verificar contenido al terminar», desactivada inicialmente. Sin ella se conservan escritura, flush y commit atómico, pero no se comprueba el contenido del destino mediante relectura. La UI distingue «Copiado» de «Verificado» y el JSON registra la opción elegida. Los perfiles conservan su elección de verificación.
 - Recovery y SkipSame conservan sus pruebas BLAKE3 independientes.
+- «Omitir iguales» desactivado fuerza una copia nueva: prepara y recupera temporales de forma segura, pero no relee archivos anteriores para omitirlos por el journal. Con la opción activada, los checkpoints se comprueban por contenido antes de reutilizarlos. La verificación final es una elección independiente.
 - Symlinks, junctions, reparse points y solapamientos peligrosos se rechazan de forma fail-closed.
 
 ## Rendimiento
