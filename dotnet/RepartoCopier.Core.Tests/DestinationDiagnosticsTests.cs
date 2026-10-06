@@ -142,7 +142,7 @@ public sealed class DestinationDiagnosticsTests
     }
 
     [TestMethod]
-    public void ExportUsesSchemaTwoKeepsApplicationVersionAndEmbedsTheBuildRevision()
+    public void ExportUsesSchemaThreeKeepsApplicationVersionAndEmbedsTheBuildRevision()
     {
         var progress = new DestinationProgress("D:\\ISOS", 1024, 1);
         progress.SetDevice("PhysicalDisk5", UsbHdd("D:\\ISOS"));
@@ -160,7 +160,7 @@ public sealed class DestinationDiagnosticsTests
 
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        Assert.AreEqual(2, root.GetProperty("SchemaVersion").GetInt32());
+        Assert.AreEqual(3, root.GetProperty("SchemaVersion").GetInt32());
         Assert.AreEqual("2.1.1.0", root.GetProperty("ApplicationVersion").GetString());
         Assert.AreEqual(Sha, root.GetProperty("BuildRevision").GetString());
         Assert.AreEqual($"2.1.1+{Sha}", root.GetProperty("BuildInformationalVersion").GetString());

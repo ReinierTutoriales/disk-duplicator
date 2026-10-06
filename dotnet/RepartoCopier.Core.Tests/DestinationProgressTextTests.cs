@@ -46,7 +46,8 @@ public sealed class DestinationProgressTextTests
     {
         Assert.AreEqual("Fallido", DestinationProgressText.Format(Snapshot(48, 100, DestinationPhase.Failed)));
         Assert.AreEqual("Cancelado", DestinationProgressText.Format(Snapshot(48, 100, DestinationPhase.Cancelled)));
-        Assert.AreEqual("Completado", DestinationProgressText.Format(Snapshot(100, 100, DestinationPhase.Done)));
+        Assert.AreEqual("Copiado", DestinationProgressText.Format(Snapshot(100, 100, DestinationPhase.Done)));
+        Assert.AreEqual("Verificado", DestinationProgressText.Format(Snapshot(100, 100, DestinationPhase.Done) with { VerifyFinishedAt = TimeSpan.FromSeconds(1) }));
         Assert.AreEqual("Con errores", DestinationProgressText.Format(Snapshot(100, 100, DestinationPhase.Done) with { FilesErrored = 1 }));
     }
 
