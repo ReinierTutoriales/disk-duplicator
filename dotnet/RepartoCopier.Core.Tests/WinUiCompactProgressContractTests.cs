@@ -47,7 +47,7 @@ public sealed class WinUiCompactProgressContractTests
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
         Assert.IsTrue(xaml.Contains("MinWidth=\"56\" MaxWidth=\"148\" Height=\"30\" Padding=\"5,0,2,0\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Width=\"18\" Height=\"18\" Padding=\"0\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("Width=\"24\" Height=\"24\" Padding=\"0\"", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("Margin\" Value=\"0,0,2,0\"", StringComparison.Ordinal));
         Assert.IsFalse(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("VerifyCheck", StringComparison.Ordinal));
