@@ -18,5 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RepartoCopier.Core\RepartoCopier.Core.csproj" />
     <Compile Include="..\RepartoCopier.WinUI\DestinationProgressText.cs" Link="UI\DestinationProgressText.cs" />
+    <Compile Include="..\RepartoCopier.WinUI\BuildInfo.cs" Link="UI\BuildInfo.cs" />
+    <Compile Include="..\RepartoCopier.WinUI\DiagnosticsExport.cs" Link="UI\DiagnosticsExport.cs" />
   </ItemGroup>
 </Project>

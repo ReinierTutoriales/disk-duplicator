@@ -1,0 +1,62 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using RepartoCopier.Core;
+
+namespace RepartoCopier.WinUI;
+
+internal sealed record DiagnosticsDocument(
+    int SchemaVersion,
+    string? ApplicationVersion,
+    string? BuildRevision,
+    string? BuildInformationalVersion,
+    DateTimeOffset? StartedAt,
+    CopyDiagnosticsSnapshot? Diagnostics,
+    IReadOnlyList<DestinationSnapshot> Destinations,
+    IReadOnlyList<string> MeasurementNotes);
+
+internal static class DiagnosticsExport
+{
+    // 2: adds BuildRevision/BuildInformationalVersion and, per destination, device identification,
+    // WriteTime, durable flush counts/times, phase marks, CopyFinishedAt/VerifyFinishedAt, durations and Outcome.
+    internal const int SchemaVersion = 2;
+
+    internal static IReadOnlyList<string> MeasurementNotes { get; } =
+    [
+        "Durations are TimeSpan strings; byte rates use bytes per second.",
+        "Diagnostics.BufferWaitTime measures the complete RentAsync call, including immediate rentals; it is not pure blocking time.",
+        "Diagnostics.SourceReadTime includes source scheduler acquisition when a device is shared.",
+        "Diagnostics.WriteTime, flush, commit and recovery times are summed across concurrent destinations; they are not COPY wall time.",
+        "Destinations[].WriteTime sums only that destination's successful write calls, using the same measurement as Diagnostics.WriteTime. It includes waiting for the per-device I/O gate. Direct writes also include retry delays inside one call; buffered writes record the successful attempt only, excluding earlier failed attempts and retry delays. It excludes flush, commit, file open/close and time spent waiting for data.",
+        "Destinations[].DurableFlushes counts successful durable flushes; DurableFlushTime sums their elapsed time and uses the same boundaries as Diagnostics.DurableFlushTime. Direct flush timing includes FinalizeLength. Failed flush attempts are not recorded.",
+        "Destinations[].CopyStartedAt, CopyFinishedAt, VerifyStartedAt, VerifyFinishedAt and PhaseMarks are offsets from the creation of that destination's progress tracker, which happens after preflight and before the writers start. They are not offsets from Diagnostics.CopyPhaseElapsed.",
+        "Destinations[].TrackingStartedAt is the UTC wall-clock anchor for these monotonic offsets; adding an offset yields the approximate event timestamp. Durations use Stopwatch and are unaffected by later wall-clock adjustments.",
+        "CopyFinishedAt is recorded only when the destination was still copying, no cancellation was requested and every file was finished, skipped or reported as an error. VerifyFinishedAt is recorded only when every verify file of a destination that was still verifying completed. Failed or cancelled destinations keep that state in Outcome and PhaseMarks and never receive a completion mark afterwards.",
+        "Verification reads the source and all destinations per block, so VerifyFinishedAt values are expected to be close to each other; this build did not change that schedule.",
+        "Destinations[].Outcome is Completed, CompletedWithErrors, Failed, Cancelled or InProgress, derived from the final Phase and FilesErrored.",
+        "BuildRevision is the commit SHA embedded at build time (SourceRevisionId) and is null when the build had none.",
+        "This final snapshot does not record a time series.",
+    ];
+
+    internal static DiagnosticsDocument Create(
+        string? applicationVersion,
+        string? informationalVersion,
+        DateTimeOffset? startedAt,
+        CopyDiagnosticsSnapshot? diagnostics,
+        IReadOnlyList<DestinationSnapshot> destinations) =>
+        new(
+            SchemaVersion,
+            applicationVersion,
+            BuildInfo.Revision(informationalVersion),
+            informationalVersion,
+            startedAt,
+            diagnostics,
+            destinations,
+            MeasurementNotes);
+
+    internal static string Serialize(DiagnosticsDocument document)
+    {
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        options.Converters.Add(new JsonStringEnumConverter());
+        return JsonSerializer.Serialize(document, options);
+    }
+}
