@@ -9,12 +9,18 @@ on:
     branches: [main]
     paths:
       - 'dotnet/**'
+      - 'tools/simulate_fanout.py'
+      - 'tools/test_simulate_fanout.py'
+      - 'docs/FANOUT-PERFORMANCE-ROADMAP.md'
       - 'RepartoCopier.sln'
       - '.github/workflows/windows-dotnet.yml'
   push:
     branches: [main]
     paths:
       - 'dotnet/**'
+      - 'tools/simulate_fanout.py'
+      - 'tools/test_simulate_fanout.py'
+      - 'docs/FANOUT-PERFORMANCE-ROADMAP.md'
       - 'RepartoCopier.sln'
       - '.github/workflows/windows-dotnet.yml'
   workflow_dispatch:
@@ -36,6 +42,13 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Test logical FAN-OUT simulator
+        run: python -m unittest discover -s tools -p test_simulate_fanout.py
 
       - name: Restore core tests
         run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
