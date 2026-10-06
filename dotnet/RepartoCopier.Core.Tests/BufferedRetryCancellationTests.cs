@@ -41,11 +41,13 @@ public sealed class BufferedRetryCancellationTests
                 .Invoke(null, [worker, current, block, 0L, job])!;
             await task.WaitAsync(TimeSpan.FromSeconds(5));
             var result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+            Assert.AreEqual("Failed", result.GetType().GetProperty("Status")!.GetValue(result)!.ToString());
             Assert.IsInstanceOfType<OperationCanceledException>(result.GetType().GetProperty("Error")!.GetValue(result));
             Assert.AreEqual(0, pool.UsedBytes);
             Assert.AreEqual(0L, scheduler.QueuedBytes);
             Assert.AreEqual(0L, workerType.GetProperty("PendingPayloadBytes")!.GetValue(worker));
             Assert.AreEqual(1, stream.Attempts);
+            Assert.AreEqual(0L, stream.Length);
             pool.Dispose(); // COPY cleanup must succeed while the job remains alive.
         }
         finally
