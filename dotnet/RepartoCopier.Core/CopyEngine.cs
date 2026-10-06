@@ -105,7 +105,7 @@ public static class CopyEngine
                     SkipSame: plan.SkipSame,
                     KeepGoing: plan.KeepGoing);
 
-        var prepared = Preflight(plan);
+        var prepared = Preflight(plan, options.SkipSame);
         try
         {
             var progress = prepared.DestinationRoots
@@ -133,7 +133,7 @@ public static class CopyEngine
                     SkipSame: plan.SkipSame,
                     KeepGoing: plan.KeepGoing);
 
-        var prepared = await Task.Run(() => Preflight(plan, cancellationToken), cancellationToken).ConfigureAwait(false);
+        var prepared = await Task.Run(() => Preflight(plan, options.SkipSame, cancellationToken), cancellationToken).ConfigureAwait(false);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -151,7 +151,7 @@ public static class CopyEngine
         }
     }
 
-    private static PreparedCopy Preflight(CopyPlan plan, CancellationToken token = default)
+    private static PreparedCopy Preflight(CopyPlan plan, bool reuseCompleted, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
         var requestedSource = Path.GetFullPath(plan.Source);
@@ -241,7 +241,8 @@ public static class CopyEngine
                 token.ThrowIfCancellationRequested();
                 var root = destinationRoots[slot];
                 PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
-                var completed = RecoveryManager.PrepareAndNormalize(sourceRoot, root, recoveryFiles, token);
+                var completed = RecoveryManager.PrepareAndNormalize(
+                    sourceRoot, root, recoveryFiles, token, reuseCompleted: reuseCompleted);
                 var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
                 {

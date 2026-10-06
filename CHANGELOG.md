@@ -2,6 +2,8 @@
 
 ## Unreleased — main
 
+- Preparación de copia nueva: «Omitir iguales» desactivado evita el hash completo del origen y de cada destino anterior en recovery, y deja de omitir archivos por checkpoints antiguos. La elección efectiva de CopyOptions se respeta también si difiere del plan. Conserva leases, limpieza de temporales y restauración de backups; reinicia el journal para que los checkpoints correspondan a los commits de la nueva corrida. Con SkipSame activo se conserva la validación de contenido.
+
 - Verificación final opcional desde WinUI, desactivada inicialmente para medir y usar COPY sin la relectura final. Se conserva la verificación completa al seleccionarla y la elección en perfiles. Los indicadores distinguen Copiado de Verificado; el diagnóstico SchemaVersion 3 añade VerificationRequested, sin alterar los contadores reales. No cambia el motor de escritura, pool, hash del origen, flush, commit ni recovery.
 
 - Diagnóstico JSON `SchemaVersion` 2, solo instrumentación: identificación del disco físico por destino (`DeviceId`, `PhysicalDeviceNumber`, bus, tipo de medio, extraíble, disco compartido), `WriteTime`, `DurableFlushes` y `DurableFlushTime` acumulados por destino, marcas de fase (`PhaseMarks`), `CopyFinishedAt`/`VerifyFinishedAt`, duraciones y `Outcome`. Los destinos cancelados o fallidos conservan su estado y nunca reciben marca de finalización. `MeasurementNotes` documenta qué tiempos incluyen esperas y cuáles son acumulados entre destinos.
@@ -78,4 +80,3 @@ RepartoCopier 2.0.0 establece el nuevo baseline nativo de Windows en C#/.NET 10 
 - Build WinUI Release x64 con 0 warnings y 0 errores en el gate de integración.
 
 La versión histórica v1.4.3 permanece intacta y publicada como referencia de la generación anterior.
-

@@ -123,7 +123,8 @@ internal static class RecoveryManager
         string sourceRoot,
         string destinationRoot,
         IReadOnlyList<RecoveryFile> files,
-        CancellationToken token = default)
+        CancellationToken token = default,
+        bool reuseCompleted = true)
     {
         token.ThrowIfCancellationRequested();
         MigrateStateDirectory(destinationRoot);
@@ -132,7 +133,20 @@ internal static class RecoveryManager
         CleanupOwnedOrphanParts(destinationRoot, token);
         RecoverCompletedRewrite(destinationRoot);
         RecoverManifestRewrite(destinationRoot);
-        var valid = NormalizeCompletedState(destinationRoot, files, token);
+        HashSet<string> valid;
+        if (reuseCompleted)
+        {
+            valid = NormalizeCompletedState(destinationRoot, files, token);
+        }
+        else
+        {
+            // An explicit fresh copy must neither hash previous payloads nor skip them.
+            // Clear the old journal before writers start so only this run's commits
+            // become checkpoints. Temp/backup recovery above remains mandatory.
+            valid = new HashSet<string>(StringComparer.Ordinal);
+            if (File.Exists(StateLayout.JournalPath(destinationRoot)))
+                RewriteCompleted(destinationRoot, valid, token);
+        }
         token.ThrowIfCancellationRequested();
         CompactManifest(destinationRoot, files, token);
         return valid;
