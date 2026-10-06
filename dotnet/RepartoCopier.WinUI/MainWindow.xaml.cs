@@ -409,7 +409,7 @@ public sealed partial class MainWindow : Window
         }
 
         OverallProgressBar.Value = percent;
-        OverallPercentText.Text = $"{percent:0}%";
+        OverallPercentText.Text = $"{DestinationProgressText.FloorPercent(percent)}%";
 
         var activeFileSnapshots = snapshots
             .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)

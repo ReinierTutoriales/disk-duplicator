@@ -7,6 +7,17 @@ namespace RepartoCopier.Core.Tests;
 [TestClass]
 public sealed class DestinationProgressTextTests
 {
+    [TestMethod]
+    public void GlobalPercentageUsesTheSameFloorAsDestinationIndicators()
+    {
+        Assert.AreEqual(8, DestinationProgressText.FloorPercent(8.71));
+        Assert.AreEqual(99, DestinationProgressText.FloorPercent(99.5));
+        Assert.AreEqual(99, DestinationProgressText.FloorPercent(99.999));
+        Assert.AreEqual(100, DestinationProgressText.FloorPercent(100));
+        Assert.AreEqual(0, DestinationProgressText.FloorPercent(-1));
+        Assert.AreEqual(100, DestinationProgressText.FloorPercent(101));
+    }
+
     private static DestinationSnapshot Snapshot(ulong written, ulong total, DestinationPhase phase) =>
         new("D:\\Backup\\Source", written, total, 0, 0, 0, 0, 0, phase, null, "", 0, 0);
 
