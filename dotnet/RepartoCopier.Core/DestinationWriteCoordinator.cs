@@ -3,8 +3,8 @@ using Microsoft.Win32.SafeHandles;
 namespace RepartoCopier.Core;
 
 /// <summary>
-/// One stable synchronous write per physical destination. Different physical
-/// destinations still run in parallel through their independent writer loops.
+/// One offset-based asynchronous write at a time per physical destination.
+/// Different devices retain independent writer loops and schedulers.
 /// </summary>
 internal static class DestinationWriteCoordinator
 {
@@ -25,7 +25,7 @@ internal static class DestinationWriteCoordinator
 
         using var lease = await scheduler.AcquireIoAsync(data.Length, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
-        RandomAccess.Write(handle, data.Span, offset);
+        await RandomAccess.WriteAsync(handle, data, offset, token).ConfigureAwait(false);
         return 1;
     }
 }

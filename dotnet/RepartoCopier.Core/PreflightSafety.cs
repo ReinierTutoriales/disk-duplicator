@@ -36,13 +36,15 @@ internal static class PreflightSafety
 
     internal static string[] ValidateAndCanonicalizeDestinations(
         string overlapPath,
-        IEnumerable<string> effectiveDestinations)
+        IEnumerable<string> effectiveDestinations,
+        CancellationToken token = default)
     {
         var source = CanonicalExisting(overlapPath, "origen");
         var canonical = new List<string>();
 
         foreach (var requested in effectiveDestinations)
         {
+            token.ThrowIfCancellationRequested();
             var full = Path.GetFullPath(requested);
             if (PathsOverlap(source, full))
                 throw new IOException($"El destino {requested} se solapa con el origen.");
@@ -71,8 +73,9 @@ internal static class PreflightSafety
         return [.. canonical];
     }
 
-    internal static SourceTreeScan ScanDirectory(string sourceRoot)
+    internal static SourceTreeScan ScanDirectory(string sourceRoot, CancellationToken token = default)
     {
+        token.ThrowIfCancellationRequested();
         var directories = new List<string>();
         var files = new List<ScannedFile>();
         var pending = new Stack<string>();
@@ -80,9 +83,11 @@ internal static class PreflightSafety
 
         while (pending.Count > 0)
         {
+            token.ThrowIfCancellationRequested();
             var directory = pending.Pop();
             foreach (var entry in EnumerateDirectoryEntries(directory))
             {
+                token.ThrowIfCancellationRequested();
                 FileAttributes attributes;
                 try
                 {
@@ -154,10 +159,10 @@ internal static class PreflightSafety
         }
     }
 
-    internal static void ValidateSourceTreeSnapshot(string sourceRoot, SourceTreeScan expected)
+    internal static void ValidateSourceTreeSnapshot(string sourceRoot, SourceTreeScan expected, CancellationToken token = default)
     {
         WindowsPath.EnsureNormalDirectory(sourceRoot, "El origen");
-        var current = ScanDirectory(sourceRoot);
+        var current = ScanDirectory(sourceRoot, token);
 
         if (current.Directories.Count != expected.Directories.Count ||
             current.Files.Count != expected.Files.Count)
@@ -192,10 +197,12 @@ internal static class PreflightSafety
     internal static void ValidateDestinationLayout(
         string destinationRoot,
         IEnumerable<string> directories,
-        IEnumerable<ScannedFile> files)
+        IEnumerable<ScannedFile> files,
+        CancellationToken token = default)
     {
         foreach (var relative in directories)
         {
+            token.ThrowIfCancellationRequested();
             var target = Path.Combine(destinationRoot, relative);
             if (File.Exists(target))
                 throw new IOException(
@@ -206,6 +213,7 @@ internal static class PreflightSafety
 
         foreach (var file in files)
         {
+            token.ThrowIfCancellationRequested();
             var current = destinationRoot;
             var parts = file.RelativePath.Split(
                 Path.DirectorySeparatorChar,
@@ -229,7 +237,8 @@ internal static class PreflightSafety
     internal static void EnsureFreeSpace(
         string destinationRoot,
         IReadOnlyList<ScannedFile> files,
-        IReadOnlySet<string>? skippedRelativePaths = null)
+        IReadOnlySet<string>? skippedRelativePaths = null,
+        CancellationToken token = default)
     {
         if (files.Count == 0)
             return;
@@ -242,6 +251,7 @@ internal static class PreflightSafety
 
         foreach (var file in files)
         {
+            token.ThrowIfCancellationRequested();
             if (skippedRelativePaths?.Contains(file.RelativePath) == true)
                 continue;
             var destination = Path.Combine(destinationRoot, file.RelativePath);

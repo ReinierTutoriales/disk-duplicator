@@ -43,7 +43,7 @@ public sealed class ExtremeStyleIoArchitectureTests
     }
 
     [TestMethod]
-    public void DestinationPathUsesSynchronousSequentialWritesWithoutOverlapped()
+    public void BufferedDestinationUsesAsyncOffsetsWhileDirectPathRetainsItsExistingWriteMode()
     {
         var root = FindRepositoryRoot();
         var direct = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.Core", "DirectIoDestinationWriter.cs"));
@@ -52,9 +52,8 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsTrue(direct.Contains("FileFlagNoBuffering | FileFlagSequentialScan", StringComparison.Ordinal));
         Assert.IsTrue(direct.Contains("WriteFile(handle", StringComparison.Ordinal));
         Assert.IsFalse(direct.Contains("FileFlagOverlapped", StringComparison.Ordinal));
-        Assert.IsFalse(coordinator.Contains("RandomAccess.WriteAsync", StringComparison.Ordinal));
-        Assert.IsTrue(coordinator.Contains("RandomAccess.Write(handle", StringComparison.Ordinal));
-        Assert.IsTrue(engine.Contains("var options = FileOptions.SequentialScan;", StringComparison.Ordinal));
+        Assert.IsTrue(coordinator.Contains("await RandomAccess.WriteAsync(handle, data, offset, token)", StringComparison.Ordinal));
+        Assert.IsTrue(engine.Contains("var options = FileOptions.Asynchronous | FileOptions.SequentialScan;", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -75,7 +74,13 @@ public sealed class ExtremeStyleIoArchitectureTests
         Assert.IsFalse(scheduler.Contains("RecordTransientFailure", StringComparison.Ordinal));
         Assert.IsFalse(engine.Contains("RecordTransientFailure", StringComparison.Ordinal));
         Assert.IsTrue(engine.Contains("DelayTransientRetryAsync", StringComparison.Ordinal));
-        Assert.IsFalse(engine.Contains("return await ReadVerifyTargetAsync", StringComparison.Ordinal));
+        var readStart = engine.IndexOf("private static async Task<int> ReadVerifyTargetAsync(", StringComparison.Ordinal);
+        var readEnd = engine.IndexOf("private static Task DelayTransientRetryAsync(", readStart, StringComparison.Ordinal);
+        Assert.IsTrue(readStart >= 0 && readEnd > readStart);
+        // Only self-calls inside the retry method indicate recursion. The
+        // destination isolation wrapper legitimately awaits this method once.
+        var bodyStart = engine.IndexOf('{', readStart);
+        Assert.IsFalse(engine[bodyStart..readEnd].Contains("ReadVerifyTargetAsync(", StringComparison.Ordinal));
     }
 
     [TestMethod]
