@@ -702,7 +702,10 @@ public sealed partial class MainWindow : Window
 
     private void SetEditingEnabled(bool enabled)
     {
-        PreparationPanel.IsEnabled = enabled;
+        PickSourceFileButton.IsEnabled = enabled;
+        PickSourceFolderButton.IsEnabled = enabled;
+        AddDestinationsButton.IsEnabled = enabled;
+        ClearDestinationsButton.IsEnabled = enabled;
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
         SkipSameCheck.IsEnabled = enabled;
