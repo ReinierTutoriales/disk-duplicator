@@ -669,7 +669,11 @@ public sealed partial class MainWindow : Window
         catch { }
     }
 
-    private void Exit_Click(object sender, RoutedEventArgs e) => Close();
+    private void Exit_Click(object sender, RoutedEventArgs e)
+    {
+        if (_job is null && _preparationCancel is null) Close();
+        else BeginSafeClose();
+    }
 
     private async Task OfferShutdownAsync()
     {
@@ -729,6 +733,11 @@ public sealed partial class MainWindow : Window
     {
         if (_job is null && _preparationCancel is null) return;
         args.Cancel = true;
+        BeginSafeClose();
+    }
+
+    private void BeginSafeClose()
+    {
         _closeRequested = true;
         _cancellationRequested = true;
         _preparationCancel?.Cancel();
