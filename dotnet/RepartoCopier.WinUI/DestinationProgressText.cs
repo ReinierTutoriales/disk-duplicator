@@ -14,6 +14,8 @@ internal static class DestinationProgressText
         _ => "Preparando",
     };
 
+    internal static int FloorPercent(double percent) => (int)Math.Clamp(Math.Floor(percent), 0, 100);
+
     private static int Percent(ulong bytes, ulong total) => total == 0
-        ? 0 : (int)Math.Clamp(Math.Floor(bytes * 100d / total), 0, 100);
+        ? 0 : FloorPercent(bytes * 100d / total);
 }
