@@ -45,6 +45,22 @@ class FanoutModelTests(unittest.TestCase):
         second = simulate(512, 1600, targets)
         self.assertEqual(first["destinations"], second["destinations"])
 
+    def test_inline_hash_is_serial_with_the_read_and_caps_a_solo_destination(self):
+        # 7000 MiB/s read + 5000 MiB/s hash in series -> 1 / (1/7000 + 1/5000) = 2916.7 MiB/s,
+        # below the 3000 MiB/s destination, so the producer (not the disk) is the limit.
+        run = simulate(2048, 7000, [Target("fast", 3000)], hash_rate=5000)
+        expected = 2048 / (1 / (1 / 7000 + 1 / 5000)) + 8 / 3000
+        self.assertAlmostEqual(run["destinations"]["fast"]["finished_s"], expected, delta=.02)
+        without = simulate(2048, 7000, [Target("fast", 3000)])
+        self.assertGreater(run["destinations"]["fast"]["finished_s"],
+                           without["destinations"]["fast"]["finished_s"])
+
+    def test_inline_hash_does_not_change_a_job_bound_by_the_slowest_destination(self):
+        targets = [Target("fast", 1000), Target("slow", 40)]
+        plain = simulate(1024, 1600, targets)
+        hashed = simulate(1024, 1600, targets, hash_rate=5000)
+        self.assertAlmostEqual(plain["job_finished_s"], hashed["job_finished_s"], delta=.5)
+
 
 if __name__ == "__main__":
     unittest.main()
