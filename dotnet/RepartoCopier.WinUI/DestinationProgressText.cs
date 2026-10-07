@@ -10,7 +10,7 @@ internal static class DestinationProgressText
         DestinationPhase.Copying => $"Copia {Percent(snapshot.Written, snapshot.Total)}%",
         DestinationPhase.Verifying => $"Verif. {Percent(snapshot.VerifiedBytes, snapshot.VerifyBytesTotal)}%",
         DestinationPhase.Done => snapshot.FilesErrored > 0 ? "Con errores"
-            : snapshot.VerifyFinishedAt is not null ? "Verificado" : "Copiado",
+            : snapshot.VerifyFinishedAt is not null && snapshot.FilesSkipped == 0 ? "Verificado" : "Copiado",
         DestinationPhase.Failed => "Fallido",
         DestinationPhase.Cancelled => "Cancelado",
         _ => "Preparando",
@@ -18,7 +18,8 @@ internal static class DestinationProgressText
 
     internal static string Verification(DestinationSnapshot snapshot) =>
         snapshot.VerifyFinishedAt is not null && snapshot.FilesErrored == 0 &&
-        snapshot.Phase == DestinationPhase.Done ? "Completada"
+        snapshot.Phase == DestinationPhase.Done ? snapshot.FilesSkipped > 0
+            ? "Completada para los copiados; omitidos sin verificar" : "Completada"
         : snapshot.VerifyStartedAt is not null ? "Incompleta" : "No realizada";
 
     internal static int FloorPercent(double percent) => (int)Math.Clamp(Math.Floor(percent), 0, 100);
