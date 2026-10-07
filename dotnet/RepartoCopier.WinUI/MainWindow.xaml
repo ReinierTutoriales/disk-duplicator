@@ -67,7 +67,7 @@
         <InfoBar x:Name="ErrorBar" Grid.Row="1" IsOpen="False" Severity="Error" IsClosable="True" />
         <ScrollViewer x:Name="MainContentScroll" Grid.Row="2" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
-        <Grid Margin="4,0,4,2" HorizontalAlignment="Stretch">
+        <Grid Margin="4,0,4,16" HorizontalAlignment="Stretch">
 
             <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="4" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
@@ -166,11 +166,13 @@
                             </ListView.ItemTemplate>
                         </ListView>
 
-                        <Expander Grid.Row="4" Header="Opciones" IsExpanded="False" MinHeight="28" HorizontalAlignment="Stretch">
+                        <Expander x:Name="OptionsExpander" Grid.Row="4" Header="Opciones" IsExpanded="False" MinHeight="28" HorizontalAlignment="Stretch">
                             <StackPanel Spacing="3" Padding="0,3,0,0">
                               <StackPanel Orientation="Horizontal" Spacing="10">
                                 <CheckBox x:Name="KeepGoingCheck" Content="Continuar ante error"/>
                               </StackPanel>
+                                <CheckBox x:Name="IndependentReadsCheck" Content="Lecturas independientes (prueba; origen NVMe/SSD interno)" IsChecked="False"
+                                          ToolTipService.ToolTip="Cada destino lee el origen por separado y usa un pool acotado. Permite que un USB lento no retenga los bloques de un NVMe. Puede aumentar la carga del origen y CPU; comparar diagnóstico por destino."/>
                                 <CheckBox x:Name="VerifyCheck" Content="Verificar contenido al terminar" IsChecked="False"
                                           ToolTipService.ToolTip="Relee todo el origen y los destinos. Sin esta opción, la copia termina tras escribir y confirmar los archivos, sin comprobar su contenido mediante relectura."/>
                             </StackPanel>
