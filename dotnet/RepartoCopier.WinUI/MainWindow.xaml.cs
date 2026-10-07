@@ -856,15 +856,14 @@ public sealed partial class MainWindow : Window
         var details = string.Join(
             Environment.NewLine,
             conflict.Destinations.Select(item =>
-                $"{item.Destination}: {item.ExistingFiles} de {item.TotalFiles} archivos ya existen" +
-                (item.Examples.Count == 0 ? string.Empty : $" ({string.Join(", ", item.Examples)}…)")));
+                $"{item.Destination}: {item.ExistingFiles} de {item.TotalFiles} archivos ya existen"));
         var choices = new RadioButtons
         {
             Items =
             {
-                "Conservar existentes: no se toca ningún archivo que ya exista",
-                "Comparar contenido: omitir idénticos y reemplazar los distintos",
-                "Reemplazar todos los existentes sin comparar",
+                "Conservar existentes",
+                "Omitir idénticos y reemplazar distintos",
+                "Reemplazar todos sin comparar",
             },
         };
         var dialog = new ContentDialog
@@ -874,7 +873,17 @@ public sealed partial class MainWindow : Window
             Content = new StackPanel
             {
                 Spacing = 12,
-                Children = { new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap }, choices },
+                Children =
+                {
+                    choices,
+                    new ScrollViewer
+                    {
+                        MaxHeight = 80,
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        Content = new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap },
+                    },
+                },
             },
             PrimaryButtonText = "Continuar",
             CloseButtonText = "Cancelar",
