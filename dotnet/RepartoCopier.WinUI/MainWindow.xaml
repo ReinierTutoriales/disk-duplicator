@@ -224,7 +224,7 @@
                                 <ComboBoxItem Content="Reemplazar todos"/>
                             </ComboBox>
                             <CheckBox x:Name="IndependentReadsCheck" IsChecked="True"
-                                      ToolTipService.ToolTip="Cada destino lee el origen a su ritmo con su propio búfer: un USB lento no frena a un NVMe. Se usa automáticamente con origen SSD NVMe/SATA local, de 2 a 16 destinos y sin destinos en el mismo disco; si no, se usa la lectura compartida.">
+                                      ToolTipService.ToolTip="Cada destino lee el origen a su ritmo con su propio búfer: un destino lento no frena a los rápidos. Funciona con cualquier origen (HDD, SSD, NVMe, USB) y de 2 a 16 destinos. Con HDD o USB los lectores leen por turnos. Desactívala para leer el origen una sola vez para todos los destinos (mejor con origen lento y destinos de velocidad parecida).">
                                 <TextBlock Text="Lectura independiente por destino (recomendado)" TextWrapping="Wrap"/>
                             </CheckBox>
                             <CheckBox x:Name="VerifyCheck" IsChecked="False"
