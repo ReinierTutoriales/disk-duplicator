@@ -170,6 +170,7 @@ public sealed class ExistingFilePolicyTests
         Assert.AreEqual(PreflightSafety.ExistingFileAction.Keep, PreflightSafety.Decide(ExistingFilePolicy.KeepExisting, exists: true));
         Assert.AreEqual(PreflightSafety.ExistingFileAction.ReplaceAllowed, PreflightSafety.Decide(ExistingFilePolicy.ReplaceDifferent, exists: true));
         Assert.AreEqual(PreflightSafety.ExistingFileAction.ReplaceAllowed, PreflightSafety.Decide(ExistingFilePolicy.ReplaceAll, exists: true));
+        Assert.AreEqual(PreflightSafety.ExistingFileAction.ReplaceAllowed, PreflightSafety.Decide(ExistingFilePolicy.ReplaceMetadataDifferent, exists: true));
         Assert.ThrowsExactly<InvalidOperationException>(() => PreflightSafety.Decide(null, exists: true));
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => PreflightSafety.Decide((ExistingFilePolicy)99, exists: true));
         Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => PreflightSafety.Decide((ExistingFilePolicy)(-1), exists: false));
@@ -262,6 +263,7 @@ public sealed class ExistingFilePolicyTests
     [TestMethod]
     [DataRow(ExistingFilePolicy.ReplaceAll)]
     [DataRow(ExistingFilePolicy.ReplaceDifferent)]
+    [DataRow(ExistingFilePolicy.ReplaceMetadataDifferent)]
     public async Task ReplacePoliciesReplaceAFileThatRecoveryRestoredWithoutFailingTheCommit(ExistingFilePolicy policy)
     {
         if (!OperatingSystem.IsWindows())
@@ -304,7 +306,9 @@ public sealed class ExistingFilePolicyTests
     }
 
     [TestMethod]
-    public async Task AFileThatAppearsAfterAnalysisIsNeverReplaced()
+    [DataRow(ExistingFilePolicy.ReplaceAll)]
+    [DataRow(ExistingFilePolicy.ReplaceMetadataDifferent)]
+    public async Task AFileThatAppearsAfterAnalysisIsNeverReplaced(ExistingFilePolicy policy)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -316,7 +320,7 @@ public sealed class ExistingFilePolicyTests
         await File.WriteAllBytesAsync(Path.Combine(source, "a.bin"), [1, 2, 3]);
         await File.WriteAllBytesAsync(Path.Combine(source, "b.bin"), [4, 5, 6]);
         var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
-        var plan = CopyPlan.Create(source, [destinationBase], ExistingFilePolicy.ReplaceAll, keepGoing: true);
+        var plan = CopyPlan.Create(source, [destinationBase], policy, keepGoing: true);
 
         // Run the real engine with its pause gate closed before the producer can start.
         var prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.Static | BindingFlags.NonPublic)!

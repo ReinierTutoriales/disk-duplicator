@@ -270,6 +270,15 @@ public static class CopyEngine
                             skippedPaths.Add(files[fileIndex].RelativePath);
                             break;
                         case PreflightSafety.ExistingFileAction.ReplaceAllowed:
+                            if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
+                                PreflightSafety.MatchesMetadata(
+                                    Path.Combine(root, files[fileIndex].RelativePath),
+                                    files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc))
+                            {
+                                preverifiedSkips[fileIndex][slot] = true;
+                                skippedPaths.Add(files[fileIndex].RelativePath);
+                                break;
+                            }
                             // Only a file seen at analysis time may be replaced at commit time.
                             replaceAllowed[fileIndex][slot] = true;
                             break;
@@ -475,6 +484,15 @@ public static class CopyEngine
                 {
                     if (skipMasks[fileIndex][slot])
                     {
+                        // Space was reserved excluding metadata matches. If one changed after preparation,
+                        // fail closed instead of skipping stale metadata or replacing without a reservation.
+                        if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
+                        {
+                            var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                            ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                            if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
+                                throw new IOException($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
+                        }
                         progress[slot].MarkSkipped((ulong)entry.Size);
                         continue;
                     }
