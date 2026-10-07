@@ -166,7 +166,7 @@
                             </ListView.ItemTemplate>
                         </ListView>
 
-                        <Expander Grid.Row="4" Header="Opciones" IsExpanded="False" MinHeight="28" HorizontalAlignment="Stretch">
+                        <Expander x:Name="OptionsExpander" Grid.Row="4" Header="Opciones" IsExpanded="False" MinHeight="28" HorizontalAlignment="Stretch">
                             <StackPanel Spacing="3" Padding="0,3,0,0">
                               <StackPanel Orientation="Horizontal" Spacing="10">
                                 <CheckBox x:Name="KeepGoingCheck" Content="Continuar ante error"/>

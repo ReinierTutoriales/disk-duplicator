@@ -31,7 +31,12 @@ public sealed partial class MainWindow
             await SettleLayoutAsync();
             foreach (var control in new FrameworkElement[] { StartButton, PickSourceFileButton, PickSourceFolderButton,
                 AddDestinationsButton, ClearDestinationsButton }) await CheckReachableAsync(control);
-            report.Add($"Preparation {theme} {size.Width}×{size.Height} DIP: actions reachable and labels fit.");
+            OptionsExpander.IsExpanded = true;
+            await SettleLayoutAsync();
+            await CheckReachableAsync(IndependentReadsCheck);
+            await CheckReachableAsync(VerifyCheck);
+            OptionsExpander.IsExpanded = false;
+            report.Add($"Preparation {theme} {size.Width}×{size.Height} DIP: actions and expanded options reachable; labels fit.");
             ShowRunningView();
             RunningDestinationScroll.Visibility = Visibility.Visible;
             foreach (var drive in new[] { "D", "F", "G", "I", "J" })
