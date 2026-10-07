@@ -8,9 +8,20 @@ public partial class App : Application
 
     public App() => InitializeComponent();
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         MainWindow = new MainWindow();
         MainWindow.Activate();
+        var commandLine = Environment.GetCommandLineArgs();
+        if (commandLine.Length == 3 && commandLine[1] == "--layout-check")
+        {
+            try { await MainWindow.RunLayoutCheckAsync(commandLine[2]); }
+            catch (Exception ex)
+            {
+                Environment.ExitCode = 1;
+                await File.WriteAllTextAsync(commandLine[2], ex.ToString());
+            }
+            finally { MainWindow.Close(); }
+        }
     }
 }

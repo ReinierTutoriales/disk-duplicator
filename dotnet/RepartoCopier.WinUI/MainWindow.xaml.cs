@@ -7,7 +7,6 @@ using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.Windows.Storage.Pickers;
 using RepartoCopier.Core;
 using Windows.Graphics;
@@ -16,8 +15,6 @@ namespace RepartoCopier.WinUI;
 
 public sealed partial class MainWindow : Window
 {
-    private const string ProjectUrl = "https://github.com/ReinierTutoriales/disk-duplicator";
-    private const string LicenseUrl = "https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE";
 
     private readonly ObservableCollection<DestinationRow> _destinations = [];
     private readonly ObservableCollection<RunningDestinationRow> _runningDestinations = [];
@@ -27,6 +24,7 @@ public sealed partial class MainWindow : Window
     private bool _closeRequested;
     private bool _cancellationRequested;
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
+    private readonly CancellationTokenSource _windowLifetime = new();
     private IReadOnlyList<DestinationSnapshot> _lastResult = [];
     private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
@@ -50,14 +48,36 @@ public sealed partial class MainWindow : Window
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
         AppWindow.Closing += MainWindow_Closing;
+        AppWindow.Changed += (_, change) =>
+        {
+            if (change.DidPositionChange || change.DidSizeChange) UpdateWindowMinimum();
+        };
+        UpdateWindowMinimum();
         TryLoadLaunchSource();
     }
 
     private void ResizeForCurrentDpi(SizeInt32 size)
     {
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        var scale = Math.Max(96u, GetDpiForWindow(hwnd)) / 96.0;
-        AppWindow.Resize(new SizeInt32((int)Math.Ceiling(size.Width * scale), (int)Math.Ceiling(size.Height * scale)));
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Nearest).WorkArea;
+        var frameWidth = Math.Max(0, AppWindow.Size.Width - AppWindow.ClientSize.Width);
+        var frameHeight = Math.Max(0, AppWindow.Size.Height - AppWindow.ClientSize.Height);
+        var client = WindowGeometry.Client(size.Width, size.Height, GetDpiForWindow(hwnd),
+            area.Width, area.Height, frameWidth, frameHeight);
+        AppWindow.ResizeClient(new SizeInt32(client.Width, client.Height));
+    }
+
+    private void UpdateWindowMinimum()
+    {
+        if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter presenter) return;
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Nearest).WorkArea;
+        var minimum = WindowGeometry.Minimum(GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)),
+            area.Width, area.Height, Math.Max(0, AppWindow.Size.Width - AppWindow.ClientSize.Width),
+            Math.Max(0, AppWindow.Size.Height - AppWindow.ClientSize.Height));
+        if (presenter.PreferredMinimumWidth != minimum.Width) presenter.PreferredMinimumWidth = minimum.Width;
+        if (presenter.PreferredMinimumHeight != minimum.Height) presenter.PreferredMinimumHeight = minimum.Height;
     }
 
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
@@ -533,46 +553,15 @@ public sealed partial class MainWindow : Window
 
     private async Task ShowSettingsAsync()
     {
-        var themeBox = new ComboBox { Header = "Tema", Width = 300 };
-        themeBox.Items.Add(new ComboBoxItem { Content = "Sistema", Tag = "Default" });
-        themeBox.Items.Add(new ComboBoxItem { Content = "Claro", Tag = "Light" });
-        themeBox.Items.Add(new ComboBoxItem { Content = "Oscuro", Tag = "Dark" });
-        themeBox.SelectedIndex = Root.RequestedTheme switch
+        var selected = Root.RequestedTheme switch
         {
-            ElementTheme.Light => 1,
-            ElementTheme.Dark => 2,
-            _ => 0,
-        };
-
-        var content = new StackPanel { Spacing = 12, Width = 320 };
-        content.Children.Add(new TextBlock
-        {
-            Text = "Apariencia",
-            FontSize = 14,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        });
-        content.Children.Add(themeBox);
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = Root.XamlRoot,
-            Title = "Ajustes",
-            PrimaryButtonText = "Aplicar",
-            CloseButtonText = "Cerrar",
-            DefaultButton = ContentDialogButton.Primary,
-            Content = content,
-        };
-
-        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary ||
-            themeBox.SelectedItem is not ComboBoxItem item)
-            return;
-
-        var theme = item.Tag?.ToString() switch
-        {
-            "Light" => ThemePreference.Light,
-            "Dark" => ThemePreference.Dark,
+            ElementTheme.Light => ThemePreference.Light,
+            ElementTheme.Dark => ThemePreference.Dark,
             _ => ThemePreference.System,
         };
+        var chosen = await ShowNativeDialogAsync(() => NativeAppDialogs.Settings(
+            WinRT.Interop.WindowNative.GetWindowHandle(this), selected, _windowLifetime.Token));
+        if (chosen is not { } theme) return;
         Root.RequestedTheme = theme switch
         {
             ThemePreference.Light => ElementTheme.Light,
@@ -594,128 +583,15 @@ public sealed partial class MainWindow : Window
         AboutMenuButton.Background = ResolveBrush("AccentFillColorSecondaryBrush");
         try
         {
-            var dialog = new ContentDialog
-            {
-                XamlRoot = Root.XamlRoot,
-                PrimaryButtonText = "Cerrar",
-                DefaultButton = ContentDialogButton.Primary,
-            };
-
-            var root = new Grid { Width = 470 };
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-            var closeButton = new Button
-            {
-                Width = 32,
-                Height = 32,
-                Padding = new Thickness(0),
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Top,
-                Content = new FontIcon { Glyph = "\uE711", FontSize = 13 },
-            };
-            ToolTipService.SetToolTip(closeButton, "Cerrar");
-            closeButton.Click += (_, _) => dialog.Hide();
-            root.Children.Add(closeButton);
-
-            var header = new Grid { Margin = new Thickness(0, 14, 42, 16), ColumnSpacing = 16 };
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            var logoTile = new Border
-            {
-                Width = 64,
-                Height = 64,
-                CornerRadius = new CornerRadius(12),
-                Child = new Image
-                {
-                    Width = 64,
-                    Height = 64,
-                    Stretch = Stretch.Uniform,
-                    Source = new BitmapImage(new Uri("ms-appx:///Assets/AppLogo.png")),
-                },
-            };
-            header.Children.Add(logoTile);
-
-            var brand = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
-            brand.Children.Add(new TextBlock
-            {
-                Text = "RepartoCopier",
-                FontSize = 22,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            });
-            brand.Children.Add(new TextBlock
-            {
-                Text = "Copias rápidas y seguras para Windows.",
-                FontSize = 13,
-                Opacity = 0.70,
-            });
-            Grid.SetColumn(brand, 1);
-            header.Children.Add(brand);
-            Grid.SetRow(header, 1);
-            root.Children.Add(header);
-
             var version = typeof(MainWindow).Assembly.GetName().Version;
-            var displayVersion = version is null
-                ? "desconocida"
+            var displayVersion = version is null ? "desconocida"
                 : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
-            var body = new StackPanel { Spacing = 8 };
-            body.Children.Add(new TextBlock { Text = $"Versión {displayVersion}", FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-            body.Children.Add(new TextBlock { Text = "© 2026 ReinierTutoriales\nTodos los derechos reservados.", FontSize = 13, Opacity = 0.82 });
-            body.Children.Add(new Border
+            await ShowNativeDialogAsync(() =>
             {
-                Height = 1,
-                Margin = new Thickness(0, 8, 0, 8),
-                Background = ResolveBrush("DividerStrokeColorDefaultBrush"),
+                NativeAppDialogs.About(WinRT.Interop.WindowNative.GetWindowHandle(this),
+                    displayVersion, OpenExternalUrl, _windowLifetime.Token);
+                return false;
             });
-            body.Children.Add(new TextBlock { Text = "Gracias por usar RepartoCopier. ❤️", FontSize = 13 });
-            body.Children.Add(new TextBlock { Text = "¡Dale ❤️ al proyecto en GitHub!", FontSize = 13 });
-
-            var actions = new Grid { Margin = new Thickness(0, 8, 0, 0), ColumnSpacing = 10 };
-            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            var githubButton = new Button
-            {
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Height = 40,
-                Content = new StackPanel
-                {
-                    Orientation = Orientation.Horizontal,
-                    Spacing = 8,
-                    Children =
-                    {
-                        new Image
-                        {
-                            Width = 17,
-                            Height = 17,
-                            Source = new SvgImageSource { UriSource = new Uri("ms-appx:///Assets/GitHubMark.svg") },
-                        },
-                        new TextBlock { Text = "Ver en GitHub" },
-                    },
-                },
-            };
-            githubButton.Click += (_, _) => OpenExternalUrl(ProjectUrl);
-            actions.Children.Add(githubButton);
-
-            var licenseButton = new Button
-            {
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Height = 40,
-                Content = "Licencias de terceros",
-            };
-            licenseButton.Click += (_, _) => OpenExternalUrl(LicenseUrl);
-            Grid.SetColumn(licenseButton, 1);
-            actions.Children.Add(licenseButton);
-            body.Children.Add(actions);
-
-            Grid.SetRow(body, 2);
-            root.Children.Add(body);
-            dialog.Content = root;
-            await ShowDialogAsync(dialog);
         }
         finally
         {
@@ -740,16 +616,8 @@ public sealed partial class MainWindow : Window
 
     private async Task OfferShutdownAsync()
     {
-        var dialog = new ContentDialog
-        {
-            XamlRoot = Root.XamlRoot,
-            Title = "Copia completada",
-            Content = "El equipo se apagará en 60 segundos. Puedes cancelar el apagado desde Windows con shutdown /a.",
-            PrimaryButtonText = "Apagar",
-            CloseButtonText = "No apagar",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
+        if (await ShowNativeDialogAsync(() => NativeAppDialogs.Shutdown(
+            WinRT.Interop.WindowNative.GetWindowHandle(this), _windowLifetime.Token)))
             Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
     }
 
@@ -788,6 +656,7 @@ public sealed partial class MainWindow : Window
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        _windowLifetime.Cancel();
         _progressTimer.Stop();
         _job?.RequestCancel();
     }
@@ -826,24 +695,10 @@ public sealed partial class MainWindow : Window
             var diagnostics = _lastDiagnostics;
             var startedAt = _copyStartedAt;
             var verificationRequested = _verificationRequested;
-            var details = string.Join(Environment.NewLine + Environment.NewLine, destinations.Select(item =>
-                $"{item.Label}\nEstado: {FormatPhase(item.Phase)} · Archivos: {item.FilesDone}/{item.FilesTotal} · Errores: {item.FilesErrored}" +
-                $"\nVerificación final: {(verificationRequested ? DestinationProgressText.Verification(item) : "No solicitada")}" +
-                (string.IsNullOrWhiteSpace(item.Error) ? string.Empty : $"\n{item.Error}")));
-            var result = await ShowDialogAsync(new ContentDialog
-            {
-                XamlRoot = Root.XamlRoot,
-                Title = "Resultado por destino",
-                PrimaryButtonText = "Guardar diagnóstico",
-                IsPrimaryButtonEnabled = diagnostics is not null,
-                CloseButtonText = "Cerrar",
-                Content = new ScrollViewer
-                {
-                    MaxHeight = 360,
-                    Content = new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true },
-                },
-            });
-            if (result == ContentDialogResult.Primary && diagnostics is not null)
+            var save = await ShowNativeDialogAsync(() => NativeAppDialogs.Results(
+                WinRT.Interop.WindowNative.GetWindowHandle(this), destinations,
+                verificationRequested, diagnostics is not null, _windowLifetime.Token));
+            if (save && diagnostics is not null)
             {
                 var picker = new FileSavePicker(AppWindow.Id)
                 {
@@ -868,15 +723,6 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { ShowError(ex.Message); }
     }
 
-    private static string FormatPhase(DestinationPhase phase) => phase switch
-    {
-        DestinationPhase.Comparing => "Comparando contenido",
-        DestinationPhase.Done => "Completado",
-        DestinationPhase.Failed => "Fallido",
-        DestinationPhase.Cancelled => "Cancelado",
-        _ => phase.ToString(),
-    };
-
     // Existing destination files are never replaced without an explicit, per-copy choice.
     private async Task<ExistingFilePolicy?> AskExistingFilesAsync(ExistingFilesConflictException conflict)
     {
@@ -891,13 +737,13 @@ public sealed partial class MainWindow : Window
         finally { _dialogGate.Release(); }
     }
 
-    private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    private async Task<T> ShowNativeDialogAsync<T>(Func<T> show)
     {
-        await _dialogGate.WaitAsync();
+        await _dialogGate.WaitAsync(_windowLifetime.Token);
         try
         {
-            if (_closeRequested) return ContentDialogResult.None;
-            return await dialog.ShowAsync();
+            _windowLifetime.Token.ThrowIfCancellationRequested();
+            return show();
         }
         finally { _dialogGate.Release(); }
     }
