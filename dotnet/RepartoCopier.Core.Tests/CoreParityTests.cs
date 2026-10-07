@@ -18,12 +18,12 @@ public sealed class CoreParityTests
         var plan = CopyPlan.Create(
             " C:/Origen/ ",
             [" D:/Uno/ ", "E:/Dos"],
-            skipSame: true,
+            existingFiles: ExistingFilePolicy.ReplaceDifferent,
             keepGoing: false);
         Assert.AreEqual("C:/Origen/", plan.Source);
         CollectionAssert.AreEqual(new[] { "D:/Uno/", "E:/Dos" }, plan.Destinations.ToArray());
         Assert.ThrowsExactly<ArgumentException>(() =>
-            CopyPlan.Create("C:/Origen", ["C:/Origen/"], true, true));
+            CopyPlan.Create("C:/Origen", ["C:/Origen/"], ExistingFilePolicy.ReplaceDifferent, true));
 
         var existing = Enumerable.Range(0, CopyPlan.MaxDestinations - 1)
             .Select(index => $@"D:\Dest{index}")
@@ -55,7 +55,7 @@ public sealed class CoreParityTests
         var source = Path.Combine(sourceDirectory, "selected.bin");
         File.WriteAllBytes(source, [1, 2, 3]);
 
-        var plan = CopyPlan.Create(source, [sourceDirectory], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [sourceDirectory], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
         StringAssert.Contains(error.Message, "solapa");
         CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, File.ReadAllBytes(source));
@@ -70,7 +70,7 @@ public sealed class CoreParityTests
         var baseInsideSource = Path.Combine(source, "backup");
         var forbiddenEffectiveRoot = Path.Combine(baseInsideSource, "Proyecto");
 
-        var plan = CopyPlan.Create(source, [baseInsideSource], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [baseInsideSource], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
         StringAssert.Contains(error.Message, "solapa");
         Assert.IsFalse(Directory.Exists(forbiddenEffectiveRoot));
@@ -85,7 +85,7 @@ public sealed class CoreParityTests
         var firstBase = Path.Combine(temp.Path, "dest");
         var secondBase = Path.Combine(firstBase, "Origen", "nested");
 
-        var plan = CopyPlan.Create(source, [firstBase, secondBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [firstBase, secondBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
         StringAssert.Contains(error.Message, "solapan entre sí");
     }
@@ -100,7 +100,7 @@ public sealed class CoreParityTests
         var effectiveRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Origen")).FullName;
         Directory.CreateDirectory(Path.Combine(effectiveRoot, "a.txt"));
 
-        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         var error = Assert.ThrowsExactly<IOException>(() => CopyEngine.Start(plan));
         StringAssert.Contains(error.Message, "requiere un archivo");
     }
@@ -331,7 +331,7 @@ public sealed class CoreParityTests
             await File.WriteAllTextAsync(Path.Combine(source, $"file-{index:D3}.txt"), $"payload-{index}");
 
         var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
-        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         AssertHealthy(job);
@@ -433,8 +433,8 @@ public sealed class CoreParityTests
 
         using (var held = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            await using var job = CopyEngine.Start(CopyPlan.Create(source, [destination], false, true),
-                new CopyOptions(Verify: true, SkipSame: false, KeepGoing: true));
+            await using var job = CopyEngine.Start(CopyPlan.Create(source, [destination], ExistingFilePolicy.ReplaceAll, true),
+                new CopyOptions(Verify: true, KeepGoing: true));
             await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
             var result = job.Snapshot().Single();
             Assert.AreEqual(DestinationPhase.Done, result.Phase);
@@ -445,8 +445,8 @@ public sealed class CoreParityTests
             Assert.AreEqual("next-content", File.ReadAllText(Path.Combine(root, "b-next.txt")));
         }
 
-        await using var retry = CopyEngine.Start(CopyPlan.Create(source, [destination], false, true),
-            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: true));
+        await using var retry = CopyEngine.Start(CopyPlan.Create(source, [destination], ExistingFilePolicy.ReplaceAll, true),
+            new CopyOptions(Verify: true, KeepGoing: true));
         await retry.Completion.WaitAsync(TimeSpan.FromSeconds(45));
         AssertHealthy(retry);
         Assert.AreEqual(0UL, retry.Snapshot().Single().FilesErrored);
@@ -470,7 +470,7 @@ public sealed class CoreParityTests
 
         using (var held = new FileStream(blockedFile, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            var plan = CopyPlan.Create(source, [blockedBase, healthyBase], skipSame: false, keepGoing: false);
+            var plan = CopyPlan.Create(source, [blockedBase, healthyBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
             await using var job = CopyEngine.Start(plan);
             await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
 
@@ -483,7 +483,7 @@ public sealed class CoreParityTests
             Assert.AreEqual("old-version", await File.ReadAllTextAsync(blockedFile));
         }
 
-        var retryPlan = CopyPlan.Create(source, [blockedBase], skipSame: false, keepGoing: false);
+        var retryPlan = CopyPlan.Create(source, [blockedBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var retryJob = CopyEngine.Start(retryPlan);
         await retryJob.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         AssertHealthy(retryJob);
@@ -502,7 +502,7 @@ public sealed class CoreParityTests
         var destinations = Enumerable.Range(0, 8)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
 
         for (var cycle = 0; cycle < 20 && !job.Completion.IsCompleted; cycle++)
@@ -561,8 +561,8 @@ public sealed class CoreParityTests
             .Select(i => Directory.CreateDirectory(Path.Combine(temp.Path, $"d{i}")).FullName)
             .ToArray();
         await using var job = CopyEngine.Start(
-            CopyPlan.Create(source, destinations, false, false),
-            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+            CopyPlan.Create(source, destinations, ExistingFilePolicy.ReplaceAll, false),
+            new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
         AssertHealthy(job);
         foreach (var root in destinations)
@@ -591,8 +591,8 @@ public sealed class CoreParityTests
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
 
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
         AssertHealthy(job);
 
@@ -621,7 +621,7 @@ public sealed class CoreParityTests
         var destinations = Enumerable.Range(0, 4)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
         AssertHealthy(job);
@@ -645,7 +645,7 @@ public sealed class CoreParityTests
         var destinations = Enumerable.Range(0, Math.Max(3, Math.Min(6, Environment.ProcessorCount)))
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
         AssertHealthy(job);
@@ -663,7 +663,7 @@ public sealed class CoreParityTests
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
 
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
         AssertHealthy(job);
@@ -686,7 +686,7 @@ public sealed class CoreParityTests
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
 
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         AssertHealthy(job);
@@ -709,7 +709,7 @@ public sealed class CoreParityTests
             Directory.CreateDirectory(Path.Combine(temp.Path, "dest-2")).FullName,
         };
 
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: true);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: true);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         AssertHealthy(job);
@@ -736,8 +736,8 @@ public sealed class CoreParityTests
 
         var baseOne = Directory.CreateDirectory(Path.Combine(temp.Path, "dest-1")).FullName;
         var baseTwo = Directory.CreateDirectory(Path.Combine(temp.Path, "dest-2")).FullName;
-        var plan = CopyPlan.Create(source, [baseOne, baseTwo], skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [baseOne, baseTwo], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
         AssertHealthy(job);
 
@@ -781,7 +781,7 @@ public sealed class CoreParityTests
         var destinations = Enumerable.Range(0, 5)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
         AssertHealthy(job);
@@ -806,7 +806,7 @@ public sealed class CoreParityTests
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
 
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(45));
         AssertHealthy(job);
@@ -837,7 +837,7 @@ public sealed class CoreParityTests
         var destinations = Enumerable.Range(0, 4)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(90));
         AssertHealthy(job);
@@ -860,8 +860,8 @@ public sealed class CoreParityTests
         await File.WriteAllTextAsync(Path.Combine(sourceDir, "hermano.txt"), "no copiar");
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
 
-        var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(20));
         AssertHealthy(job);
 

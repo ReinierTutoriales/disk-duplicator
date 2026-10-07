@@ -18,7 +18,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 `RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
 
-`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para SkipSame/recovery y verificación post-copia mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
+`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para comparar archivos existentes y para recovery y verificación post-copia mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
 
 ## Invariantes de copia
 
@@ -29,8 +29,8 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 - Los archivos adicionales del destino no se eliminan.
 - El estado interno vive fuera del árbol copiado en `.disk-duplicator-state` por compatibilidad con recovery existente.
 - La verificación CRC32C final es opcional mediante «Verificar contenido al terminar», desactivada inicialmente. Sin ella se conservan escritura, flush y commit atómico, pero no se comprueba el contenido del destino mediante relectura. La UI distingue «Copiado» de «Verificado» y el JSON registra la opción elegida. Los perfiles conservan su elección de verificación.
-- Recovery y SkipSame conservan sus pruebas BLAKE3 independientes.
-- «Omitir iguales» desactivado fuerza una copia nueva: prepara y recupera temporales de forma segura, pero no relee archivos anteriores para omitirlos por el journal. Con la opción activada, los checkpoints se comprueban por contenido antes de reutilizarlos. La verificación final es una elección independiente.
+- Recovery y la comparación de archivos existentes conservan sus pruebas BLAKE3 independientes.
+- Un archivo que ya existe en el destino nunca se reemplaza sin una elección explícita. Si el preflight encuentra archivos existentes y no hay política, aborta antes de tocar ningún destino y la aplicación pregunta: «Conservar existentes» (no toca nada que ya exista), «Comparar contenido» (omite los idénticos por tamaño y BLAKE3, ignorando la fecha, y reemplaza los distintos) o «Reemplazar todos» (sin comparar). La elección no se guarda en los perfiles (versión 2; los de versión 1 se migran y nunca autorizan reemplazos). Los checkpoints del journal ya no deciden qué se omite: la comparación de contenido ocurre una sola vez, en la fase visible. Solo se pueden reemplazar los archivos que existían al preparar la copia: uno que aparezca después no se reemplaza. La verificación final es una elección independiente.
 - Symlinks, junctions, reparse points y solapamientos peligrosos se rechazan de forma fail-closed.
 
 ## Rendimiento

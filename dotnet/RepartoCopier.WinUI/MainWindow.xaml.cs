@@ -174,11 +174,10 @@ public sealed partial class MainWindow : Window
             var plan = CopyPlan.Create(
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path),
-                SkipSameCheck.IsChecked == true,
+                existingFiles: null,
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
                 Verify: VerifyCheck.IsChecked == true,
-                SkipSame: plan.SkipSame,
                 KeepGoing: plan.KeepGoing);
 
             SetEditingEnabled(false);
@@ -213,14 +212,27 @@ public sealed partial class MainWindow : Window
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
 
-            _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
+            while (_job is null)
+            {
+                try
+                {
+                    _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
+                }
+                catch (ExistingFilesConflictException conflict) when (plan.ExistingFiles is null)
+                {
+                    // Nothing was written yet. The engine never replaces files without an explicit choice.
+                    var choice = await AskExistingFilesAsync(conflict);
+                    if (choice is null) throw new OperationCanceledException();
+                    plan = plan with { ExistingFiles = choice };
+                }
+            }
             RefreshProgress();
             if (_cancellationRequested) _job.RequestCancel();
             PauseButton.IsEnabled = !_cancellationRequested;
             CancelButton.IsEnabled = !_cancellationRequested;
             if (!_cancellationRequested)
             {
-                StatusText.Text = plan.SkipSame ? "Comprobando archivos existentes…" : "Copiando…";
+                StatusText.Text = plan.ExistingFiles == ExistingFilePolicy.ReplaceDifferent ? "Comprobando archivos existentes…" : "Copiando…";
                 OperationTitleText.Text = "Copiando...";
             }
             _progressTimer.Start();
@@ -451,7 +463,6 @@ public sealed partial class MainWindow : Window
             _destinations.Clear();
             foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
             DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
-            SkipSameCheck.IsChecked = profile.SkipExisting;
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             VerifyCheck.IsChecked = profile.VerifyAfterCopy;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
@@ -469,7 +480,6 @@ public sealed partial class MainWindow : Window
                 CopyProfile.CurrentVersion,
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path).ToArray(),
-                SkipSameCheck.IsChecked == true,
                 KeepGoingCheck.IsChecked == true,
                 ShutdownCheck.IsChecked == true,
                 VerifyCheck.IsChecked == true);
@@ -739,7 +749,6 @@ public sealed partial class MainWindow : Window
         ClearDestinationsButton.IsEnabled = enabled;
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
-        SkipSameCheck.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
         VerifyCheck.IsEnabled = enabled;
     }
@@ -840,6 +849,49 @@ public sealed partial class MainWindow : Window
         DestinationPhase.Cancelled => "Cancelado",
         _ => phase.ToString(),
     };
+
+    // Existing destination files are never replaced without an explicit, per-copy choice.
+    private async Task<ExistingFilePolicy?> AskExistingFilesAsync(ExistingFilesConflictException conflict)
+    {
+        var details = string.Join(
+            Environment.NewLine,
+            conflict.Destinations.Select(item =>
+                $"{item.Destination}: {item.ExistingFiles} de {item.TotalFiles} archivos ya existen" +
+                (item.Examples.Count == 0 ? string.Empty : $" ({string.Join(", ", item.Examples)}…)")));
+        var choices = new RadioButtons
+        {
+            Items =
+            {
+                "Conservar existentes: no se toca ningún archivo que ya exista",
+                "Comparar contenido: omitir idénticos y reemplazar los distintos",
+                "Reemplazar todos los existentes sin comparar",
+            },
+        };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = "Hay archivos que ya existen",
+            Content = new StackPanel
+            {
+                Spacing = 12,
+                Children = { new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap }, choices },
+            },
+            PrimaryButtonText = "Continuar",
+            CloseButtonText = "Cancelar",
+            DefaultButton = ContentDialogButton.Close,
+            IsPrimaryButtonEnabled = false,
+        };
+        choices.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = choices.SelectedIndex >= 0;
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary)
+            return null;
+        return choices.SelectedIndex switch
+        {
+            0 => ExistingFilePolicy.KeepExisting,
+            1 => ExistingFilePolicy.ReplaceDifferent,
+            2 => ExistingFilePolicy.ReplaceAll,
+            _ => null,
+        };
+    }
 
     private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {

@@ -138,7 +138,7 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
-    public void SkipSameHashHelperKeepsMinimalThreeParameterShape()
+    public void ExistingFileHashHelperKeepsMinimalThreeParameterShape()
     {
         var method = typeof(CopyEngine).GetMethod(
             "HashFileAsync",

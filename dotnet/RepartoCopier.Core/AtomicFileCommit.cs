@@ -3,11 +3,12 @@ namespace RepartoCopier.Core;
 /// <summary>
 /// Commits a durable temporary file into its final destination using the smallest
 /// available namespace operation. Existing files use the operating system's
-/// replace primitive instead of a manual destination->backup->destination dance.
+/// replace primitive instead of a manual destination->backup->destination dance,
+/// and only when the caller was explicitly authorised to replace them.
 /// </summary>
 internal static class AtomicFileCommit
 {
-    internal static void Commit(string part, string destination, string backup)
+    internal static void Commit(string part, string destination, string backup, bool allowReplace)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(part);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
@@ -15,9 +16,20 @@ internal static class AtomicFileCommit
 
         if (!File.Exists(destination))
         {
-            File.Move(part, destination);
+            try
+            {
+                File.Move(part, destination);
+            }
+            catch (IOException) when (File.Exists(destination))
+            {
+                // The file appeared after the destination was analysed. Never replace it silently.
+                throw new IOException($"El destino apareció durante la copia y no se reemplazó: {destination}");
+            }
             return;
         }
+
+        if (!allowReplace)
+            throw new IOException($"El destino ya existe y no se autorizó reemplazarlo: {destination}");
 
         WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
         DeleteBackupIfPresent(backup);
