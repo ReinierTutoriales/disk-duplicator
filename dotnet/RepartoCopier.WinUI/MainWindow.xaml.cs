@@ -318,6 +318,7 @@ public sealed partial class MainWindow : Window
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
                 var completedWithErrors = failed > 0 || erroredFiles > 0;
+                var hasUnverifiedSkips = snapshots.Any(item => item.FilesSkipped > 0);
                 var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
                 var filesDone = snapshots.Count == 0 ? 0UL : snapshots
                     .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
@@ -330,11 +331,13 @@ public sealed partial class MainWindow : Window
                 OperationTitleText.Text = cancelled
                     ? "Cancelado"
                     : completedWithErrors ? "Completado con errores"
+                    : _verificationRequested && hasUnverifiedSkips ? "Terminado · omitidos sin verificar"
                     : _verificationRequested ? "Copia y verificación terminadas" : "Copiado · sin verificación";
                 OperationIcon.Glyph = cancelled || completedWithErrors ? "\uE783" : "\uE73E";
                 StatusText.Text = cancelled
                     ? "Copia cancelada"
                     : completedWithErrors ? "La copia terminó con algunos errores"
+                    : _verificationRequested && hasUnverifiedSkips ? "Terminada; los omitidos no se verificaron al finalizar"
                     : _verificationRequested ? "Copia y verificación completadas" : "Copia completada sin verificación final";
                 CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
                 CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";

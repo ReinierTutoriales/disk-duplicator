@@ -52,6 +52,18 @@ public sealed class DestinationProgressTextTests
     }
 
     [TestMethod]
+    public void VerifiedCopiedSubsetDoesNotClaimSkippedFilesWereVerified()
+    {
+        var snapshot = Snapshot(100, 100, DestinationPhase.Done) with
+        {
+            FilesSkipped = 1,
+            VerifyFinishedAt = TimeSpan.FromSeconds(1),
+        };
+        Assert.AreEqual("Copiado", DestinationProgressText.Format(snapshot));
+        Assert.AreEqual("Completada para los copiados; omitidos sin verificar", DestinationProgressText.Verification(snapshot));
+    }
+
+    [TestMethod]
     public void EmptyAndOutOfRangeCountersDoNotProduceInvalidPercentages()
     {
         Assert.AreEqual("Copia 0%", DestinationProgressText.Format(Snapshot(0, 0, DestinationPhase.Copying)));
