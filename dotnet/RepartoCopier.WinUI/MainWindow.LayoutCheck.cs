@@ -103,7 +103,7 @@ public sealed partial class MainWindow
         }
         if (control.ActualWidth <= 0 || control.ActualHeight <= 0 || bounds.Left < -1 ||
             bounds.Right > Root.ActualWidth + 1 || bounds.Top < -1 || bounds.Bottom > bottom + 1)
-            throw new InvalidOperationException($"Control cannot be reached: {control.Name} {bounds} in {Root.ActualWidth}×{Root.ActualHeight}.");
+            throw new InvalidOperationException($"Control cannot be reached: {control.Name} {bounds} in {Root.ActualWidth}×{Root.ActualHeight}; scroll offset {MainContentScroll.VerticalOffset}, scrollable {MainContentScroll.ScrollableHeight}, extent {MainContentScroll.ExtentHeight}, viewport {MainContentScroll.ViewportHeight}.");
         CheckTextFits(control);
     }
 
