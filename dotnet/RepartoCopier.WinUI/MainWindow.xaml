@@ -67,7 +67,7 @@
         <InfoBar x:Name="ErrorBar" Grid.Row="1" IsOpen="False" Severity="Error" IsClosable="True" />
         <ScrollViewer x:Name="MainContentScroll" Grid.Row="2" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
-        <Grid Margin="4,0,4,2" HorizontalAlignment="Stretch">
+        <Grid Margin="4,0,4,16" HorizontalAlignment="Stretch">
 
             <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="4" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
