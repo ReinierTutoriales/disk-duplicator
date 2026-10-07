@@ -114,6 +114,33 @@ jobs:
             Remove-Item $smokeDirectory -Recurse -Force
           }
 
+      - name: Check rendered layouts and native dialogs
+        shell: pwsh
+        run: |
+          $layoutReport = Join-Path $env:RUNNER_TEMP 'RepartoCopier-layout-check.json'
+          $layoutExe = Join-Path $env:GITHUB_WORKSPACE 'artifact/RepartoCopier/RepartoCopier.WinUI.exe'
+          $layoutProcess = Start-Process -FilePath $layoutExe -ArgumentList @('--layout-check', $layoutReport) -PassThru
+          try {
+            if (-not $layoutProcess.WaitForExit(90000)) { throw 'Layout check did not complete.' }
+            if (Test-Path $layoutReport) { Get-Content $layoutReport }
+            if ($layoutProcess.ExitCode -ne 0) { throw "Layout check failed: $($layoutProcess.ExitCode)" }
+            if (-not (Test-Path $layoutReport)) { throw 'Layout check report missing.' }
+            $layoutResult = Get-Content $layoutReport -Raw | ConvertFrom-Json
+            if (-not $layoutResult.Passed) { throw 'Rendered layout check did not pass.' }
+          }
+          finally {
+            if (-not $layoutProcess.HasExited) { Stop-Process -Id $layoutProcess.Id -Force }
+          }
+
+      - name: Upload rendered layout report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: RepartoCopier-layout-report
+          path: ${{ runner.temp }}/RepartoCopier-layout-check.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload downloadable test build
         uses: actions/upload-artifact@v6
         with:
