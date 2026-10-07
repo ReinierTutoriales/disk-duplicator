@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using RepartoCopier.Core;
 using Windows.Foundation;
@@ -112,10 +113,15 @@ public sealed partial class MainWindow
                 FontWeight = text.FontWeight, FontStyle = text.FontStyle,
                 TextWrapping = text.TextWrapping, Padding = text.Padding,
             };
-            probe.Measure(new Size(text.TextWrapping == TextWrapping.NoWrap ? double.PositiveInfinity : text.ActualWidth,
+            // TextBlock may arrange narrower than its slot after measuring a complete line.
+            // Re-measuring that shrink-to-fit width can introduce a wrap that never occurred
+            // in the real layout. Use the parent's allocated width, as the live measure does.
+            var slot = LayoutInformation.GetLayoutSlot(text);
+            var availableWidth = Math.Max(text.ActualWidth, slot.Width - text.Margin.Left - text.Margin.Right);
+            probe.Measure(new Size(text.TextWrapping == TextWrapping.NoWrap ? double.PositiveInfinity : availableWidth,
                 double.PositiveInfinity));
-            if (probe.DesiredSize.Width > text.ActualWidth + 1 || probe.DesiredSize.Height > text.ActualHeight + 1)
-                throw new InvalidOperationException($"Text clipped: {text.Text} needs {probe.DesiredSize}, has {text.ActualWidth}×{text.ActualHeight}.");
+            if (probe.DesiredSize.Width > availableWidth + 1 || probe.DesiredSize.Height > text.ActualHeight + 1)
+                throw new InvalidOperationException($"Text clipped: {text.Text} needs {probe.DesiredSize}, has {text.ActualWidth}×{text.ActualHeight}, slot {slot}, desired {text.DesiredSize}.");
         }
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++) CheckTextFits(VisualTreeHelper.GetChild(parent, i));
     }
