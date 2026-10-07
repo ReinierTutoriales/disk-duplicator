@@ -53,32 +53,66 @@ public sealed partial class MainWindow
                 ResultDetailsButton, SpeedMetricText, RemainingMetricText, FilesMetricText }) await CheckReachableAsync(control);
             report.Add($"Running {theme} {size.Width}×{size.Height} DIP: actions reachable and labels fit; filename ellipsis intentional.");
         }
-        // Native dialogs run on the real UI thread, with a real owner and no application actions.
-        void InspectAndClose(nint window)
+        // Dialogs are real owned windows; check each one in both themes, then dismiss it.
+        foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
         {
-            report.Add(NativeDialogLayoutProbe.Check(window, nativeOwner));
-            NativeTaskDialog.PostMessage(window, NativeTaskDialog.ClickButton, NativeTaskDialog.Cancel, nint.Zero);
+            Root.RequestedTheme = theme;
+            await SettleLayoutAsync();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            async Task Inspect(AppDialog dialog, string name)
+            {
+                await SettleLayoutAsync();
+                dialog.Root.UpdateLayout();
+                report.Add($"{name} {theme}: {CheckDialog(dialog)}");
+                CheckTextFits(dialog.Root);
+                dialog.Close(AppDialog.Dismissed);
+            }
+            await AppDialogs.AboutAsync(this, "2.1.1", _ => throw new InvalidOperationException("Layout check must not open a URL."),
+                deadline.Token, dialog => _ = Inspect(dialog, "About"));
+            if (await AppDialogs.SettingsAsync(this, ThemePreference.System, deadline.Token,
+                    dialog => _ = Inspect(dialog, "Settings")) is not null)
+                throw new InvalidOperationException("Dismissed settings changed the theme.");
+            if (await AppDialogs.ShutdownAsync(this, deadline.Token, dialog => _ = Inspect(dialog, "Shutdown")))
+                throw new InvalidOperationException("Dismissed shutdown was authorized.");
+            var results = Enumerable.Range(0, 8).Select(index => new DestinationSnapshot(
+                $"D:\\{index}-" + new string('x', 220), 100, 100, 5, 0, index % 3 == 0 ? 1UL : 0UL, 0, 0,
+                index == 7 ? DestinationPhase.Failed : DestinationPhase.Done, index == 7 ? new string('e', 900) : null,
+                "", 0, 0)).ToArray();
+            if (await AppDialogs.ResultsAsync(this, results, true, true, deadline.Token, dialog => _ = Inspect(dialog, "Results")))
+                throw new InvalidOperationException("Dismissed results authorized saving.");
+            if (deadline.IsCancellationRequested) throw new InvalidOperationException("A dialog did not open in time.");
         }
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        NativeAppDialogs.About(nativeOwner, "2.1.1", _ => throw new InvalidOperationException("Layout check must not open a URL."), deadline.Token, InspectAndClose);
-        if (NativeAppDialogs.Settings(nativeOwner, ThemePreference.System, deadline.Token, InspectAndClose) is not null)
-            throw new InvalidOperationException("Cancelled settings changed the theme.");
-        if (NativeAppDialogs.Shutdown(nativeOwner, deadline.Token, InspectAndClose))
-            throw new InvalidOperationException("Cancelled shutdown was authorized.");
-        var results = Enumerable.Range(0, 8).Select(index => new DestinationSnapshot(
-            $"D:\\{index}-" + new string('x', 220), 100, 100, 5, 1, 0, 0, 0,
-            DestinationPhase.Done, null, "", 0, 0)).ToArray();
-        var pages = 0;
-        if (NativeAppDialogs.Results(nativeOwner, results, true, false, deadline.Token, window =>
-        {
-            report.Add(NativeDialogLayoutProbe.Check(window, nativeOwner));
-            NativeTaskDialog.PostMessage(window, NativeTaskDialog.ClickButton,
-                ++pages < 3 ? 102 : NativeTaskDialog.Cancel, nint.Zero);
-        })) throw new InvalidOperationException("Layout check authorized saving.");
-        if (pages != 3) throw new InvalidOperationException("Native result pagination did not render all three pages.");
         await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(new { Passed = true, Checks = report },
             new JsonSerializerOptions { WriteIndented = true }));
     }
+
+    // Owned by this window, owner disabled while open, fully inside the monitor work area.
+    private string CheckDialog(AppDialog dialog)
+    {
+        if (GetWindow(dialog.Handle, 4) != dialog.Owner) throw new InvalidOperationException("Dialog lost its owner.");
+        if (IsWindowEnabled(dialog.Owner)) throw new InvalidOperationException("Dialog owner is not modal-disabled.");
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(dialog.AppWindow.Id,
+            Microsoft.UI.Windowing.DisplayAreaFallback.Nearest).WorkArea;
+        var position = dialog.AppWindow.Position;
+        var size = dialog.AppWindow.Size;
+        const int tolerance = 8; // DWM invisible resize borders
+        if (position.X < area.X - tolerance || position.Y < area.Y - tolerance ||
+            position.X + size.Width > area.X + area.Width + tolerance ||
+            position.Y + size.Height > area.Y + area.Height + tolerance)
+            throw new InvalidOperationException($"Dialog exceeds work area: {position.X},{position.Y} {size.Width}×{size.Height}.");
+        if (dialog.Root.ActualHeight <= 0 || dialog.Root.ActualWidth <= 0)
+            throw new InvalidOperationException("Dialog content was not laid out.");
+        return $"owned/modal; {size.Width}×{size.Height}px; theme {dialog.Root.ActualTheme}";
+    }
+
+    [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
+    [System.Runtime.InteropServices.DllImport("user32.dll", ExactSpelling = true)]
+    private static extern nint GetWindow(nint window, uint command);
+
+    [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
+    [System.Runtime.InteropServices.DllImport("user32.dll", ExactSpelling = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool IsWindowEnabled(nint window);
 
     private async Task SettleLayoutAsync()
     {

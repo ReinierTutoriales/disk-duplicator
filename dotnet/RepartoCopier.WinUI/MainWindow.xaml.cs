@@ -543,8 +543,7 @@ public sealed partial class MainWindow : Window
             ElementTheme.Dark => ThemePreference.Dark,
             _ => ThemePreference.System,
         };
-        var chosen = await ShowNativeDialogAsync(() => NativeAppDialogs.Settings(
-            WinRT.Interop.WindowNative.GetWindowHandle(this), selected, _windowLifetime.Token));
+        var chosen = await ShowDialogAsync(() => AppDialogs.SettingsAsync(this, selected, _windowLifetime.Token));
         if (chosen is not { } theme) return;
         Root.RequestedTheme = theme switch
         {
@@ -566,11 +565,10 @@ public sealed partial class MainWindow : Window
         var version = typeof(MainWindow).Assembly.GetName().Version;
         var displayVersion = version is null ? "desconocida"
             : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
-        await ShowNativeDialogAsync(() =>
+        await ShowDialogAsync(async () =>
         {
-            NativeAppDialogs.About(WinRT.Interop.WindowNative.GetWindowHandle(this),
-                displayVersion, OpenExternalUrl, _windowLifetime.Token);
-            return false;
+            await AppDialogs.AboutAsync(this, displayVersion, OpenExternalUrl, _windowLifetime.Token);
+            return true;
         });
     }
 
@@ -591,8 +589,7 @@ public sealed partial class MainWindow : Window
 
     private async Task OfferShutdownAsync()
     {
-        if (await ShowNativeDialogAsync(() => NativeAppDialogs.Shutdown(
-            WinRT.Interop.WindowNative.GetWindowHandle(this), _windowLifetime.Token)))
+        if (await ShowDialogAsync(() => AppDialogs.ShutdownAsync(this, _windowLifetime.Token)))
             Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
     }
 
@@ -670,8 +667,7 @@ public sealed partial class MainWindow : Window
             var diagnostics = _lastDiagnostics;
             var startedAt = _copyStartedAt;
             var verificationRequested = _verificationRequested;
-            var save = await ShowNativeDialogAsync(() => NativeAppDialogs.Results(
-                WinRT.Interop.WindowNative.GetWindowHandle(this), destinations,
+            var save = await ShowDialogAsync(() => AppDialogs.ResultsAsync(this, destinations,
                 verificationRequested, diagnostics is not null, _windowLifetime.Token));
             if (save && diagnostics is not null)
             {
@@ -699,13 +695,14 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { ShowError(ex.Message); }
     }
 
-    private async Task<T> ShowNativeDialogAsync<T>(Func<T> show)
+    // One dialog at a time; closing the main window cancels the open one.
+    private async Task<T> ShowDialogAsync<T>(Func<Task<T>> show)
     {
         await _dialogGate.WaitAsync(_windowLifetime.Token);
         try
         {
             _windowLifetime.Token.ThrowIfCancellationRequested();
-            return show();
+            return await show();
         }
         finally { _dialogGate.Release(); }
     }

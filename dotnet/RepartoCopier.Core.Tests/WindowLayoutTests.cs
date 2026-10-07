@@ -28,19 +28,4 @@ public sealed class WindowLayoutTests
         Assert.AreEqual(1024, minimum.Width);
         Assert.AreEqual(600, minimum.Height);
     }
-
-    [TestMethod]
-    public void EveryResultRemainsReachableAndCompleteDetailsAreNotInjectedIntoUnboundedNativeContent()
-    {
-        var rows = Enumerable.Range(0, 256).Select(index => new DestinationSnapshot(
-            $"destination-{index}-" + new string('x', 1000), 100, 100, 10, 0, 0, 0, 0,
-            DestinationPhase.Failed, new string('e', 10000), "", 0, 0)).ToArray();
-        var pages = new NativeResultPages(rows, false);
-        var all = string.Concat(Enumerable.Range(0, pages.Count).Select(pages.Page));
-        for (var index = 0; index < rows.Length; index++) StringAssert.Contains(all, $"destination-{index}-");
-        Assert.IsFalse(all.Contains(new string('e', 10000), StringComparison.Ordinal));
-        Assert.IsTrue(Enumerable.Range(0, pages.Count).All(i => pages.Page(i).Length < 2000));
-        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => pages.Page(-1));
-        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => pages.Page(pages.Count));
-    }
 }

@@ -8,7 +8,8 @@
 - Diagnóstico (esquema 5): `IndependentSourceReads` registra el modo realmente usado.
 - UI: la omisión rápida por tamaño y fecha es la política fija para archivos existentes; se eliminan el selector, el diálogo de conflictos y la fase de comparación de contenido de la interfaz. La lectura independiente es fija (sin casilla).
 - UI: iconos de estado Segoe Fluent rellenos (completado, error, aviso) en capas con pinceles de tema, que siguen el tema claro/oscuro sin código; tarjetas por destino con enlaces compilados `x:Bind` que solo notifican cambios reales; una sola pasada por las instantáneas en cada refresco de 250 ms.
-- UI: diseño adaptable (márgenes 12/16, ancho máximo legible, botones solo con icono en ventanas estrechas), menú nativo con atajos Ctrl+O/Ctrl+S, Ctrl+Enter para iniciar, iconos Segoe Fluent con color de estado, tarjetas por destino con barra de progreso propia, diálogos nativos con iconos estándar de Windows.
+- UI: diseño adaptable (márgenes 12/16, ancho máximo legible, botones solo con icono en ventanas estrechas), menú nativo con atajos Ctrl+O/Ctrl+S, Ctrl+Enter para iniciar, iconos Segoe Fluent con color de estado, tarjetas por destino con barra de progreso propia.
+- UI: los diálogos (Ajustes, Acerca de, Apagar, Resultados) pasan de TaskDialog Win32, que no tiene modo oscuro, a ventanas WinUI propias: separadas de la app, modales y con propietario, ajustadas al contenido y con el tema claro/oscuro de la app, estilo de diálogo de Windows 11, botón principal en acento y Esc para cerrar. Resultados muestra todos los destinos en una lista desplazable. La comprobación de layout de la CI abre cada diálogo en ambos temas.
 - Limpieza: se eliminan código y parámetros sin uso.
 
 ## Unreleased — independent source reads prototype

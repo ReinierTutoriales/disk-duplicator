@@ -18,10 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RepartoCopier.Core\RepartoCopier.Core.csproj" />
     <Compile Include="..\RepartoCopier.WinUI\DestinationProgressText.cs" Link="UI\DestinationProgressText.cs" />
-    <Compile Include="..\RepartoCopier.WinUI\NativeTaskDialog.cs" Link="UI\NativeTaskDialog.cs" />
-    <Compile Include="..\RepartoCopier.WinUI\NativeAppDialogs.cs" Link="UI\NativeAppDialogs.cs" />
     <Compile Include="..\RepartoCopier.WinUI\WindowGeometry.cs" Link="UI\WindowGeometry.cs" />
-    <Compile Include="..\RepartoCopier.WinUI\NativeDialogLayoutProbe.cs" Link="UI\NativeDialogLayoutProbe.cs" />
     <Compile Include="..\RepartoCopier.WinUI\CopyProfile.cs" Link="UI\CopyProfile.cs" />
     <Compile Include="..\RepartoCopier.WinUI\BuildInfo.cs" Link="UI\BuildInfo.cs" />
     <Compile Include="..\RepartoCopier.WinUI\DiagnosticsExport.cs" Link="UI\DiagnosticsExport.cs" />
