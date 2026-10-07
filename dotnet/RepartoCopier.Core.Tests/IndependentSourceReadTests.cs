@@ -44,11 +44,15 @@ public sealed class IndependentSourceReadTests
             var plan = CopyPlan.Create(source, destinations, ExistingFilePolicy.ReplaceAll, keepGoing: false);
             var prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.NonPublic | BindingFlags.Static)!
                 .Invoke(null, [plan, CancellationToken.None])!;
-            // CI's ephemeral disk does not report NVMe. Keep real preflight, paths, writers,
-            // hashing and file-system I/O; override only the source classification for this test.
+            // CI's ephemeral disk does not report NVMe and holds source and destinations on one disk.
+            // Keep real preflight, paths, writers, hashing and file-system I/O; override only the
+            // source classification and identity so the eligibility rule selects independent reads.
             var sourceProperty = prepared.GetType().GetProperty("SourceDevice")!;
             var physical = (StorageDeviceInfo)sourceProperty.GetValue(prepared)!;
-            sourceProperty.SetValue(prepared, physical with { MediaKind = StorageMediaKind.SolidState, BusType = "NVMe" });
+            sourceProperty.SetValue(prepared, physical with
+            {
+                MediaKind = StorageMediaKind.SolidState, BusType = "NVMe", PhysicalDeviceNumber = null,
+            });
             var effective = (string[])prepared.GetType().GetProperty("DestinationRoots")!.GetValue(prepared)!;
             var progress = effective.Select(path => new DestinationProgress(path, (ulong)payload.Length, 1)).ToArray();
             await using var job = new CopyJob(progress);
@@ -60,6 +64,7 @@ public sealed class IndependentSourceReadTests
                 CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(
                     Path.Combine(destination, "Source", "payload.bin")));
             Assert.IsTrue(job.Snapshot().All(snapshot => snapshot.Phase == DestinationPhase.Done));
+            Assert.IsTrue(job.IndependentSourceReads);
             Assert.AreEqual(2L * payload.Length, job.DiagnosticsSnapshot().SourceHashBytes);
             Assert.AreEqual(2L * payload.Length, job.DiagnosticsSnapshot().SourceReadBytes);
         }
@@ -68,4 +73,30 @@ public sealed class IndependentSourceReadTests
             try { Directory.Delete(root, recursive: true); } catch { }
         }
     }
+
+    [TestMethod]
+    public void IndependentReadsAreChosenOnlyWhereTheyCannotHurt()
+    {
+        var nvme = Device("C:\\", 0, "NVMe", StorageMediaKind.SolidState);
+        var options = new CopyOptions();
+        Assert.IsTrue(options.IndependentSourceReads, "Independent reads are the default.");
+        Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options, nvme, 2, sourceSharesDestinationDevice: false));
+        Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options, nvme, 16, sourceSharesDestinationDevice: false));
+        Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options,
+            Device("D:\\", 1, "SATA", StorageMediaKind.SolidState), 3, sourceSharesDestinationDevice: false));
+
+        // Fallback to the single shared reader, never an error.
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options with { IndependentSourceReads = false }, nvme, 2, false));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme, 1, false));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme, 17, false));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme, 2, sourceSharesDestinationDevice: true));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options,
+            Device("E:\\", 2, "SATA", StorageMediaKind.Rotational), 2, false));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options,
+            Device("F:\\", 3, "USB", StorageMediaKind.SolidState), 2, false));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme with { IsNetwork = true }, 2, false));
+    }
+
+    private static StorageDeviceInfo Device(string root, uint number, string bus, StorageMediaKind media) =>
+        new(root, root, number, 1, bus, media, false, 512, 4096, true, null);
 }

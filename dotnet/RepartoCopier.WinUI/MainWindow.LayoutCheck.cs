@@ -33,8 +33,10 @@ public sealed partial class MainWindow
                 AddDestinationsButton, ClearDestinationsButton }) await CheckReachableAsync(control);
             OptionsExpander.IsExpanded = true;
             await SettleLayoutAsync();
+            await CheckReachableAsync(ExistingFilesCombo);
             await CheckReachableAsync(IndependentReadsCheck);
             await CheckReachableAsync(VerifyCheck);
+            await CheckReachableAsync(KeepGoingCheck);
             OptionsExpander.IsExpanded = false;
             report.Add($"Preparation {theme} {size.Width}×{size.Height} DIP: actions and expanded options reachable; labels fit.");
             ShowRunningView();
@@ -94,7 +96,7 @@ public sealed partial class MainWindow
         MainContentScroll.ChangeView(null, 0, null, true);
         await SettleLayoutAsync();
         var bounds = control.TransformToVisual(Root).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
-        var bottom = Root.ActualHeight - 24; // footer row
+        var bottom = Root.ActualHeight - 28; // footer row
         // Expanding options can remeasure while the scroll position changes. Keep
         // scrolling toward the control until it is wholly visible or no travel remains.
         for (var attempt = 0; attempt < 4 && bounds.Bottom > bottom + 1; attempt++)

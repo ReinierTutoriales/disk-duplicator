@@ -1,6 +1,6 @@
 # Medir lecturas independientes sin copiar
 
-Base: motor de lectores independientes integrado en `main` por PR #17. La casilla sigue desactivada por defecto. Este banco solo lee el archivo indicado y crea el informe JSON mediante `CreateNew`; nunca sobrescribe un informe anterior ni escribe en destinos.
+Base: motor de lectores independientes integrado en `main` por PR #17; activado por defecto cuando el origen y los destinos son elegibles (ver README). Este banco solo lee el archivo indicado y crea el informe JSON mediante `CreateNew`; nunca sobrescribe un informe anterior ni escribe en destinos.
 
 ```powershell
 ./RepartoCopier.WinUI.exe --source-bench 'H:\ISOS\archivo.iso' 'C:\Temp\source-bench.json' --readers 1,2,4 --seconds 20
@@ -18,4 +18,4 @@ En Read, los hilos arrancan en el mismo desplazamiento, como los lectores indepe
 
 Comparación física: usar el mismo SHA, los cinco ISO y carpetas de prueba vacías. Hacer una corrida con lectores independientes desactivados y otra con ellos activados, primero sin VERIFY y luego con VERIFY como medición separada. Guardar los dos diagnósticos y comparar `CopyFinishedAt`, `SourceReadBytes`, `SourceHashBytes`, `DirectSourceReadBytes`, errores y tiempos por destino. Los datos de 11,64 GiB no fijan la velocidad de los SSD con 28,24 GiB; 14–26 s para G/I son escenarios, no un criterio de aceptación.
 
-Riesgo pendiente del prototipo: cada escritor puede confirmar el archivo antes de que el trabajo compare los hashes finales de sus lectores. Una diferencia detiene el trabajo, pero no revierte un archivo ya confirmado. Hacer estas pruebas iniciales con datos y destinos prescindibles. VERIFY sigue sincronizado entre destinos; este banco no lo cambia.
+Coherencia entre lectores: cada lector registra el hash BLAKE3 de cada archivo en un registro compartido antes de enviar el cierre a su destino. El primero fija la referencia; los demás la comparan y, si difiere, la copia se detiene antes de que ese destino confirme el archivo. El primer destino puede haber confirmado ya una versión coherente del origen anterior al cambio, igual que en la lectura compartida. VERIFY sigue sincronizado entre destinos; este banco no lo cambia.

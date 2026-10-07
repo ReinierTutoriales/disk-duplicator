@@ -9,7 +9,7 @@ internal static class NativeAppDialogs
     {
         var index = selected switch { ThemePreference.Light => 1, ThemePreference.Dark => 2, _ => 0 };
         var result = NativeTaskDialog.Show(owner, new NativeDialogSpec("Ajustes", "Tema de la aplicación",
-            ["Aplicar", "Cerrar"], 101, Radios: ["Sistema", "Claro", "Oscuro"], SelectedRadio: index), token, onReady);
+            ["Aplicar", "Cerrar"], 100, Radios: ["Sistema", "Claro", "Oscuro"], SelectedRadio: index), token, onReady);
         if (result.Button != 100) return null;
         return result.Radio switch
         {
@@ -23,7 +23,7 @@ internal static class NativeAppDialogs
     {
         NativeTaskDialog.Show(owner, new NativeDialogSpec("Acerca de RepartoCopier",
             $"Versión {version}\nCopias rápidas y seguras para Windows.\n\n© 2026 ReinierTutoriales\nTodos los derechos reservados.\n\nGracias por usar RepartoCopier. ¡Dale ❤️ al proyecto en GitHub!",
-            ["Cerrar", "Ver en GitHub", "Licencias de terceros"], 100), token, onReady, button =>
+            ["Cerrar", "Ver en GitHub", "Licencias de terceros"], 100, Icon: NativeDialogIcon.Information), token, onReady, button =>
         {
             if (button == 101) openUrl("https://github.com/ReinierTutoriales/disk-duplicator");
             else if (button == 102) openUrl("https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE");
@@ -35,15 +35,17 @@ internal static class NativeAppDialogs
     internal static bool Shutdown(nint owner, CancellationToken token, Action<nint>? onReady = null) =>
         NativeTaskDialog.Show(owner, new NativeDialogSpec("Copia completada",
             "Si eliges Apagar, el equipo se apagará en 60 segundos. Puedes cancelar el apagado desde Windows con shutdown /a.",
-            ["Apagar", "No apagar"], 101), token, onReady).Button == 100;
+            ["Apagar", "No apagar"], 101, Icon: NativeDialogIcon.Warning), token, onReady).Button == 100;
 
     internal static bool Results(nint owner, IReadOnlyList<DestinationSnapshot> destinations, bool verifyRequested,
         bool canSave, CancellationToken token, Action<nint>? onReady = null)
     {
         var pager = new NativeResultPages(destinations, verifyRequested);
         var currentPage = 0;
+        var failed = destinations.Any(item => item.Phase == DestinationPhase.Failed || item.FilesErrored > 0);
         var result = NativeTaskDialog.Show(owner, new NativeDialogSpec("Resultado por destino", pager.Page(currentPage),
-            ["Guardar diagnóstico", "Anterior", "Siguiente", "Cerrar"], 103), token, window =>
+            ["Guardar diagnóstico", "Anterior", "Siguiente", "Cerrar"], 103,
+            Icon: failed ? NativeDialogIcon.Warning : NativeDialogIcon.Information), token, window =>
         {
             NativeTaskDialog.SendMessage(window, NativeTaskDialog.EnableButton, 100, canSave ? 1 : 0);
             NativeTaskDialog.SendMessage(window, NativeTaskDialog.EnableButton, 101, currentPage > 0 ? 1 : 0);

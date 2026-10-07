@@ -8,10 +8,11 @@ namespace RepartoCopier.WinUI;
 internal static class NativeConflictDialog
 {
     internal const int CancelId = 2;
-    internal const int KeepId = 100;
-    internal const int CompareId = 101;
-    internal const int ReplaceId = 102;
-    internal const int MetadataId = 103;
+    // Button ids follow the label order; the fast size/date check is first and the default choice.
+    internal const int MetadataId = 100;
+    internal const int KeepId = 101;
+    internal const int CompareId = 102;
+    internal const int ReplaceId = 103;
 
     internal static ExistingFilePolicy? PolicyForButton(int button) => button switch
     {
@@ -28,10 +29,10 @@ internal static class NativeConflictDialog
     {
         var labels = new[]
         {
+            "Omitir iguales por tamaño y fecha (recomendado)\nNo lee contenido. Reemplaza los que difieran en tamaño o fecha; no detecta daños con los mismos metadatos.",
             "Conservar existentes\nCopiar solo los archivos que faltan, sin comparar contenido.",
-            "Omitir idénticos y reemplazar distintos\nLeer el contenido. Los discos lentos pueden hacer que esta comparación tarde.",
-            "Reemplazar todos sin comparar\nSustituir los archivos existentes con los del origen.",
-            "Omitir por tamaño y fecha (rápido)\nNo lee contenido. Reemplaza los que difieran en tamaño o fecha; no detecta daños con los mismos metadatos.",
+            "Comparar contenido y reemplazar distintos\nLee el contenido. En discos lentos esta comparación puede tardar.",
+            "Reemplazar todos sin comparar\nSustituye los archivos existentes con los del origen.",
         };
         var total = conflict.Destinations.Sum(item => (long)item.ExistingFiles);
         var details = string.Join(Environment.NewLine,
@@ -39,7 +40,8 @@ internal static class NativeConflictDialog
         var result = NativeTaskDialog.Show(owner, new NativeDialogSpec(
             "Hay archivos que ya existen",
             $"{total} archivos existentes en {conflict.Destinations.Count} destinos. Elige cómo continuar.",
-            labels, CancelId, CommandLinks: true, CommonCancel: true, Expanded: details), token, onCreated);
+            labels, MetadataId, CommandLinks: true, CommonCancel: true, Expanded: details,
+            Icon: NativeDialogIcon.Warning), token, onCreated);
         return PolicyForButton(result.Button);
     }
 

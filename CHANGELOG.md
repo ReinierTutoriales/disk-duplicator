@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — lectura independiente por defecto y pulido de la interfaz
+
+- Motor: la lectura independiente por destino pasa a ser el modo predeterminado. Se elige automáticamente (SSD NVMe/SATA local, 2–16 destinos, ningún destino en el disco del origen) y, si no aplica, se usa la lectura compartida en lugar de fallar.
+- Motor: los lectores acuerdan el hash BLAKE3 de cada archivo antes de enviar el cierre a su destino; un origen que cambia entre lecturas detiene la copia antes de que un segundo destino confirme contenido distinto. Se elimina el riesgo documentado del prototipo.
+- Motor: la comprobación final del árbol de origen se ejecuta una vez en lugar de una por lector. Un archivo existente que cambia tras la comprobación rápida ahora falla solo ese destino.
+- Diagnóstico (esquema 5): `IndependentSourceReads` registra el modo realmente usado.
+- UI: la omisión rápida por tamaño y fecha es la política predeterminada para archivos existentes (selector en Opciones); en el diálogo de conflictos aparece primero y es el botón por defecto.
+- UI: diseño adaptable (márgenes 12/16, ancho máximo legible, botones solo con icono en ventanas estrechas), menú nativo con atajos Ctrl+O/Ctrl+S, Ctrl+Enter para iniciar, iconos Segoe Fluent con color de estado, tarjetas por destino con barra de progreso propia, diálogos nativos con iconos estándar de Windows.
+- Limpieza: se eliminan código y parámetros sin uso.
+
 ## Unreleased — independent source reads prototype
 
 - Motor: modo de prueba explícito de lectura y pool independientes por destino para origen NVMe/SATA sólido, de 2 a 16 destinos. Presupuesto conjunto máximo de 256 MiB; la ruta compartida continúa por defecto. La telemetría JSON distingue modos y contabiliza las relecturas físicas; VERIFY continúa conjunto.

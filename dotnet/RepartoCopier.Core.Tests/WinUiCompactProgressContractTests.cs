@@ -26,8 +26,10 @@ public sealed class WinUiCompactProgressContractTests
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
         Assert.IsTrue(app.Contains("Microsoft.UI.Xaml/DensityStyles/Compact.xaml", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("<TitleBar x:Name=\"AppTitleBar\"", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("SizeInt32(720, 320)", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("VerticalAlignment=\"Top\" Margin=\"0,4,0,0\"", StringComparison.Ordinal));
+        // Default 760×540 DIP leaves room for the running view without scrolling; 540×320 stays the minimum.
+        Assert.IsTrue(code.Contains("DefaultWidth = 760", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("DefaultHeight = 540", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("x:Name=\"RunningPanel\" Visibility=\"Collapsed\" Spacing=\"12\" VerticalAlignment=\"Top\"", StringComparison.Ordinal));
     }
 
     [TestMethod]
@@ -41,14 +43,15 @@ public sealed class WinUiCompactProgressContractTests
     }
 
     [TestMethod]
-    public void DestinationChipsStayDenseWithOptionalVerification()
+    public void DestinationChipsWrapResponsivelyWithOptionalVerification()
     {
         var root = FindRepositoryRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
-        Assert.IsTrue(xaml.Contains("MinWidth=\"56\" MaxWidth=\"148\" Height=\"30\" Padding=\"5,0,2,0\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Width=\"24\" Height=\"24\" Padding=\"0\"", StringComparison.Ordinal));
-        Assert.IsTrue(xaml.Contains("Margin\" Value=\"0,0,2,0\"", StringComparison.Ordinal));
+        // Chips flow into as many columns as fit and wrap; the host scrolls only past ~3 rows.
+        Assert.IsTrue(xaml.Contains("<UniformGridLayout MinItemWidth=\"168\" MinItemHeight=\"36\"", StringComparison.Ordinal));
+        Assert.IsTrue(xaml.Contains("x:Name=\"DestinationListHost\" MaxHeight=\"124\"", StringComparison.Ordinal));
+        Assert.IsTrue(code.Contains("WideLayoutMinWidth = 640", StringComparison.Ordinal));
         Assert.IsTrue(xaml.Contains("VerifyCheck", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("VerifyCheck", StringComparison.Ordinal));
         Assert.IsTrue(code.Contains("Verify: VerifyCheck.IsChecked == true", StringComparison.Ordinal));
