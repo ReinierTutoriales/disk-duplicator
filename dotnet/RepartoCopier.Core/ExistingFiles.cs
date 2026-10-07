@@ -9,7 +9,7 @@ public enum ExistingFilePolicy
     /// <summary>Existing files are never touched; only missing files are copied.</summary>
     KeepExisting,
 
-    /// <summary>Existing files with the same size and BLAKE3 hash are skipped; different ones are replaced.</summary>
+    /// <summary>Existing files with the same size and identical bytes are skipped; different ones are replaced.</summary>
     ReplaceDifferent,
 
     /// <summary>Every file that already existed when the copy was prepared is replaced without comparing it.</summary>

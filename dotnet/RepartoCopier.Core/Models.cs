@@ -10,6 +10,7 @@ public enum DestinationPhase
     Done,
     Failed,
     Cancelled,
+    Comparing,
 }
 
 /// <summary>One phase transition of a destination, as an offset from the creation of its progress tracker.</summary>
@@ -39,6 +40,13 @@ public sealed record DestinationSnapshot(
     int QueueDepth,
     ulong Retries)
 {
+    public ulong ComparisonBytesRead { get; init; }
+    public ulong ComparisonBytesTotal { get; init; }
+    public ulong ComparisonBytesProcessed { get; init; }
+    public ulong ComparisonFilesDone { get; init; }
+    public ulong ComparisonFilesTotal { get; init; }
+    public ulong ComparisonIdenticalFiles { get; init; }
+
     public double SustainedWrite5sBytesPerSecond { get; init; }
     public double SustainedWrite10sBytesPerSecond { get; init; }
 
@@ -129,6 +137,13 @@ internal sealed class DestinationProgress
     private ulong _writeSampleBytes;
     private double _writeEwma;
     private readonly SlidingByteRateWindow _sustainedWriteRate = new();
+    private ulong _comparisonRead;
+    private ulong _comparisonTotal;
+    private ulong _comparisonProcessed;
+    private ulong _comparisonFileRead;
+    private ulong _comparisonFilesDone;
+    private ulong _comparisonFilesTotal;
+    private ulong _comparisonIdenticalFiles;
     private ulong _verifiedBytes;
     private ulong _verifyBytesTotal;
     private ulong _verifyFilesDone;
@@ -271,6 +286,40 @@ internal sealed class DestinationProgress
         }
     }
 
+    internal void BeginComparison(ulong bytes, ulong files = 0)
+    {
+        lock (_gate)
+        {
+            _comparisonRead = _comparisonProcessed = _comparisonFileRead = 0;
+            _comparisonFilesDone = _comparisonIdenticalFiles = 0;
+            _comparisonTotal = bytes;
+            _comparisonFilesTotal = files;
+            Phase = DestinationPhase.Comparing;
+            RecordPhaseMarkLocked(Phase);
+        }
+    }
+
+    internal void AddCompared(int bytes)
+    {
+        if (bytes <= 0) return;
+        lock (_gate)
+        {
+            _comparisonRead = checked(_comparisonRead + (ulong)bytes);
+            _comparisonFileRead = checked(_comparisonFileRead + (ulong)bytes);
+        }
+    }
+
+    internal void MarkComparisonFileDone(ulong size, bool identical)
+    {
+        lock (_gate)
+        {
+            _comparisonProcessed = checked(_comparisonProcessed + size);
+            _comparisonFileRead = 0;
+            _comparisonFilesDone++;
+            if (identical) _comparisonIdenticalFiles++;
+        }
+    }
+
     public void SetVerifyWork(ulong bytes, ulong files)
     {
         lock (_gate)
@@ -327,6 +376,12 @@ internal sealed class DestinationProgress
                 QueueDepth,
                 Retries)
             {
+                ComparisonBytesRead = _comparisonRead,
+                ComparisonBytesTotal = _comparisonTotal,
+                ComparisonBytesProcessed = Math.Min(_comparisonTotal, checked(_comparisonProcessed + _comparisonFileRead)),
+                ComparisonFilesDone = _comparisonFilesDone,
+                ComparisonFilesTotal = _comparisonFilesTotal,
+                ComparisonIdenticalFiles = _comparisonIdenticalFiles,
                 SustainedWrite5sBytesPerSecond = sustained.FiveSecondsBytesPerSecond,
                 SustainedWrite10sBytesPerSecond = sustained.TenSecondsBytesPerSecond,
                 DeviceId = _deviceId,
