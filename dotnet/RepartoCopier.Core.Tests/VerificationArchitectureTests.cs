@@ -21,10 +21,13 @@ public sealed class VerificationArchitectureTests
     public void LargeCopyPoolIsReleasedBeforeVerifyStarts()
     {
         var engine = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.Core", "CopyEngine.cs"));
-        var release = engine.IndexOf("activeBufferPool.Dispose();", StringComparison.Ordinal);
+        var releaseShared = engine.IndexOf("bufferPool?.Dispose();", StringComparison.Ordinal);
+        var releaseIndependent = engine.IndexOf("foreach (var pool in independentPools) pool.Dispose();", StringComparison.Ordinal);
+        var clearIndependent = engine.IndexOf("independentPools.Clear();", StringComparison.Ordinal);
         var verify = engine.IndexOf("if (options.Verify && !token.IsCancellationRequested)", StringComparison.Ordinal);
-        Assert.IsTrue(release >= 0 && verify > release);
-        Assert.IsTrue(engine.Contains("bufferPool?.Dispose();", StringComparison.Ordinal));
+        Assert.IsTrue(releaseShared >= 0 && releaseIndependent > releaseShared &&
+            clearIndependent > releaseIndependent && verify > clearIndependent);
+        Assert.IsTrue(engine.LastIndexOf("foreach (var pool in independentPools) pool.Dispose();", StringComparison.Ordinal) > verify);
         Assert.IsFalse(engine.Contains("VerificationCrc32C", StringComparison.Ordinal));
     }
 
