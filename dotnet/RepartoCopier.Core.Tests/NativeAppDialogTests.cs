@@ -9,6 +9,13 @@ namespace RepartoCopier.Core.Tests;
 public sealed class NativeAppDialogTests
 {
     [TestMethod]
+    public void TaskDialogStructuresMatchTheCommctrlAbi()
+    {
+        Assert.AreEqual(IntPtr.Size == 8 ? 160 : 96, Marshal.SizeOf<NativeTaskDialog.Config>());
+        Assert.AreEqual(4 + IntPtr.Size, Marshal.SizeOf<NativeTaskDialog.Button>());
+    }
+
+    [TestMethod]
     [DataRow("settings-apply")]
     [DataRow("settings-close")]
     [DataRow("about-github")]
