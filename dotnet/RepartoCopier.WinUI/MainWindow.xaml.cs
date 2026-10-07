@@ -32,6 +32,7 @@ public sealed partial class MainWindow : Window
     private DateTimeOffset? _copyStartedAt;
     private bool _verificationRequested;
     private readonly LogicalProgressRate _copyProgressRate = new();
+    private readonly LogicalProgressRate _comparisonProgressRate = new();
 
     public MainWindow()
     {
@@ -211,6 +212,7 @@ public sealed partial class MainWindow : Window
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
+            _comparisonProgressRate.Reset();
 
             while (_job is null)
             {
@@ -281,8 +283,9 @@ public sealed partial class MainWindow : Window
         }
 
         var verifying = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Verifying);
-        OperationTitleText.Text = verifying ? "Comprobando integridad..." : "Copiando...";
-        StatusText.Text = verifying ? "Verificando integridad…" : "Copiando…";
+        var comparing = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Comparing);
+        OperationTitleText.Text = comparing ? "Comparando contenido..." : verifying ? "Comprobando integridad..." : "Copiando...";
+        StatusText.Text = comparing ? "Comparando archivos existentes…" : verifying ? "Verificando integridad…" : "Copiando…";
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -374,8 +377,26 @@ public sealed partial class MainWindow : Window
         }
         var paused = _job.IsPaused;
         var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
+        var comparing = snapshots.Any(item => item.Phase == DestinationPhase.Comparing);
         double percent;
-        if (verifying)
+        if (comparing)
+        {
+            var comparisonTotal = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.ComparisonBytesTotal));
+            var processed = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.ComparisonBytesProcessed));
+            var read = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => checked(sum + item.ComparisonBytesRead));
+            percent = comparisonTotal == 0 ? 0 : Math.Clamp(processed * 100d / comparisonTotal, 0, 100);
+            var speed = _comparisonProgressRate.Observe(read);
+            SpeedMetricText.Text = Throughput.Format(paused ? 0 : speed);
+            // Different files stop early; physical read rate cannot predict logical completion time.
+            RemainingMetricText.Text = "--:--:--";
+            OverallDetailText.Text = $"Comparación: {FormatBytes(processed)} de {FormatBytes(comparisonTotal)} · lectura conjunta";
+            if (!paused && !_cancellationRequested)
+            {
+                OperationTitleText.Text = "Comparando contenido...";
+                StatusText.Text = "Comparando archivos existentes; aún no se está copiando";
+            }
+        }
+        else if (verifying)
         {
             var verifyActive = snapshots
                 .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled && item.VerifyBytesTotal > 0)
@@ -436,7 +457,9 @@ public sealed partial class MainWindow : Window
         var filesDone = activeFileSnapshots.Length == 0
             ? snapshots.Select(item => item.FilesDone).DefaultIfEmpty(0UL).Max()
             : activeFileSnapshots.Min(item => item.FilesDone);
-        FilesMetricText.Text = $"{filesDone}/{filesTotal}";
+        FilesMetricText.Text = comparing
+            ? $"{snapshots.Sum(item => (long)item.ComparisonFilesDone)}/{snapshots.Sum(item => (long)item.ComparisonFilesTotal)}"
+            : $"{filesDone}/{filesTotal}";
 
         if (_copyStartedAt is not null)
             ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
@@ -844,6 +867,7 @@ public sealed partial class MainWindow : Window
 
     private static string FormatPhase(DestinationPhase phase) => phase switch
     {
+        DestinationPhase.Comparing => "Comparando contenido",
         DestinationPhase.Done => "Completado",
         DestinationPhase.Failed => "Fallido",
         DestinationPhase.Cancelled => "Cancelado",
@@ -853,53 +877,15 @@ public sealed partial class MainWindow : Window
     // Existing destination files are never replaced without an explicit, per-copy choice.
     private async Task<ExistingFilePolicy?> AskExistingFilesAsync(ExistingFilesConflictException conflict)
     {
-        var details = string.Join(
-            Environment.NewLine,
-            conflict.Destinations.Select(item =>
-                $"{item.Destination}: {item.ExistingFiles} de {item.TotalFiles} archivos ya existen"));
-        var choices = new RadioButtons
+        await _dialogGate.WaitAsync();
+        try
         {
-            Items =
-            {
-                "Conservar existentes",
-                "Omitir idénticos y reemplazar distintos",
-                "Reemplazar todos sin comparar",
-            },
-        };
-        var dialog = new ContentDialog
-        {
-            XamlRoot = Root.XamlRoot,
-            Title = "Hay archivos que ya existen",
-            Content = new StackPanel
-            {
-                Spacing = 12,
-                Children =
-                {
-                    choices,
-                    new ScrollViewer
-                    {
-                        MaxHeight = 80,
-                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                        Content = new TextBlock { Text = details, TextWrapping = TextWrapping.Wrap },
-                    },
-                },
-            },
-            PrimaryButtonText = "Continuar",
-            CloseButtonText = "Cancelar",
-            DefaultButton = ContentDialogButton.Close,
-            IsPrimaryButtonEnabled = false,
-        };
-        choices.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = choices.SelectedIndex >= 0;
-        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary)
-            return null;
-        return choices.SelectedIndex switch
-        {
-            0 => ExistingFilePolicy.KeepExisting,
-            1 => ExistingFilePolicy.ReplaceDifferent,
-            2 => ExistingFilePolicy.ReplaceAll,
-            _ => null,
-        };
+            if (_closeRequested || _preparationCancel?.IsCancellationRequested == true) return null;
+            return NativeConflictDialog.Show(
+                WinRT.Interop.WindowNative.GetWindowHandle(this), conflict,
+                _preparationCancel?.Token ?? CancellationToken.None);
+        }
+        finally { _dialogGate.Release(); }
     }
 
     private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)

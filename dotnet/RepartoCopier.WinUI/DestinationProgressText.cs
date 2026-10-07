@@ -6,6 +6,7 @@ internal static class DestinationProgressText
 {
     internal static string Format(DestinationSnapshot snapshot) => snapshot.Phase switch
     {
+        DestinationPhase.Comparing => $"Compar. {Percent(snapshot.ComparisonBytesProcessed, snapshot.ComparisonBytesTotal)}%",
         DestinationPhase.Copying => $"Copia {Percent(snapshot.Written, snapshot.Total)}%",
         DestinationPhase.Verifying => $"Verif. {Percent(snapshot.VerifiedBytes, snapshot.VerifyBytesTotal)}%",
         DestinationPhase.Done => snapshot.FilesErrored > 0 ? "Con errores"
