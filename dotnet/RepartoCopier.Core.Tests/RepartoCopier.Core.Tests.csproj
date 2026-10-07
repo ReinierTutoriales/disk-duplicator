@@ -18,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RepartoCopier.Core\RepartoCopier.Core.csproj" />
     <Compile Include="..\RepartoCopier.WinUI\DestinationProgressText.cs" Link="UI\DestinationProgressText.cs" />
+    <Compile Include="..\RepartoCopier.WinUI\NativeConflictDialog.cs" Link="UI\NativeConflictDialog.cs" />
     <Compile Include="..\RepartoCopier.WinUI\CopyProfile.cs" Link="UI\CopyProfile.cs" />
     <Compile Include="..\RepartoCopier.WinUI\BuildInfo.cs" Link="UI\BuildInfo.cs" />
     <Compile Include="..\RepartoCopier.WinUI\DiagnosticsExport.cs" Link="UI\DiagnosticsExport.cs" />

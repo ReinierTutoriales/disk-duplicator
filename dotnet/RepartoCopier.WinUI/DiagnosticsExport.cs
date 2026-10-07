@@ -37,6 +37,7 @@ internal static class DiagnosticsExport
         "Destinations[].Outcome is Completed, CompletedWithErrors, Failed, Cancelled or InProgress, derived from the final Phase and FilesErrored.",
         "BuildRevision is the commit SHA embedded at build time (SourceRevisionId) and is null when the build had none.",
         "This final snapshot does not record a time series.",
+        "ComparisonBytesRead counts actual destination bytes read when comparing existing content; source reads are not included. ComparisonBytesProcessed counts logical candidate bytes classified, including unread tails once a difference is found. ComparisonFilesDone and ComparisonIdenticalFiles count candidates classified and identical candidates. Comparison precedes COPY and is excluded from CopyPhaseElapsed and final verification counters.",
         "VerificationRequested records the final full-content reread choice (null if unknown). Outcome=Completed means the requested operation completed, not that verification ran. VerifyFinishedAt and verification counters record actual verification. Without verification, source hashing, write checks, durable flush and atomic commit still run; destination content is not checked by final reread.",
     ];
 
