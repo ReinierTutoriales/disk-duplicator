@@ -163,22 +163,23 @@ public static class CopyEngine
     }
 
     /// <summary>
-    /// Independent readers are the default for any source (HDD, SSD, NVMe, USB, network) with 2-16
-    /// destinations: a slow destination never holds back a fast one. One destination gains nothing, and more
-    /// than 16 would shrink each pool below the minimum, so those copies use the single shared reader.
+    /// Independent readers (one per destination, each with its own pool) are used only when the source can
+    /// serve several sequential streams at once: a local NVMe/SATA SSD with 2-16 destinations. Measured on real
+    /// hardware, fast destinations then finish at their own speed instead of waiting for the slowest one.
+    /// A rotational, USB, network or unidentified source delivers one stream at its full rate; splitting it
+    /// between N readers gives each destination 1/N of it (HDD at 108 MB/s to three NVMe: ~35 MB/s each),
+    /// so those sources use the single shared reader and every destination gets the source's full speed.
     /// </summary>
-    internal static bool UseIndependentSourceReads(CopyOptions options, int destinations) =>
-        options.IndependentSourceReads && destinations is >= 2 and <= MaximumIndependentReaders;
+    internal static bool UseIndependentSourceReads(CopyOptions options, StorageDeviceInfo source, int destinations) =>
+        options.IndependentSourceReads &&
+        destinations is >= 2 and <= MaximumIndependentReaders &&
+        IsParallelReadSource(source);
 
-    /// <summary>
-    /// Only a local NVMe/SATA SSD serves concurrent sequential streams without penalty. Any other source
-    /// (rotational, USB, network, unknown) takes the independent readers' blocks in turn, one 8 MiB read at
-    /// a time, so a disk head moves once per block instead of thrashing between concurrent requests.
-    /// </summary>
-    internal static bool SerializeIndependentReads(StorageDeviceInfo source) =>
-        source.IsNetwork ||
-        source.MediaKind != StorageMediaKind.SolidState ||
-        source.BusType is not ("NVMe" or "SATA");
+    /// <summary>Only a local NVMe/SATA SSD serves concurrent sequential streams without dividing its rate.</summary>
+    internal static bool IsParallelReadSource(StorageDeviceInfo source) =>
+        !source.IsNetwork &&
+        source.MediaKind == StorageMediaKind.SolidState &&
+        source.BusType is "NVMe" or "SATA";
 
     internal static int IndependentPoolCapacity(int destinations)
     {
@@ -369,18 +370,13 @@ public static class CopyEngine
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
         var independentPools = new List<SharedFanoutBufferPool>();
-        DeviceScheduler? serializedSourceScheduler = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
-        var independent = UseIndependentSourceReads(options, copy.DestinationRoots.Length);
-        // A source on a destination's disk is already arbitrated with that disk's writes.
-        var sourceScheduler = deviceSchedulers.SharedSourceScheduler;
-        if (independent && sourceScheduler is null && SerializeIndependentReads(copy.SourceDevice))
-            sourceScheduler = serializedSourceScheduler = new DeviceScheduler(
-                $"{copy.SourceDevice.PhysicalDeviceId}:source", 1, SharedFanoutBlockBytes);
-        job.Telemetry.AttachDeviceSchedulers(serializedSourceScheduler is null
-            ? deviceSchedulers.Schedulers
-            : [.. deviceSchedulers.Schedulers, serializedSourceScheduler]);
+        job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
+        var independent = UseIndependentSourceReads(options, copy.SourceDevice, copy.DestinationRoots.Length);
+        // The shared reader of a single-stream source (HDD, USB, network) keeps the next block in flight while
+        // the current one is hashed and handed out, so the device never idles between requests.
+        var sourceReadAhead = !independent && !IsParallelReadSource(copy.SourceDevice);
         var sourceTreeChanged = false;
         try
         {
@@ -441,7 +437,8 @@ public static class CopyEngine
                         try
                         {
                             await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
-                                independentPools[index], sourceScheduler, options.KeepGoing).ConfigureAwait(false);
+                                independentPools[index], deviceSchedulers.SharedSourceScheduler, options.KeepGoing,
+                                readAhead: false).ConfigureAwait(false);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -462,7 +459,8 @@ public static class CopyEngine
                 else
                 {
                     await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job,
-                        bufferPool!, deviceSchedulers.SharedSourceScheduler, options.KeepGoing).ConfigureAwait(false);
+                        bufferPool!, deviceSchedulers.SharedSourceScheduler, options.KeepGoing,
+                        sourceReadAhead).ConfigureAwait(false);
                 }
 
                 if (copy.SourceScan is not null)
@@ -558,7 +556,6 @@ public static class CopyEngine
             }
             bufferPool?.Dispose();
             foreach (var pool in independentPools) pool.Dispose();
-            serializedSourceScheduler?.Dispose();
             copy.ReleaseStateLeases();
         }
     }
@@ -572,7 +569,8 @@ public static class CopyEngine
         CopyJob job,
         SharedFanoutBufferPool bufferPool,
         DeviceScheduler? sharedSourceScheduler,
-        bool keepGoing)
+        bool keepGoing,
+        bool readAhead)
     {
         var token = job.Token;
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
@@ -624,7 +622,8 @@ public static class CopyEngine
                 transferAlignment,
                 bufferPool,
                 job,
-                sharedSourceScheduler).ConfigureAwait(false);
+                sharedSourceScheduler,
+                readAhead).ConfigureAwait(false);
             if (sourceResult is null)
                 continue;
 
@@ -645,11 +644,16 @@ public static class CopyEngine
         int transferAlignment,
         SharedFanoutBufferPool bufferPool,
         CopyJob job,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        bool readAhead)
     {
         using var hasher = Hasher.New();
         DirectIoSourceReader.OverlappedSession? direct = null;
         FileStream? buffered = null;
+        // At most one source read is ever in flight. With readAhead the next block's read is issued as soon as
+        // the current one completes, and overlaps its hashing and delivery; otherwise read, hash and deliver
+        // run strictly in turn as before.
+        PendingSourceBlock? next = null;
         try
         {
             if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
@@ -664,65 +668,24 @@ public static class CopyEngine
                 if (active.Count == 0)
                     return null;
 
-                var reservedReferences = active.Count;
-                var poolStarted = Stopwatch.GetTimestamp();
-                SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
-                    readBufferSize,
-                    transferAlignment,
-                    reservedReferences,
-                    job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
-                job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
-
-                int read;
+                var block = next ?? await BeginSourceBlockAsync(totalRead).ConfigureAwait(false);
+                next = null;
+                SharedFanoutBufferPool.Lease? lease = block.Lease;
                 try
                 {
-                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
-                    var readStarted = Stopwatch.GetTimestamp();
-                    DeviceScheduler.IoLease? sourceIo = null;
-                    try
-                    {
-                        if (sharedSourceScheduler is not null)
-                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
-
-                        if (direct is not null)
-                        {
-                            try
-                            {
-                                read = await direct.ReadAsync(lease.Buffer, readBufferSize, totalRead, job.Token).ConfigureAwait(false);
-                                job.Telemetry.RecordDirectSourceRead(read);
-                            }
-                            catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
-                            {
-                                direct.Dispose();
-                                direct = null;
-                                job.Telemetry.RecordDirectSourceFallback();
-                                buffered = OpenSourceStream(entry.SourcePath);
-                                buffered.Position = totalRead;
-                                read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                            }
-                        }
-                        else
-                        {
-                            read = await buffered!.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                        }
-                    }
-                    finally
-                    {
-                        sourceIo?.Dispose();
-                    }
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
-
+                    var read = await block.Read.ConfigureAwait(false);
                     if (read == 0)
                         throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
 
                     totalRead += read;
+                    if (readAhead && totalRead < entry.Size)
+                        next = await BeginSourceBlockAsync(totalRead).ConfigureAwait(false);
+
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
                     job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
                     active.RemoveAll(worker => !worker.IsActive);
-                    var releasedBeforeDelivery = reservedReferences - active.Count;
+                    var releasedBeforeDelivery = block.ReservedReferences - active.Count;
                     for (var released = 0; released < releasedBeforeDelivery; released++)
                         lease.ReleaseReference();
                     if (active.Count == 0)
@@ -731,12 +694,11 @@ public static class CopyEngine
                         return null;
                     }
 
-                    var block = new SharedBlock(lease, read);
+                    var sharedBlock = new SharedBlock(lease, read);
                     lease = null;
                     var deliveryStarted = Stopwatch.GetTimestamp();
-                    await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
-                    var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                    job.Telemetry.RecordFanoutWait(deliveryElapsed);
+                    await DeliverAsync(active, new DataMessage(sharedBlock), job).ConfigureAwait(false);
+                    job.Telemetry.RecordFanoutWait(Stopwatch.GetElapsedTime(deliveryStarted));
                     active.RemoveAll(worker => !worker.IsActive);
                     if (active.Count == 0)
                         return null;
@@ -752,11 +714,75 @@ public static class CopyEngine
         }
         finally
         {
+            // Never release a buffer or close the file under a read that is still running.
+            if (next is not null)
+            {
+                try { await next.Read.ConfigureAwait(false); } catch { }
+                next.Lease.Dispose();
+            }
             direct?.Dispose();
             if (buffered is not null)
                 await buffered.DisposeAsync().ConfigureAwait(false);
         }
+
+        async Task<PendingSourceBlock> BeginSourceBlockAsync(long offset)
+        {
+            var reservedReferences = active.Count;
+            var poolStarted = Stopwatch.GetTimestamp();
+            var lease = await bufferPool.RentAsync(
+                readBufferSize,
+                transferAlignment,
+                reservedReferences,
+                job.Token).ConfigureAwait(false);
+            job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
+            job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+            return new PendingSourceBlock(lease, reservedReferences, ReadSourceBlockAsync(lease, offset));
+        }
+
+        async Task<int> ReadSourceBlockAsync(SharedFanoutBufferPool.Lease lease, long offset)
+        {
+            var remaining = checked((int)Math.Min(readBufferSize, entry.Size - offset));
+            var readStarted = Stopwatch.GetTimestamp();
+            DeviceScheduler.IoLease? sourceIo = null;
+            int read;
+            try
+            {
+                if (sharedSourceScheduler is not null)
+                    sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
+
+                if (direct is not null)
+                {
+                    try
+                    {
+                        read = await direct.ReadAsync(lease.Buffer, readBufferSize, offset, job.Token).ConfigureAwait(false);
+                        job.Telemetry.RecordDirectSourceRead(read);
+                    }
+                    catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                    {
+                        direct.Dispose();
+                        direct = null;
+                        job.Telemetry.RecordDirectSourceFallback();
+                        buffered = OpenSourceStream(entry.SourcePath);
+                        buffered.Position = offset;
+                        read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    buffered!.Position = offset;
+                    read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                sourceIo?.Dispose();
+            }
+            job.Telemetry.RecordSourceRead(read, Stopwatch.GetElapsedTime(readStarted));
+            return read;
+        }
     }
+
+    private sealed record PendingSourceBlock(SharedFanoutBufferPool.Lease Lease, int ReservedReferences, Task<int> Read);
 
     private static FileStream OpenSourceStream(string path) =>
         new(path, new FileStreamOptions

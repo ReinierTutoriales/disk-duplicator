@@ -22,7 +22,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Invariantes de copia
 
-- La lectura independiente por destino es el modo predeterminado para cualquier origen (HDD, SSD, NVMe, USB, red) con 2 a 16 destinos: un lector y un pool propio por destino, de modo que un destino lento no frena a los rápidos. Con un SSD local NVMe/SATA los lectores leen en paralelo; con cualquier otro origen, o si el origen comparte disco con un destino, leen por turnos, un bloque de 8 MiB cada vez, para no castigar el cabezal. Con 1 destino o más de 16 se usa la lectura compartida FAN-OUT. No es configurable.
+- El modo de lectura depende del origen y no es configurable. Con un SSD local NVMe/SATA y de 2 a 16 destinos, cada destino tiene su propio lector y pool: un destino lento no frena a los rápidos. Con un origen HDD, USB, de red o no identificado, un único lector compartido lee el origen una sola vez y entrega cada bloque a todos los destinos, con el bloque siguiente ya en lectura; así cada destino recibe la velocidad completa del origen en lugar de 1/N (medido: HDD USB → 3 NVMe pasa de ~35 MB/s a la velocidad del HDD por destino). Con 1 destino o más de 16 también se usa el lector compartido.
 - Si ya existen archivos en el destino, la aplicación omite los iguales por tamaño y fecha (rápido, sin leer contenido) y reemplaza los que difieran. No hay diálogo ni selector: es la política fija del producto. El motor conserva las demás políticas para uso programático y pruebas.
 - Una carpeta seleccionada se replica incluyendo su carpeta raíz.
 - Se conserva exactamente la estructura de directorios, incluidas carpetas vacías.
