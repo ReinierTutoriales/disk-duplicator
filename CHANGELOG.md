@@ -6,7 +6,8 @@
 - Motor: los lectores acuerdan el hash BLAKE3 de cada archivo antes de enviar el cierre a su destino; un origen que cambia entre lecturas detiene la copia antes de que un segundo destino confirme contenido distinto. Se elimina el riesgo documentado del prototipo.
 - Motor: la comprobación final del árbol de origen se ejecuta una vez en lugar de una por lector. Un archivo existente que cambia tras la comprobación rápida ahora falla solo ese destino.
 - Diagnóstico (esquema 5): `IndependentSourceReads` registra el modo realmente usado.
-- UI: la omisión rápida por tamaño y fecha es la política predeterminada para archivos existentes (selector en Opciones); en el diálogo de conflictos aparece primero y es el botón por defecto.
+- UI: la omisión rápida por tamaño y fecha es la política fija para archivos existentes; se eliminan el selector, el diálogo de conflictos y la fase de comparación de contenido de la interfaz. La lectura independiente es fija (sin casilla).
+- UI: iconos de estado Segoe Fluent rellenos (completado, error, aviso) en capas con pinceles de tema, que siguen el tema claro/oscuro sin código; tarjetas por destino con enlaces compilados `x:Bind` que solo notifican cambios reales; una sola pasada por las instantáneas en cada refresco de 250 ms.
 - UI: diseño adaptable (márgenes 12/16, ancho máximo legible, botones solo con icono en ventanas estrechas), menú nativo con atajos Ctrl+O/Ctrl+S, Ctrl+Enter para iniciar, iconos Segoe Fluent con color de estado, tarjetas por destino con barra de progreso propia, diálogos nativos con iconos estándar de Windows.
 - Limpieza: se eliminan código y parámetros sin uso.
 

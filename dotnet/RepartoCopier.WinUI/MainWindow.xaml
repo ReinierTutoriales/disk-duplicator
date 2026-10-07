@@ -4,6 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:local="using:RepartoCopier.WinUI"
     mc:Ignorable="d"
     Title="RepartoCopier">
 
@@ -214,19 +215,6 @@
                             </StackPanel>
                         </Expander.Header>
                         <StackPanel Spacing="8">
-                            <ComboBox x:Name="ExistingFilesCombo" Header="Si ya existen archivos en el destino" HorizontalAlignment="Stretch"
-                                      SelectedIndex="0" AutomationProperties.Name="Si ya existen archivos en el destino">
-                                <ComboBoxItem Content="Omitir iguales por tamaño y fecha (rápido)"
-                                              ToolTipService.ToolTip="No lee contenido. Reemplaza los que difieran en tamaño o fecha."/>
-                                <ComboBoxItem Content="Preguntar cada vez"/>
-                                <ComboBoxItem Content="Conservar existentes"/>
-                                <ComboBoxItem Content="Comparar contenido y reemplazar distintos"/>
-                                <ComboBoxItem Content="Reemplazar todos"/>
-                            </ComboBox>
-                            <CheckBox x:Name="IndependentReadsCheck" IsChecked="True"
-                                      ToolTipService.ToolTip="Cada destino lee el origen a su ritmo con su propio búfer: un destino lento no frena a los rápidos. Funciona con cualquier origen (HDD, SSD, NVMe, USB) y de 2 a 16 destinos. Con HDD o USB los lectores leen por turnos. Desactívala para leer el origen una sola vez para todos los destinos (mejor con origen lento y destinos de velocidad parecida).">
-                                <TextBlock Text="Lectura independiente por destino (recomendado)" TextWrapping="Wrap"/>
-                            </CheckBox>
                             <CheckBox x:Name="VerifyCheck" IsChecked="False"
                                       ToolTipService.ToolTip="Relee todo el origen y los destinos. Sin esta opción, la copia termina tras escribir y confirmar los archivos, sin comprobar su contenido mediante relectura.">
                                 <TextBlock Text="Verificar contenido al terminar" TextWrapping="Wrap"/>
@@ -246,9 +234,21 @@
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                 <Border Width="40" Height="40" CornerRadius="{ThemeResource OverlayCornerRadius}"
                                         Background="{ThemeResource SubtleFillColorSecondaryBrush}" VerticalAlignment="Center">
-                                    <FontIcon x:Name="OperationIcon" Glyph="&#xE8A5;" FontSize="20"
-                                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <!-- One layer per state, each with its theme brush: colors follow Light/Dark without code lookups. -->
+                                    <Grid>
+                                        <FontIcon x:Name="StatusActiveIcon" Glyph="&#xE8A5;" FontSize="20"
+                                                  Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        <FontIcon x:Name="StatusSuccessIcon" Glyph="&#xEC61;" FontSize="20" Visibility="Collapsed"
+                                                  Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        <FontIcon x:Name="StatusCriticalIcon" Glyph="&#xEB90;" FontSize="20" Visibility="Collapsed"
+                                                  Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        <FontIcon x:Name="StatusCautionIcon" Glyph="&#xE7BA;" FontSize="20" Visibility="Collapsed"
+                                                  Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Grid>
                                 </Border>
                                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                     <TextBlock x:Name="OperationTitleText" Text="Copiando…" Style="{StaticResource CaptionTextBlockStyle}"
@@ -347,21 +347,33 @@
                                                    ItemsStretch="Fill" />
                             </ItemsRepeater.Layout>
                             <ItemsRepeater.ItemTemplate>
-                                <DataTemplate>
+                                <DataTemplate x:DataType="local:RunningDestinationRow">
                                     <Border Padding="12,8" CornerRadius="{ThemeResource OverlayCornerRadius}"
                                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                                            ToolTipService.ToolTip="{Binding Detail}" AutomationProperties.Name="{Binding Detail}">
+                                            ToolTipService.ToolTip="{x:Bind Detail, Mode=OneWay}"
+                                            AutomationProperties.Name="{x:Bind Detail, Mode=OneWay}">
                                         <StackPanel Spacing="6">
                                             <Grid ColumnSpacing="8">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                                <FontIcon Glyph="{Binding Glyph}" FontSize="14" VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Progress}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                <Grid VerticalAlignment="Center">
+                                                    <FontIcon Glyph="{x:Bind ActiveGlyph, Mode=OneWay}" FontSize="14"
+                                                              Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                                              Visibility="{x:Bind ActiveVisibility, Mode=OneWay}"/>
+                                                    <FontIcon Glyph="&#xEC61;" FontSize="14" Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                              Visibility="{x:Bind SuccessVisibility, Mode=OneWay}"/>
+                                                    <FontIcon Glyph="&#xEB90;" FontSize="14" Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                                              Visibility="{x:Bind CriticalVisibility, Mode=OneWay}"/>
+                                                    <FontIcon Glyph="{x:Bind CautionGlyph, Mode=OneWay}" FontSize="14"
+                                                              Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                                              Visibility="{x:Bind CautionVisibility, Mode=OneWay}"/>
+                                                </Grid>
+                                                <TextBlock Grid.Column="1" Text="{x:Bind Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="2" Text="{x:Bind Progress, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center"/>
                                             </Grid>
-                                            <ProgressBar Minimum="0" Maximum="100" Value="{Binding Percent}" ShowError="{Binding IsFailed}"
-                                                         ShowPaused="{Binding IsPaused}" />
+                                            <ProgressBar Minimum="0" Maximum="100" Value="{x:Bind Percent, Mode=OneWay}"
+                                                         ShowError="{x:Bind IsFailed, Mode=OneWay}" ShowPaused="{x:Bind IsPaused, Mode=OneWay}" />
                                         </StackPanel>
                                     </Border>
                                 </DataTemplate>

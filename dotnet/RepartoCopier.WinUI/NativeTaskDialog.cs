@@ -20,7 +20,8 @@ internal sealed record NativeDialogSpec(
 
 internal readonly record struct NativeDialogResult(int Button, int Radio);
 
-/// <summary>One owned, DPI-aware Windows dialog implementation. No dependency on the parent's XAML height.</summary>
+/// <summary>One owned, DPI-aware Windows dialog implementation. No dependency on the parent's XAML height.
+/// ABI layout follows commctrl.h (TASKDIALOGCONFIG and TASKDIALOG_BUTTON use pack 1).</summary>
 internal static class NativeTaskDialog
 {
     internal const int FirstButton = 100;
@@ -40,7 +41,7 @@ internal static class NativeTaskDialog
         using var memory = new NativeMemory();
         var shown = nint.Zero;
         Exception? callbackError = null;
-        NativeConflictDialog.Config config = default;
+        Config config = default;
         using var cancellation = token.Register(() =>
         {
             var window = Interlocked.CompareExchange(ref shown, nint.Zero, nint.Zero);
@@ -78,9 +79,9 @@ internal static class NativeTaskDialog
             }
             return 0;
         };
-        config = new NativeConflictDialog.Config
+        config = new Config
         {
-            Size = (uint)Marshal.SizeOf<NativeConflictDialog.Config>(), Owner = owner,
+            Size = (uint)Marshal.SizeOf<Config>(), Owner = owner,
             Flags = 0x1000 | 0x0008 | (spec.CommandLinks ? 0x0010u : 0u),
             CommonButtons = spec.CommonCancel ? 0x0008u : 0u,
             WindowTitle = memory.String("RepartoCopier"),
@@ -100,6 +101,42 @@ internal static class NativeTaskDialog
         Marshal.ThrowExceptionForHR(hr);
         if (callbackError is not null) ExceptionDispatchInfo.Capture(callbackError).Throw();
         return token.IsCancellationRequested ? new(Cancel, 0) : new(button, radio);
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    internal struct Config
+    {
+        public uint Size;
+        public nint Owner;
+        public nint Instance;
+        public uint Flags;
+        public uint CommonButtons;
+        public nint WindowTitle;
+        public nint MainIcon;
+        public nint MainInstruction;
+        public nint Content;
+        public uint ButtonCount;
+        public nint Buttons;
+        public int DefaultButton;
+        public uint RadioCount;
+        public nint RadioButtons;
+        public int DefaultRadio;
+        public nint VerificationText;
+        public nint ExpandedInformation;
+        public nint ExpandedControlText;
+        public nint CollapsedControlText;
+        public nint FooterIcon;
+        public nint Footer;
+        public nint Callback;
+        public nint CallbackData;
+        public uint Width;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    internal struct Button
+    {
+        public int Id;
+        public nint Text;
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
@@ -128,10 +165,10 @@ internal static class NativeTaskDialog
         }
         internal nint Buttons(string[] labels, int first)
         {
-            var size = Marshal.SizeOf<NativeConflictDialog.Button>();
+            var size = Marshal.SizeOf<Button>();
             var pointer = Allocate(checked(size * labels.Length));
             for (var i = 0; i < labels.Length; i++)
-                Marshal.StructureToPtr(new NativeConflictDialog.Button { Id = first + i, Text = String(labels[i]) },
+                Marshal.StructureToPtr(new Button { Id = first + i, Text = String(labels[i]) },
                     pointer + i * size, false);
             return pointer;
         }
@@ -143,7 +180,7 @@ internal static class NativeTaskDialog
 
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("comctl32.dll", ExactSpelling = true)]
-    private static extern int TaskDialogIndirect(ref NativeConflictDialog.Config config, out int button, out int radio, nint verification);
+    private static extern int TaskDialogIndirect(ref Config config, out int button, out int radio, nint verification);
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("user32.dll", EntryPoint = "PostMessageW", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

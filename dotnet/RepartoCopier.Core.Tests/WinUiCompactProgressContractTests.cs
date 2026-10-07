@@ -39,7 +39,8 @@ public sealed class WinUiCompactProgressContractTests
         var code = File.ReadAllText(Path.Combine(root, "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml.cs"));
         Assert.IsTrue(code.Contains("_copyProgressRate.Observe(written)", StringComparison.Ordinal));
         Assert.IsFalse(code.Contains("diagnostics.SourceRead5sBytesPerSecond", StringComparison.Ordinal));
-        Assert.IsTrue(code.Contains("active.Min(item => item.Written)", StringComparison.Ordinal));
+        // Slowest healthy destination, computed in the single per-tick pass.
+        Assert.IsTrue(code.Contains("minWritten = Math.Min(minWritten, item.Written)", StringComparison.Ordinal));
     }
 
     [TestMethod]

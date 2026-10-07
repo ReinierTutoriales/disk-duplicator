@@ -33,8 +33,6 @@ public sealed partial class MainWindow
                 AddDestinationsButton, ClearDestinationsButton }) await CheckReachableAsync(control);
             OptionsExpander.IsExpanded = true;
             await SettleLayoutAsync();
-            await CheckReachableAsync(ExistingFilesCombo);
-            await CheckReachableAsync(IndependentReadsCheck);
             await CheckReachableAsync(VerifyCheck);
             await CheckReachableAsync(KeepGoingCheck);
             OptionsExpander.IsExpanded = false;
@@ -78,8 +76,6 @@ public sealed partial class MainWindow
                 ++pages < 3 ? 102 : NativeTaskDialog.Cancel, nint.Zero);
         })) throw new InvalidOperationException("Layout check authorized saving.");
         if (pages != 3) throw new InvalidOperationException("Native result pagination did not render all three pages.");
-        NativeConflictDialog.Show(nativeOwner, new ExistingFilesConflictException(
-            [new DestinationConflict("D:\\ISOS", 5, 5, [])]), deadline.Token, InspectAndClose);
         await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(new { Passed = true, Checks = report },
             new JsonSerializerOptions { WriteIndented = true }));
     }
