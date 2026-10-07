@@ -138,22 +138,6 @@ public sealed class DirectIoSourceReaderTests
     }
 
     [TestMethod]
-    public void ExistingFileHashHelperKeepsMinimalThreeParameterShape()
-    {
-        var method = typeof(CopyEngine).GetMethod(
-            "HashFileAsync",
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-
-        Assert.IsNotNull(method);
-        var parameters = method.GetParameters();
-        Assert.AreEqual(3, parameters.Length);
-        Assert.AreEqual(typeof(string), parameters[0].ParameterType);
-        Assert.AreEqual(typeof(CancellationToken), parameters[1].ParameterType);
-        Assert.AreEqual("ResourceGovernor", parameters[2].ParameterType.Name);
-        Assert.IsFalse(parameters[2].HasDefaultValue);
-    }
-
-    [TestMethod]
     public void BufferedLeaseKeepsExistingArrayPoolContract()
     {
         using var lease = SourceBufferLease.RentBuffered(1024 * 1024);

@@ -16,9 +16,9 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Arquitectura
 
-`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
+`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Los conflictos usan un Task Dialog Win32 modal con ventana propia y propietario explícito, independiente de la altura del copiador. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
 
-`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, BLAKE3 para comparar archivos existentes y para recovery y verificación post-copia mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
+`RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, comparación exacta por bloques de archivos existentes, BLAKE3 para los hashes de copia y recovery y verificación post-copia mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
 
 ## Invariantes de copia
 
@@ -29,9 +29,11 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 - Los archivos adicionales del destino no se eliminan.
 - El estado interno vive fuera del árbol copiado en `.disk-duplicator-state` por compatibilidad con recovery existente.
 - La verificación CRC32C final es opcional mediante «Verificar contenido al terminar», desactivada inicialmente. Sin ella se conservan escritura, flush y commit atómico, pero no se comprueba el contenido del destino mediante relectura. La UI distingue «Copiado» de «Verificado» y el JSON registra la opción elegida. Los perfiles conservan su elección de verificación.
-- Recovery y la comparación de archivos existentes conservan sus pruebas BLAKE3 independientes.
-- Un archivo que ya existe en el destino nunca se reemplaza sin una elección explícita. Si el preflight encuentra archivos existentes y no hay política, aborta antes de tocar ningún destino y la aplicación pregunta: «Conservar existentes» (no toca nada que ya exista), «Comparar contenido» (omite los idénticos por tamaño y BLAKE3, ignorando la fecha, y reemplaza los distintos) o «Reemplazar todos» (sin comparar). La elección no se guarda en los perfiles (versión 2; los de versión 1 se migran y nunca autorizan reemplazos). Los checkpoints del journal ya no deciden qué se omite: la comparación de contenido ocurre una sola vez, en la fase visible. Solo se pueden reemplazar los archivos que existían al preparar la copia: uno que aparezca después no se reemplaza. La verificación final es una elección independiente.
+- Recovery conserva sus pruebas BLAKE3. La comparación de existentes contrasta los bytes completos; una diferencia detiene la lectura de ese destino.
+- Un archivo que ya existe en el destino nunca se reemplaza sin una elección explícita. Si el preflight encuentra archivos existentes y no hay política, aborta antes de tocar ningún destino y la aplicación pregunta: «Conservar existentes» (no toca nada que ya exista), «Comparar contenido» (omite los idénticos por tamaño y comparación exacta de bytes, ignorando la fecha, y reemplaza los distintos) o «Reemplazar todos» (sin comparar). La elección no se guarda en los perfiles (versión 2; los de versión 1 se migran y nunca autorizan reemplazos). Los checkpoints del journal ya no deciden qué se omite: la comparación de contenido ocurre una sola vez, en la fase visible. Solo se pueden reemplazar los archivos que existían al preparar la copia: uno que aparezca después no se reemplaza. La verificación final es una elección independiente.
 - Symlinks, junctions, reparse points y solapamientos peligrosos se rechazan de forma fail-closed.
+
+La fase de comparación muestra avance lógico y bytes leídos por destino. Usa un workspace fijo de 8 MiB, lee el origen una vez por bloque y deja de leer una rama al encontrar la primera diferencia. Declarar idéntico un archivo requiere leerlo completo; conservar existentes no compara contenido.
 
 ## Rendimiento
 

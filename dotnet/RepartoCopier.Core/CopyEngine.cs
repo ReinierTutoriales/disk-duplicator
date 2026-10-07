@@ -321,7 +321,6 @@ public static class CopyEngine
         var token = job.Token;
         var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
-        using var resources = new ResourceGovernor();
         SharedFanoutBufferPool? bufferPool = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
@@ -329,7 +328,7 @@ public static class CopyEngine
         try
         {
             var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
-                ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token, resources).ConfigureAwait(false)
+                ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token).ConfigureAwait(false)
                 : CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
             for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
             {
@@ -1720,75 +1719,61 @@ public static class CopyEngine
         PreparedCopy copy,
         DestinationProgress[] progress,
         CopyJob job,
-        CancellationToken token,
-        ResourceGovernor resources)
+        CancellationToken token)
     {
         var masks = CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
+        var candidatesByFile = new List<int>[copy.Files.Count];
+        var totals = new ulong[progress.Length];
+        var fileCounts = new ulong[progress.Length];
+        for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+        {
+            token.ThrowIfCancellationRequested();
+            var entry = copy.Files[fileIndex];
+            var candidates = candidatesByFile[fileIndex] = [];
+            for (var slot = 0; slot < progress.Length; slot++)
+            {
+                var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
+                if (!File.Exists(destination) || WindowsPath.IsReparsePoint(destination)) continue;
+                if (new FileInfo(destination).Length != entry.Size) continue;
+                candidates.Add(slot);
+                totals[slot] = checked(totals[slot] + (ulong)entry.Size);
+                fileCounts[slot]++;
+            }
+        }
+        for (var slot = 0; slot < progress.Length; slot++)
+            progress[slot].BeginComparison(totals[slot], fileCounts[slot]);
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
         {
             token.ThrowIfCancellationRequested();
             await job.WaitIfPausedAsync(token).ConfigureAwait(false);
             var entry = copy.Files[fileIndex];
-            var candidates = new List<int>();
-            for (var slot = 0; slot < copy.DestinationRoots.Length; slot++)
-            {
-                var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
-                if (!File.Exists(destination) || WindowsPath.IsReparsePoint(destination)) continue;
-                if (new FileInfo(destination).Length == entry.Size)
-                    candidates.Add(slot);
-            }
+            var candidates = candidatesByFile[fileIndex];
             if (candidates.Count == 0) continue;
+            var paths = candidates.Select(slot => Path.Combine(copy.DestinationRoots[slot], entry.RelativePath)).ToArray();
             foreach (var slot in candidates)
-                progress[slot].SetLastFile(entry.RelativePath);
-
-            ValidateSourceSnapshot(entry);
-            var sourceHash = await HashFileAsync(entry.SourcePath, token, resources).ConfigureAwait(false);
-            ValidateSourceSnapshot(entry);
-            var checks = candidates.Select(async slot =>
             {
-                var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
+                progress[slot].SetLastFile(entry.RelativePath);
                 ValidateRuntimeDestinationPath(copy.DestinationRoots[slot], entry.RelativePath);
-                WindowsPath.EnsureRegularFile(destination, "El archivo existente que se compara");
-                if (new FileInfo(destination).Length != entry.Size)
-                    return;
-                var destinationHash = await HashFileAsync(destination, token, resources).ConfigureAwait(false);
-                if (destinationHash.AsSpan().SequenceEqual(sourceHash))
-                {
-                    masks[fileIndex][slot] = true;
-                    progress[slot].SetLastFile(entry.RelativePath);
-                }
-            }).ToArray();
-            await Task.WhenAll(checks).ConfigureAwait(false);
+                WindowsPath.EnsureRegularFile(Path.Combine(copy.DestinationRoots[slot], entry.RelativePath),
+                    "El archivo existente que se compara");
+            }
+            ValidateSourceSnapshot(entry);
+            var equal = await ExistingContentComparer.CompareAsync(
+                entry.SourcePath, paths, entry.Size, token, job.WaitIfPausedAsync,
+                (index, bytes) => progress[candidates[index]].AddCompared(bytes)).ConfigureAwait(false);
+            ValidateSourceSnapshot(entry);
+            for (var index = 0; index < candidates.Count; index++)
+            {
+                var slot = candidates[index];
+                masks[fileIndex][slot] = equal[index];
+                progress[slot].MarkComparisonFileDone((ulong)entry.Size, equal[index]);
+            }
         }
         return masks;
     }
 
     private static bool[][] CreateEmptySkipMasks(int files, int destinations) =>
         Enumerable.Range(0, files).Select(_ => new bool[destinations]).ToArray();
-
-    private static async Task<byte[]> HashFileAsync(
-        string path,
-        CancellationToken token,
-        ResourceGovernor resources)
-    {
-        using var hasher = Hasher.New();
-        const int bufferSize = 4 * 1024 * 1024;
-        using var buffer = SourceBufferLease.RentBuffered(bufferSize);
-        await using var stream = OpenSourceStream(path);
-
-        while (true)
-        {
-            var read = await stream.ReadAsync(buffer.Memory, token).ConfigureAwait(false);
-            if (read == 0)
-                break;
-
-            using var lease = await resources.EnterCpuWorkAsync(token).ConfigureAwait(false);
-            hasher.UpdateWithJoin(buffer.Memory.Span[..read]);
-        }
-
-        return hasher.Finalize().AsSpan().ToArray();
-    }
-
 
     private static void EnsureDestinationDirectory(string root, string relative)
     {
