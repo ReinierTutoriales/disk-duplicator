@@ -431,6 +431,7 @@ public static class CopyEngine
                     // stops the copy before a second destination commits divergent content.
                     var producers = workers.Select((worker, index) => Task.Run(async () =>
                     {
+                        Exception? failure = null;
                         try
                         {
                             await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
@@ -438,8 +439,16 @@ public static class CopyEngine
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
+                            failure = ex;
                             job.RequestCancel();
                             throw;
+                        }
+                        finally
+                        {
+                            // Close this destination's queue as soon as its own reader is done, so a fast
+                            // destination drains, commits and reports completion without waiting for the
+                            // slowest one. The shared path closes every queue together below.
+                            worker.Channel.Writer.TryComplete(failure);
                         }
                     })).ToArray();
                     await Task.WhenAll(producers).ConfigureAwait(false);
@@ -503,7 +512,8 @@ public static class CopyEngine
 
             for (var i = 0; i < progress.Length; i++)
             {
-                if (token.IsCancellationRequested)
+                // A destination that already finished stays Done even if the job is cancelled afterwards.
+                if (token.IsCancellationRequested && progress[i].Snapshot().Phase is not DestinationPhase.Done)
                     progress[i].SetPhase(DestinationPhase.Cancelled, "Cancelado");
                 else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed)
                     progress[i].SetPhase(DestinationPhase.Done);
@@ -511,7 +521,7 @@ public static class CopyEngine
         }
         catch (OperationCanceledException)
         {
-            foreach (var item in progress)
+            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Done))
                 item.SetPhase(DestinationPhase.Cancelled, "Cancelado");
         }
         catch (Exception ex)
@@ -983,8 +993,14 @@ public static class CopyEngine
             }
 
             // The channel drained normally: record the end of COPY only for work that really finished.
-            if (current is null && !job.Token.IsCancellationRequested)
+            // Without final verification that is this destination's completion; report it now instead
+            // of when the slowest destination finishes.
+            if (current is null && !job.Token.IsCancellationRequested && worker.IsActive)
+            {
                 worker.Progress.MarkCopyFinished();
+                if (!options.Verify && worker.Progress.Snapshot().CopyFinishedAt is not null)
+                    worker.Progress.SetPhase(DestinationPhase.Done);
+            }
         }
         catch (OperationCanceledException)
         {
