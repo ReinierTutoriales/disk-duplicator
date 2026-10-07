@@ -21,9 +21,10 @@ internal static class NativeAppDialogs
     internal static void About(nint owner, string version, Action<string> openUrl, CancellationToken token,
         Action<nint>? onReady = null)
     {
-        NativeTaskDialog.Show(owner, new NativeDialogSpec("Acerca de RepartoCopier",
-            $"Versión {version}\nCopias rápidas y seguras para Windows.\n\n© 2026 ReinierTutoriales\nTodos los derechos reservados.\n\nGracias por usar RepartoCopier. ¡Dale ❤️ al proyecto en GitHub!",
-            ["Cerrar", "Ver en GitHub", "Licencias de terceros"], 100, Icon: NativeDialogIcon.Information), token, onReady, button =>
+        NativeTaskDialog.Show(owner, new NativeDialogSpec("RepartoCopier",
+            $"Versión {version}\n\nCopia un origen a varios destinos a la vez, cada uno a la velocidad de su disco.\n\nSi te resulta útil, apoya el proyecto con una estrella en GitHub.",
+            ["Cerrar", "Ver en GitHub", "Licencia"], 100, Icon: NativeDialogIcon.Information,
+            Footer: "© 2026 ReinierTutoriales. Todos los derechos reservados.", SizeToContent: true), token, onReady, button =>
         {
             if (button == 101) openUrl("https://github.com/ReinierTutoriales/disk-duplicator");
             else if (button == 102) openUrl("https://github.com/ReinierTutoriales/disk-duplicator/blob/main/LICENSE");

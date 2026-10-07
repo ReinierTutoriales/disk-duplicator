@@ -16,7 +16,8 @@ internal enum NativeDialogIcon
 internal sealed record NativeDialogSpec(
     string Instruction, string Content, string[] Buttons, int DefaultButton,
     bool CommandLinks = false, bool CommonCancel = false, string? Expanded = null,
-    string[]? Radios = null, int SelectedRadio = 0, NativeDialogIcon Icon = NativeDialogIcon.None);
+    string[]? Radios = null, int SelectedRadio = 0, NativeDialogIcon Icon = NativeDialogIcon.None,
+    string? Footer = null, bool SizeToContent = false);
 
 internal readonly record struct NativeDialogResult(int Button, int Radio);
 
@@ -82,7 +83,8 @@ internal static class NativeTaskDialog
         config = new Config
         {
             Size = (uint)Marshal.SizeOf<Config>(), Owner = owner,
-            Flags = 0x1000 | 0x0008 | (spec.CommandLinks ? 0x0010u : 0u),
+            // TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION [| TDF_USE_COMMAND_LINKS] [| TDF_SIZE_TO_CONTENT]
+            Flags = 0x1000 | 0x0008 | (spec.CommandLinks ? 0x0010u : 0u) | (spec.SizeToContent ? 0x01000000u : 0u),
             CommonButtons = spec.CommonCancel ? 0x0008u : 0u,
             WindowTitle = memory.String("RepartoCopier"),
             MainIcon = (nint)(int)spec.Icon,
@@ -93,6 +95,7 @@ internal static class NativeTaskDialog
             RadioButtons = spec.Radios is { Length: > 0 } ? memory.Buttons(spec.Radios, FirstRadio) : nint.Zero,
             DefaultRadio = spec.Radios is { Length: > 0 } ? FirstRadio + spec.SelectedRadio : 0,
             ExpandedInformation = spec.Expanded is null ? nint.Zero : memory.String(spec.Expanded),
+            Footer = spec.Footer is null ? nint.Zero : memory.String(spec.Footer),
             ExpandedControlText = memory.String("Ocultar destinos"), CollapsedControlText = memory.String("Ver destinos"),
             Callback = Marshal.GetFunctionPointerForDelegate(callback),
         };
