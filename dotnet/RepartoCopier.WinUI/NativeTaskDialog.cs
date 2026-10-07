@@ -3,10 +3,20 @@ using System.Runtime.InteropServices;
 
 namespace RepartoCopier.WinUI;
 
+/// <summary>Stock TaskDialog icons (commctrl.h TD_*_ICON = MAKEINTRESOURCE(-1..-4)).</summary>
+internal enum NativeDialogIcon
+{
+    None = 0,
+    Warning = 0xFFFF,
+    Error = 0xFFFE,
+    Information = 0xFFFD,
+    Shield = 0xFFFC,
+}
+
 internal sealed record NativeDialogSpec(
     string Instruction, string Content, string[] Buttons, int DefaultButton,
     bool CommandLinks = false, bool CommonCancel = false, string? Expanded = null,
-    string[]? Radios = null, int SelectedRadio = 0);
+    string[]? Radios = null, int SelectedRadio = 0, NativeDialogIcon Icon = NativeDialogIcon.None);
 
 internal readonly record struct NativeDialogResult(int Button, int Radio);
 
@@ -74,6 +84,7 @@ internal static class NativeTaskDialog
             Flags = 0x1000 | 0x0008 | (spec.CommandLinks ? 0x0010u : 0u),
             CommonButtons = spec.CommonCancel ? 0x0008u : 0u,
             WindowTitle = memory.String("RepartoCopier"),
+            MainIcon = (nint)(int)spec.Icon,
             MainInstruction = memory.String(spec.Instruction), Content = memory.String(spec.Content),
             ButtonCount = (uint)spec.Buttons.Length, Buttons = memory.Buttons(spec.Buttons, FirstButton),
             DefaultButton = spec.DefaultButton,

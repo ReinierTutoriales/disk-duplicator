@@ -2,8 +2,6 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -29,7 +27,7 @@ public sealed partial class MainWindow : Window
     private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
     private bool _verificationRequested;
-    private bool _independentSourceReadsRequested;
+    private bool? _independentSourceReadsUsed;
     private readonly LogicalProgressRate _copyProgressRate = new();
     private readonly LogicalProgressRate _comparisonProgressRate = new();
 
@@ -38,9 +36,11 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         DestinationList.ItemsSource = _destinations;
         RunningDestinationList.ItemsSource = _runningDestinations;
+        _destinations.CollectionChanged += (_, _) => UpdateDestinationSummary();
+        UpdateDestinationSummary();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
-        ResizeForCurrentDpi(new SizeInt32(720, 320));
+        ResizeForCurrentDpi(new SizeInt32(DefaultWidth, DefaultHeight));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
         ConfigureNativeWindowChrome();
@@ -56,6 +56,39 @@ public sealed partial class MainWindow : Window
         UpdateWindowMinimum();
         TryLoadLaunchSource();
     }
+
+    private const int DefaultWidth = 760;
+    private const int DefaultHeight = 540;
+    private const double WideLayoutMinWidth = 640;
+
+    // Responsive layout in code: AdaptiveTrigger is not evaluated reliably for Window content without a Page.
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyResponsiveLayout(e.NewSize.Width);
+
+    private void ApplyResponsiveLayout(double width)
+    {
+        var wide = width >= WideLayoutMinWidth;
+        ContentHost.Padding = wide ? new Thickness(16, 8, 16, 16) : new Thickness(12, 8, 12, 12);
+        var labels = wide ? Visibility.Visible : Visibility.Collapsed;
+        PickSourceFileLabel.Visibility = labels;
+        PickSourceFolderLabel.Visibility = labels;
+        SubtitleText.Visibility = labels;
+    }
+
+    private void UpdateDestinationSummary()
+    {
+        DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
+        DestinationsEmptyText.Visibility = _destinations.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DestinationListHost.Visibility = _destinations.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private ExistingFilePolicy? SelectedExistingFilesPolicy() => ExistingFilesCombo.SelectedIndex switch
+    {
+        1 => null, // ask: the engine reports existing files and the native dialog asks once
+        2 => ExistingFilePolicy.KeepExisting,
+        3 => ExistingFilePolicy.ReplaceDifferent,
+        4 => ExistingFilePolicy.ReplaceAll,
+        _ => ExistingFilePolicy.ReplaceMetadataDifferent, // default: fast size + date check
+    };
 
     private void ResizeForCurrentDpi(SizeInt32 size)
     {
@@ -166,7 +199,6 @@ public sealed partial class MainWindow : Window
                 _destinations.Clear();
                 foreach (var path in existing) _destinations.Add(new DestinationRow(path));
             }
-            DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             if (paths.Length > added && existing.Count >= CopyPlan.MaxDestinations)
                 StatusText.Text = $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos.";
         }
@@ -178,14 +210,9 @@ public sealed partial class MainWindow : Window
         if (sender is not FrameworkElement { Tag: string path }) return;
         var item = _destinations.FirstOrDefault(row => WindowsPath.SamePath(row.Path, path));
         if (item is not null) _destinations.Remove(item);
-        DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
     }
 
-    private void ClearDestinations_Click(object sender, RoutedEventArgs e)
-    {
-        _destinations.Clear();
-        DestinationCountText.Text = FormatDestinationCount(0);
-    }
+    private void ClearDestinations_Click(object sender, RoutedEventArgs e) => _destinations.Clear();
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
@@ -196,7 +223,7 @@ public sealed partial class MainWindow : Window
             var plan = CopyPlan.Create(
                 SourcePathBox.Text,
                 _destinations.Select(item => item.Path),
-                existingFiles: null,
+                SelectedExistingFilesPolicy(),
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
                 Verify: VerifyCheck.IsChecked == true,
@@ -205,7 +232,7 @@ public sealed partial class MainWindow : Window
 
             SetEditingEnabled(false);
             _verificationRequested = options.Verify;
-            _independentSourceReadsRequested = options.IndependentSourceReads;
+            _independentSourceReadsUsed = null;
             _preparationCancel = new CancellationTokenSource();
             _cancellationRequested = false;
             NewCopyButton.Visibility = Visibility.Collapsed;
@@ -219,18 +246,18 @@ public sealed partial class MainWindow : Window
             CancelButton.IsEnabled = true;
             StatusText.Text = "Preparando la copia…";
             ShowRunningView();
-            OperationIcon.Glyph = "\uE8A5";
-            OperationTitleText.Text = "Preparando...";
+            SetOperationIcon("\uE8A5", "AccentTextFillColorPrimaryBrush");
+            OperationTitleText.Text = "Preparando…";
             CurrentFileText.Text = Path.GetFileName(Path.TrimEndingDirectorySeparator(SourcePathBox.Text));
             CurrentPathText.Text = SourcePathBox.Text;
-            SpeedMetricText.Text = "0 MiB/s";
+            SpeedMetricText.Text = Throughput.Format(0);
             RemainingMetricText.Text = "--:--:--";
             FilesMetricText.Text = "0/0";
             OverallProgressBar.Value = 0;
             OverallPercentText.Text = "0%";
             OverallDetailText.Text = options.Verify
-                ? "Preparando copia con verificación completa..."
-                : "Preparando copia sin verificación final...";
+                ? "Preparando copia con verificación completa…"
+                : "Preparando copia sin verificación final…";
             PauseButtonText.Text = "Pausar";
             PauseIcon.Glyph = "\uE769";
             _copyStartedAt = DateTimeOffset.Now;
@@ -258,7 +285,7 @@ public sealed partial class MainWindow : Window
             if (!_cancellationRequested)
             {
                 StatusText.Text = plan.ExistingFiles == ExistingFilePolicy.ReplaceDifferent ? "Comprobando archivos existentes…" : "Copiando…";
-                OperationTitleText.Text = "Copiando...";
+                OperationTitleText.Text = "Copiando…";
             }
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
@@ -299,15 +326,18 @@ public sealed partial class MainWindow : Window
         PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
         if (paused)
         {
+            SetOperationIcon("\uE769", "SystemFillColorCautionBrush");
             OperationTitleText.Text = "Pausado";
             StatusText.Text = "Pausado";
             RefreshProgress();
             return;
         }
 
-        var verifying = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Verifying);
-        var comparing = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Comparing);
-        OperationTitleText.Text = comparing ? "Comparando contenido..." : verifying ? "Comprobando integridad..." : "Copiando...";
+        SetOperationIcon("\uE8A5", "AccentTextFillColorPrimaryBrush");
+        var snapshots = _job.Snapshot();
+        var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
+        var comparing = snapshots.Any(item => item.Phase == DestinationPhase.Comparing);
+        OperationTitleText.Text = comparing ? "Comparando contenido…" : verifying ? "Comprobando integridad…" : "Copiando…";
         StatusText.Text = comparing ? "Comparando archivos existentes…" : verifying ? "Verificando integridad…" : "Copiando…";
     }
 
@@ -319,7 +349,7 @@ public sealed partial class MainWindow : Window
         _job?.RequestCancel();
         CancelButton.IsEnabled = false;
         PauseButton.IsEnabled = false;
-        OperationTitleText.Text = "Cancelando...";
+        OperationTitleText.Text = "Cancelando…";
         StatusText.Text = "Cancelando…";
     }
 
@@ -337,6 +367,7 @@ public sealed partial class MainWindow : Window
                 var snapshots = observed.Snapshot();
                 _lastResult = snapshots;
                 _lastDiagnostics = observed.DiagnosticsSnapshot();
+                _independentSourceReadsUsed = observed.IndependentSourceReads;
                 var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
                 var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
                 var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
@@ -356,7 +387,9 @@ public sealed partial class MainWindow : Window
                     : completedWithErrors ? "Completado con errores"
                     : _verificationRequested && hasUnverifiedSkips ? "Terminado · omitidos sin verificar"
                     : _verificationRequested ? "Copia y verificación terminadas" : "Copiado · sin verificación";
-                OperationIcon.Glyph = cancelled || completedWithErrors ? "\uE783" : "\uE73E";
+                if (cancelled) SetOperationIcon("\uE711", "SystemFillColorCautionBrush");
+                else if (completedWithErrors) SetOperationIcon("\uE783", "SystemFillColorCriticalBrush");
+                else SetOperationIcon("\uE73E", "SystemFillColorSuccessBrush");
                 StatusText.Text = cancelled
                     ? "Copia cancelada"
                     : completedWithErrors ? "La copia terminó con algunos errores"
@@ -364,7 +397,7 @@ public sealed partial class MainWindow : Window
                     : _verificationRequested ? "Copia y verificación completadas" : "Copia completada sin verificación final";
                 CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
                 CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
-                SpeedMetricText.Text = "0.0 B/s";
+                SpeedMetricText.Text = Throughput.Format(0);
                 RemainingMetricText.Text = "00:00:00";
                 PauseButton.IsEnabled = false;
                 CancelButton.IsEnabled = false;
@@ -395,13 +428,13 @@ public sealed partial class MainWindow : Window
         if (_job is null) return;
         var snapshots = _job.Snapshot();
         RunningDestinationScroll.Visibility = snapshots.Count >= 2 ? Visibility.Visible : Visibility.Collapsed;
+        var paused = _job.IsPaused;
         for (var index = 0; index < snapshots.Count; index++)
         {
             if (index >= _runningDestinations.Count)
                 _runningDestinations.Add(new RunningDestinationRow(snapshots[index].Label));
-            _runningDestinations[index].Update(snapshots[index]);
+            _runningDestinations[index].Update(snapshots[index], paused);
         }
-        var paused = _job.IsPaused;
         var verifying = snapshots.Any(item => item.Phase == DestinationPhase.Verifying);
         var comparing = snapshots.Any(item => item.Phase == DestinationPhase.Comparing);
         double percent;
@@ -418,7 +451,7 @@ public sealed partial class MainWindow : Window
             OverallDetailText.Text = $"Comparación: {FormatBytes(processed)} de {FormatBytes(comparisonTotal)} · lectura conjunta";
             if (!paused && !_cancellationRequested)
             {
-                OperationTitleText.Text = "Comparando contenido...";
+                OperationTitleText.Text = "Comparando contenido…";
                 StatusText.Text = "Comparando archivos existentes; aún no se está copiando";
             }
         }
@@ -433,7 +466,7 @@ public sealed partial class MainWindow : Window
             OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
             var diagnostics = _job.DiagnosticsSnapshot();
             var speed = paused ? 0d : diagnostics.VerifyLogical5sBytesPerSecond;
-            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
+            SpeedMetricText.Text = Throughput.Format(paused ? 0 : speed);
             // Logical throughput counts a source block once. Estimate with the
             // largest remaining branch rather than multiplying ETA by destinations.
             var remaining = verifyActive.Select(item => item.VerifyBytesTotal > item.VerifiedBytes
@@ -443,7 +476,7 @@ public sealed partial class MainWindow : Window
                 : "--:--:--";
             if (!_job.IsPaused && !_cancellationRequested)
             {
-                OperationTitleText.Text = "Comprobando integridad...";
+                OperationTitleText.Text = "Comprobando integridad…";
                 StatusText.Text = "Verificando integridad de los destinos…";
             }
         }
@@ -461,14 +494,14 @@ public sealed partial class MainWindow : Window
             OverallDetailText.Text = snapshots.Count >= 2
                 ? $"Destino más lento: {FormatBytes(written)} de {FormatBytes(total)}"
                 : $"{FormatBytes(written)} de {FormatBytes(total)}";
-            SpeedMetricText.Text = paused ? "0.0 B/s" : Throughput.Format(speed);
+            SpeedMetricText.Text = Throughput.Format(paused ? 0 : speed);
             var remaining = total > written ? total - written : 0;
             RemainingMetricText.Text = !paused && speed > 1
                 ? FormatDuration(TimeSpan.FromSeconds(remaining / speed))
                 : "--:--:--";
             if (!_job.IsPaused && !_cancellationRequested && snapshots.Any(item => item.Phase == DestinationPhase.Copying))
             {
-                OperationTitleText.Text = "Copiando...";
+                OperationTitleText.Text = "Copiando…";
                 StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
             }
         }
@@ -511,7 +544,6 @@ public sealed partial class MainWindow : Window
             SourcePathBox.Text = profile.Source;
             _destinations.Clear();
             foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
-            DestinationCountText.Text = FormatDestinationCount(_destinations.Count);
             KeepGoingCheck.IsChecked = profile.ContinueOnError;
             VerifyCheck.IsChecked = profile.VerifyAfterCopy;
             ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
@@ -582,24 +614,15 @@ public sealed partial class MainWindow : Window
 
     private async Task ShowAboutAsync()
     {
-        var previousBackground = AboutMenuButton.Background;
-        AboutMenuButton.Background = ResolveBrush("AccentFillColorSecondaryBrush");
-        try
+        var version = typeof(MainWindow).Assembly.GetName().Version;
+        var displayVersion = version is null ? "desconocida"
+            : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
+        await ShowNativeDialogAsync(() =>
         {
-            var version = typeof(MainWindow).Assembly.GetName().Version;
-            var displayVersion = version is null ? "desconocida"
-                : $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
-            await ShowNativeDialogAsync(() =>
-            {
-                NativeAppDialogs.About(WinRT.Interop.WindowNative.GetWindowHandle(this),
-                    displayVersion, OpenExternalUrl, _windowLifetime.Token);
-                return false;
-            });
-        }
-        finally
-        {
-            AboutMenuButton.Background = previousBackground;
-        }
+            NativeAppDialogs.About(WinRT.Interop.WindowNative.GetWindowHandle(this),
+                displayVersion, OpenExternalUrl, _windowLifetime.Token);
+            return false;
+        });
     }
 
     private static void OpenExternalUrl(string url)
@@ -645,7 +668,8 @@ public sealed partial class MainWindow : Window
         AddDestinationsButton.IsEnabled = enabled;
         ClearDestinationsButton.IsEnabled = enabled;
         SourcePathBox.IsEnabled = enabled;
-        DestinationList.IsEnabled = enabled;
+        DestinationListHost.IsEnabled = enabled;
+        ExistingFilesCombo.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
         IndependentReadsCheck.IsEnabled = enabled;
         VerifyCheck.IsEnabled = enabled;
@@ -721,7 +745,7 @@ public sealed partial class MainWindow : Window
                     diagnostics,
                     destinations,
                     verificationRequested,
-                    _independentSourceReadsRequested));
+                    _independentSourceReadsUsed));
                 await File.WriteAllTextAsync(file.Path, json);
             }
         }
@@ -801,7 +825,7 @@ public sealed partial class MainWindow : Window
 
     private static string FormatBytes(ulong bytes)
     {
-        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
         var value = (double)bytes;
         var unit = 0;
         while (value >= 1024 && unit < units.Length - 1)
@@ -812,36 +836,76 @@ public sealed partial class MainWindow : Window
         return $"{value:0.##} {units[unit]}";
     }
 
-    private static Brush ResolveBrush(string resourceKey) =>
-        (Brush)Application.Current.Resources[resourceKey];
+    private void SetOperationIcon(string glyph, string brushKey)
+    {
+        OperationIcon.Glyph = glyph;
+        // Theme brushes resolve per requested theme; look them up through the root so Light/Dark both apply.
+        if (Root.Resources.TryGetValue(brushKey, out var local) && local is Brush localBrush)
+            OperationIcon.Foreground = localBrush;
+        else if (Application.Current.Resources.TryGetValue(brushKey, out var shared) && shared is Brush sharedBrush)
+            OperationIcon.Foreground = sharedBrush;
+    }
 
     public sealed record DestinationRow(string Path);
 
     public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
     {
-        public string Label { get; } = path;
+        private readonly string _fullPath = path;
+        public string Label { get; } = ShortLabel(path);
         public string Progress { get; private set; } = "Preparando";
         public string Detail { get; private set; } = path;
+        public string Glyph { get; private set; } = "\uEDA2";
+        public double Percent { get; private set; }
+        public bool IsFailed { get; private set; }
+        public bool IsPaused { get; private set; }
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        public void Update(DestinationSnapshot snapshot)
+        public void Update(DestinationSnapshot snapshot, bool paused)
         {
             var progress = DestinationProgressText.Format(snapshot);
-            var detail = $"{Label}\n{progress}\nCopiados: {FormatBytes(snapshot.Written)} de {FormatBytes(snapshot.Total)}";
+            var detail = $"{_fullPath}\n{progress}\nCopiados: {FormatBytes(snapshot.Written)} de {FormatBytes(snapshot.Total)}";
             if (snapshot.VerifyBytesTotal > 0)
                 detail += $"\nVerificados: {FormatBytes(snapshot.VerifiedBytes)} de {FormatBytes(snapshot.VerifyBytesTotal)}";
             if (!string.IsNullOrWhiteSpace(snapshot.Error)) detail += $"\n{snapshot.Error}";
-            if (Progress != progress)
+            var percent = snapshot.Phase switch
             {
-                Progress = progress;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Progress)));
-            }
-            if (Detail != detail)
+                DestinationPhase.Comparing => Ratio(snapshot.ComparisonBytesProcessed, snapshot.ComparisonBytesTotal),
+                DestinationPhase.Verifying => Ratio(snapshot.VerifiedBytes, snapshot.VerifyBytesTotal),
+                DestinationPhase.Done => 100,
+                _ => Ratio(snapshot.Written, snapshot.Total),
+            };
+            var glyph = snapshot.Phase switch
             {
-                Detail = detail;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Detail)));
-            }
+                DestinationPhase.Done when snapshot.FilesErrored > 0 => "\uE7BA",
+                DestinationPhase.Done => "\uE73E",
+                DestinationPhase.Failed => "\uE783",
+                DestinationPhase.Cancelled => "\uE711",
+                DestinationPhase.Verifying => "\uE9D5",
+                _ => "\uEDA2",
+            };
+            var failed = snapshot.Phase == DestinationPhase.Failed;
+            var showPaused = paused && snapshot.Phase is DestinationPhase.Copying or DestinationPhase.Verifying or DestinationPhase.Comparing;
+
+            if (Progress != progress) { Progress = progress; Raise(nameof(Progress)); }
+            if (Detail != detail) { Detail = detail; Raise(nameof(Detail)); }
+            if (Glyph != glyph) { Glyph = glyph; Raise(nameof(Glyph)); }
+            if (Math.Abs(Percent - percent) >= 0.1) { Percent = percent; Raise(nameof(Percent)); }
+            if (IsFailed != failed) { IsFailed = failed; Raise(nameof(IsFailed)); }
+            if (IsPaused != showPaused) { IsPaused = showPaused; Raise(nameof(IsPaused)); }
+        }
+
+        private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+        private static double Ratio(ulong done, ulong total) =>
+            total == 0 ? 0 : Math.Clamp(done * 100d / total, 0, 100);
+
+        // Drive plus final folder ("D: · ISOS") keeps cards readable at narrow widths; the tooltip has the full path.
+        private static string ShortLabel(string fullPath)
+        {
+            var trimmed = System.IO.Path.TrimEndingDirectorySeparator(fullPath);
+            var root = System.IO.Path.GetPathRoot(trimmed)?.TrimEnd('\\', '/') ?? string.Empty;
+            var leaf = System.IO.Path.GetFileName(trimmed);
+            return string.IsNullOrEmpty(leaf) || string.IsNullOrEmpty(root) ? fullPath : $"{root} · {leaf}";
         }
     }
-
 }

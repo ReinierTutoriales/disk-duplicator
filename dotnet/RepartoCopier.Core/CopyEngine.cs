@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
 using System.Runtime.InteropServices;
@@ -16,8 +17,14 @@ public sealed class CopyJob : IAsyncDisposable
 
     internal CopyJob(IReadOnlyList<DestinationProgress> progress) => _progress = progress;
 
+    private volatile bool _independentSourceReads;
+
     public bool IsPaused => _pauseGate.IsPaused;
     public Task Completion => _completion;
+
+    /// <summary>Read mode actually used by COPY (not merely requested). Set before the first source read.</summary>
+    public bool IndependentSourceReads => _independentSourceReads;
+    internal void SetIndependentSourceReads(bool value) => _independentSourceReads = value;
     internal CancellationToken Token => _cancel.Token;
 
     internal void Attach(Task completion) => _completion = completion;
@@ -96,6 +103,7 @@ public static class CopyEngine
     private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
     private const int IndependentPoolBudgetBytes = 256 * 1024 * 1024;
     private const int MinimumIndependentPoolBytes = 16 * 1024 * 1024;
+    private const int MaximumIndependentReaders = 16;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -109,7 +117,6 @@ public static class CopyEngine
         var prepared = Preflight(plan);
         try
         {
-            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -138,7 +145,6 @@ public static class CopyEngine
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -153,19 +159,23 @@ public static class CopyEngine
         }
     }
 
-    private static void ValidateIndependentMode(PreparedCopy copy, CopyOptions options)
-    {
-        if (!options.IndependentSourceReads) return;
-        if (copy.DestinationRoots.Length is < 2 or > 16 ||
-            copy.SourceDevice.MediaKind != StorageMediaKind.SolidState ||
-            copy.SourceDevice.IsNetwork ||
-            copy.SourceDevice.BusType is not ("NVMe" or "SATA"))
-            throw new IOException("Lecturas independientes requieren un origen SSD interno NVMe/SATA y de 2 a 16 destinos.");
-    }
+    /// <summary>
+    /// Independent readers are used only where they cannot hurt: 2-16 destinations, a local NVMe/SATA SSD
+    /// source, and no destination on the source's physical device (that case would make N source reads
+    /// compete with writes on one disk). Otherwise COPY falls back to the single shared reader.
+    /// </summary>
+    internal static bool UseIndependentSourceReads(
+        CopyOptions options, StorageDeviceInfo source, int destinations, bool sourceSharesDestinationDevice) =>
+        options.IndependentSourceReads &&
+        destinations is >= 2 and <= MaximumIndependentReaders &&
+        !sourceSharesDestinationDevice &&
+        !source.IsNetwork &&
+        source.MediaKind == StorageMediaKind.SolidState &&
+        source.BusType is "NVMe" or "SATA";
 
     internal static int IndependentPoolCapacity(int destinations)
     {
-        if (destinations is < 2 or > 16) throw new ArgumentOutOfRangeException(nameof(destinations));
+        if (destinations is < 2 or > MaximumIndependentReaders) throw new ArgumentOutOfRangeException(nameof(destinations));
         return Math.Max(MinimumIndependentPoolBytes, IndependentPoolBudgetBytes / destinations);
     }
 
@@ -348,7 +358,7 @@ public static class CopyEngine
         CopyJob job)
     {
         var token = job.Token;
-        var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
         var independentPools = new List<SharedFanoutBufferPool>();
@@ -386,10 +396,14 @@ public static class CopyEngine
             }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
-            if (options.IndependentSourceReads)
+            var independent = UseIndependentSourceReads(
+                options, copy.SourceDevice, workers.Length, deviceSchedulers.SharedSourceScheduler is not null);
+            job.SetIndependentSourceReads(independent);
+            if (independent)
             {
+                var capacity = IndependentPoolCapacity(workers.Length);
                 foreach (var _ in workers)
-                    independentPools.Add(new SharedFanoutBufferPool(IndependentPoolCapacity(workers.Length)));
+                    independentPools.Add(new SharedFanoutBufferPool(capacity));
             }
             else
                 bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
@@ -400,41 +414,35 @@ public static class CopyEngine
             Exception? producerError = null;
             try
             {
-                if (options.IndependentSourceReads)
+                if (independent)
                 {
-                    // A slow writer retains only its own pool. Each producer owns its
-                    // source handle, hash and file-order controls; the device scheduler
-                    // still arbitrates reads when the source shares physical hardware.
-                    var hashes = workers.Select(_ => new Dictionary<string, byte[]>(StringComparer.Ordinal)).ToArray();
+                    // One reader and one bounded pool per destination: a slow writer only holds its own
+                    // pool, so fast destinations keep reading at their own pace. All readers agree on one
+                    // hash per file before any of them sends End, so a source that changes between reads
+                    // stops the copy before a second destination commits divergent content.
                     var producers = workers.Select((worker, index) => Task.Run(async () =>
                     {
                         try
                         {
-                            await ProducerLoopAsync(copy, [worker], progress, skipMasks, hashes[index], job,
+                            await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
                                 independentPools[index], deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
                         }
-                        catch
+                        catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             job.RequestCancel();
                             throw;
                         }
                     })).ToArray();
                     await Task.WhenAll(producers).ConfigureAwait(false);
-                    // Different readers must not silently commit divergent source contents.
-                    foreach (var file in copy.Files)
-                    {
-                        var key = PathKey(file.RelativePath);
-                        var first = hashes.Select(map => map.GetValueOrDefault(key)).FirstOrDefault(hash => hash is not null);
-                        if (first is null) continue;
-                        if (hashes.Any(map => map.TryGetValue(key, out var hash) && !hash.AsSpan().SequenceEqual(first)))
-                            throw new IOException($"El origen cambió entre lecturas independientes: {file.RelativePath}");
-                    }
                 }
                 else
                 {
                     await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job,
                         bufferPool!, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
                 }
+
+                if (copy.SourceScan is not null)
+                    PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token);
             }
             catch (Exception ex)
             {
@@ -520,80 +528,69 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         bool[][] skipMasks,
-        Dictionary<string, byte[]> expectedHashes,
+        ConcurrentDictionary<string, byte[]> expectedHashes,
         CopyJob job,
         SharedFanoutBufferPool bufferPool,
         DeviceScheduler? sharedSourceScheduler)
     {
         var token = job.Token;
-        try
+        for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
         {
-            for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+            token.ThrowIfCancellationRequested();
+            await job.WaitIfPausedAsync(token).ConfigureAwait(false);
+            var entry = copy.Files[fileIndex];
+            ValidateSourceSnapshot(entry);
+
+            var active = new List<DestinationWorker>();
+            for (var slot = 0; slot < workers.Length; slot++)
             {
-                token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
-                var entry = copy.Files[fileIndex];
-                ValidateSourceSnapshot(entry);
-
-                var active = new List<DestinationWorker>();
-                for (var slot = 0; slot < workers.Length; slot++)
+                var destinationSlot = workers[slot].Slot;
+                if (skipMasks[fileIndex][destinationSlot])
                 {
-                    var destinationSlot = workers[slot].Slot;
-                    if (skipMasks[fileIndex][destinationSlot])
+                    // Space was reserved excluding metadata matches. If one changed after preparation,
+                    // fail that destination closed instead of skipping stale metadata or replacing without a
+                    // reservation. The other destinations are unaffected.
+                    if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
                     {
-                        // Space was reserved excluding metadata matches. If one changed after preparation,
-                        // fail closed instead of skipping stale metadata or replacing without a reservation.
-                        if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
+                        var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                        ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                        if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
                         {
-                            var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                            ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
-                            if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
-                                throw new IOException($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
+                            workers[slot].Fail($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
+                            continue;
                         }
-                        progress[destinationSlot].MarkSkipped((ulong)entry.Size);
-                        continue;
                     }
-                    if (workers[slot].IsActive) active.Add(workers[slot]);
-                }
-                if (active.Count == 0) continue;
-
-                await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
-
-                var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
-                var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
-                job.Telemetry.RecordTransferSize(readBufferSize);
-
-                var sourceResult = await ReadAndFanOutSequentialAsync(
-                    entry,
-                    copy.SourceDevice,
-                    active,
-                    readBufferSize,
-                    transferAlignment,
-                    bufferPool,
-                    job,
-                    sharedSourceScheduler).ConfigureAwait(false);
-                if (sourceResult is null)
+                    progress[destinationSlot].MarkSkipped((ulong)entry.Size);
                     continue;
-
-                var hash = sourceResult.Hash;
-                var key = PathKey(entry.RelativePath);
-                if (expectedHashes.TryGetValue(key, out var preflightHash) && !hash.AsSpan().SequenceEqual(preflightHash))
-                    throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
-                expectedHashes[key] = hash;
-                active.RemoveAll(worker => !worker.IsActive);
-                await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
+                }
+                if (workers[slot].IsActive) active.Add(workers[slot]);
             }
+            if (active.Count == 0) continue;
 
-            if (copy.SourceScan is not null)
-                PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token);
-        }
-        finally
-        {
-            // SharedBlock instances can outlive the producer while destination writers
-            // drain their channels. Disposing the semaphore here races with the
-            // final SharedBlock.Release() calls and can abort otherwise valid copies.
-            // The semaphore is intentionally left for GC once the last shared block and
-            // this producer scope release their references.
+            await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
+
+            var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
+            var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
+            job.Telemetry.RecordTransferSize(readBufferSize);
+
+            var sourceResult = await ReadAndFanOutSequentialAsync(
+                entry,
+                copy.SourceDevice,
+                active,
+                readBufferSize,
+                transferAlignment,
+                bufferPool,
+                job,
+                sharedSourceScheduler).ConfigureAwait(false);
+            if (sourceResult is null)
+                continue;
+
+            var hash = sourceResult.Hash;
+            var agreed = expectedHashes.GetOrAdd(PathKey(entry.RelativePath), hash);
+            if (!ReferenceEquals(agreed, hash) && !hash.AsSpan().SequenceEqual(agreed))
+                throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
+            active.RemoveAll(worker => !worker.IsActive);
+            await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
         }
     }
 
@@ -1908,16 +1905,6 @@ public static class CopyEngine
         return remainder == 0 ? desired : checked(desired + alignment - remainder);
     }
 
-    private static int BufferAlignmentFor(StorageDeviceInfo device)
-    {
-        var alignment = Math.Max(1, Environment.SystemPageSize);
-        if (!device.HasKnownSectorAlignment)
-            return alignment;
-        var required = DirectIoSourceReader.RequiredAlignment(device);
-        return required > 0 && (required & (required - 1)) == 0
-            ? Math.Max(alignment, required)
-            : alignment;
-    }
     private static int TransferAlignmentFor(
         StorageDeviceInfo source,
         IReadOnlyList<DestinationWorker> active)

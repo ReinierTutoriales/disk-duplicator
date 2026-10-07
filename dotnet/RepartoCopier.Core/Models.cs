@@ -19,7 +19,7 @@ public sealed record DestinationPhaseMark(DestinationPhase Phase, TimeSpan Offse
 public sealed record CopyOptions(
     bool Verify = false,
     bool KeepGoing = false,
-    bool IndependentSourceReads = false);
+    bool IndependentSourceReads = true);
 
 public sealed record DestinationSnapshot(
     string Label,
