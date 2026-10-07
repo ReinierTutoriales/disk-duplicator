@@ -26,8 +26,8 @@ public sealed class FanoutBackpressureTests
         var destinations = Enumerable.Range(0, 3)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: false, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: false, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(120));
 
         AssertHealthy(job);
@@ -60,8 +60,8 @@ public sealed class FanoutBackpressureTests
             .ToArray();
 
         await using var job = CopyEngine.Start(
-            CopyPlan.Create(source, destinations, false, false),
-            new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+            CopyPlan.Create(source, destinations, ExistingFilePolicy.ReplaceAll, false),
+            new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
         AssertHealthy(job);
 

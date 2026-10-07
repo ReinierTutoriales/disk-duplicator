@@ -222,6 +222,90 @@ internal static class PreflightSafety
         }
     }
 
+    internal enum ExistingFileAction
+    {
+        /// <summary>Nothing exists at the destination: the file is copied normally.</summary>
+        Copy,
+
+        /// <summary>The file exists and must stay untouched.</summary>
+        Keep,
+
+        /// <summary>The file exists and the chosen policy authorises replacing it.</summary>
+        ReplaceAllowed,
+    }
+
+    internal static void RequireKnownPolicy(ExistingFilePolicy? policy)
+    {
+        if (policy is { } value && !Enum.IsDefined(value))
+            throw new ArgumentOutOfRangeException(
+                nameof(policy), value, "La política de archivos existentes no es válida.");
+    }
+
+    /// <summary>
+    /// The only place that turns a policy into an action. An unknown or missing policy never
+    /// authorises replacing a file.
+    /// </summary>
+    internal static ExistingFileAction Decide(ExistingFilePolicy? policy, bool exists)
+    {
+        RequireKnownPolicy(policy);
+        if (!exists)
+            return ExistingFileAction.Copy;
+        return policy switch
+        {
+            ExistingFilePolicy.KeepExisting => ExistingFileAction.Keep,
+            ExistingFilePolicy.ReplaceDifferent or ExistingFilePolicy.ReplaceAll => ExistingFileAction.ReplaceAllowed,
+            _ => throw new InvalidOperationException("Hay archivos existentes y ninguna política autoriza tocarlos."),
+        };
+    }
+
+    /// <summary>
+    /// Read-only existence check of every source file in every destination. It never opens or hashes content.
+    /// </summary>
+    internal static bool[][] FindExistingFiles(
+        IReadOnlyList<string> destinationRoots,
+        IReadOnlyList<string> relativePaths,
+        CancellationToken token = default)
+    {
+        var existing = new bool[relativePaths.Count][];
+        for (var fileIndex = 0; fileIndex < relativePaths.Count; fileIndex++)
+        {
+            token.ThrowIfCancellationRequested();
+            existing[fileIndex] = new bool[destinationRoots.Count];
+            for (var slot = 0; slot < destinationRoots.Count; slot++)
+                existing[fileIndex][slot] = File.Exists(Path.Combine(destinationRoots[slot], relativePaths[fileIndex]));
+        }
+
+        return existing;
+    }
+
+    internal static void ThrowIfExistingFiles(
+        IReadOnlyList<string> destinationRoots,
+        IReadOnlyList<string> relativePaths,
+        bool[][] existing)
+    {
+        const int maxExamples = 3;
+        var conflicts = new List<DestinationConflict>();
+        for (var slot = 0; slot < destinationRoots.Count; slot++)
+        {
+            var count = 0;
+            var examples = new List<string>(maxExamples);
+            for (var fileIndex = 0; fileIndex < relativePaths.Count; fileIndex++)
+            {
+                if (!existing[fileIndex][slot])
+                    continue;
+                count++;
+                if (examples.Count < maxExamples)
+                    examples.Add(relativePaths[fileIndex]);
+            }
+
+            if (count > 0)
+                conflicts.Add(new DestinationConflict(destinationRoots[slot], count, relativePaths.Count, examples));
+        }
+
+        if (conflicts.Count > 0)
+            throw new ExistingFilesConflictException(conflicts);
+    }
+
     internal static void ValidateDestinationLayout(
         string destinationRoot,
         IEnumerable<string> directories,

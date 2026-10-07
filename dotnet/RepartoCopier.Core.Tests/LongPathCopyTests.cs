@@ -25,7 +25,7 @@ public sealed class LongPathCopyTests
         await File.WriteAllBytesAsync(sourceFile, firstPayload);
 
         var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "destino")).FullName;
-        var plan = CopyPlan.Create(sourceRoot, [destinationBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(sourceRoot, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
 
         await RunAndAssertSuccessAsync(plan);
 

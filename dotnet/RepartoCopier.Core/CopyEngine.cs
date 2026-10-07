@@ -102,10 +102,9 @@ public static class CopyEngine
         ArgumentNullException.ThrowIfNull(plan);
         options ??= new CopyOptions(
                     Verify: false,
-                    SkipSame: plan.SkipSame,
                     KeepGoing: plan.KeepGoing);
 
-        var prepared = Preflight(plan, options.SkipSame);
+        var prepared = Preflight(plan);
         try
         {
             var progress = prepared.DestinationRoots
@@ -130,10 +129,9 @@ public static class CopyEngine
         ArgumentNullException.ThrowIfNull(plan);
         options ??= new CopyOptions(
                     Verify: false,
-                    SkipSame: plan.SkipSame,
                     KeepGoing: plan.KeepGoing);
 
-        var prepared = await Task.Run(() => Preflight(plan, options.SkipSame, cancellationToken), cancellationToken).ConfigureAwait(false);
+        var prepared = await Task.Run(() => Preflight(plan, cancellationToken), cancellationToken).ConfigureAwait(false);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -151,9 +149,10 @@ public static class CopyEngine
         }
     }
 
-    private static PreparedCopy Preflight(CopyPlan plan, bool reuseCompleted, CancellationToken token = default)
+    private static PreparedCopy Preflight(CopyPlan plan, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
+        PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
         var requestedSource = Path.GetFullPath(plan.Source);
         var sourceIsDirectory = Directory.Exists(requestedSource);
         var sourceIsFile = File.Exists(requestedSource);
@@ -218,6 +217,14 @@ public static class CopyEngine
             0,
             (sum, file) => checked(sum + (ulong)file.Size));
 
+        // Read-only: look for files that already exist before leases, recovery or any write touch a
+        // destination. Existence only; content is compared later and only when the user asked for it.
+        var relativePaths = files.Select(file => file.RelativePath).ToArray();
+        var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
+        if (plan.ExistingFiles is null)
+            PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
+        var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+
         var recoveryFiles = files
             .Select(file => new RecoveryFile(
                 file.SourcePath,
@@ -241,20 +248,38 @@ public static class CopyEngine
                 token.ThrowIfCancellationRequested();
                 var root = destinationRoots[slot];
                 PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
-                var completed = RecoveryManager.PrepareAndNormalize(
-                    sourceRoot, root, recoveryFiles, token, reuseCompleted: reuseCompleted);
+                // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
+                // content is compared once, in the visible comparison phase, never during preparation.
+                _ = RecoveryManager.PrepareAndNormalize(
+                    sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
+                // Recovery may have restored an interrupted replacement: re-read what really exists now.
+                var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
                 var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
                 {
                     token.ThrowIfCancellationRequested();
-                    if (!completed.Contains(RecoveryManager.StateKey(recoveryFiles[fileIndex])))
-                        continue;
-                    preverifiedSkips[fileIndex][slot] = true;
-                    skippedPaths.Add(files[fileIndex].RelativePath);
+                    var exists = existingNow[fileIndex][0];
+                    existingFiles[fileIndex][slot] = exists;
+                    if (plan.ExistingFiles is null)
+                        continue; // reported below, before anything is written
+                    switch (PreflightSafety.Decide(plan.ExistingFiles, exists))
+                    {
+                        case PreflightSafety.ExistingFileAction.Keep:
+                            // KeepExisting leaves the file untouched: it is skipped like any completed file.
+                            preverifiedSkips[fileIndex][slot] = true;
+                            skippedPaths.Add(files[fileIndex].RelativePath);
+                            break;
+                        case PreflightSafety.ExistingFileAction.ReplaceAllowed:
+                            // Only a file seen at analysis time may be replaced at commit time.
+                            replaceAllowed[fileIndex][slot] = true;
+                            break;
+                    }
                 }
                 if (scan.Files.Count > 0)
                     spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
             }
+            if (plan.ExistingFiles is null)
+                PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
             PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
             foreach (var root in destinationRoots)
             {
@@ -272,6 +297,8 @@ public static class CopyEngine
                 directories,
                 totalBytes,
                 preverifiedSkips,
+                replaceAllowed,
+                plan.ExistingFiles,
                 sourceIsDirectory ? scan : null,
                 sourceDevice,
                 destinationDevices,
@@ -301,7 +328,7 @@ public static class CopyEngine
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         try
         {
-            var skipMasks = options.SkipSame
+            var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
                 ? await BuildVerifiedSkipMasksAsync(copy, progress, job, token, resources).ConfigureAwait(false)
                 : CreateEmptySkipMasks(copy.Files.Count, copy.DestinationRoots.Length);
             for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
@@ -320,7 +347,14 @@ public static class CopyEngine
                     controlBudget))
                 .ToArray();
             foreach (var worker in workers)
+            {
                 worker.Progress.SetDevice(worker.DeviceScheduler.DeviceId, worker.Device);
+                for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+                {
+                    if (copy.ReplaceAllowed[fileIndex][worker.Slot])
+                        worker.ReplaceAllowedPaths.Add(PathKey(copy.Files[fileIndex].RelativePath));
+                }
+            }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
             var activeBufferPool = bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
@@ -1288,7 +1322,11 @@ public static class CopyEngine
 
         ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
         var commitStarted = Stopwatch.GetTimestamp();
-        AtomicFileCommit.Commit(current.PartPath, current.DestinationPath, current.BackupPath);
+        AtomicFileCommit.Commit(
+            current.PartPath,
+            current.DestinationPath,
+            current.BackupPath,
+            worker.ReplaceAllowedPaths.Contains(PathKey(current.Entry.RelativePath)));
         current.Committed = true;
         worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
         job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
@@ -1696,11 +1734,12 @@ public static class CopyEngine
             {
                 var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
                 if (!File.Exists(destination) || WindowsPath.IsReparsePoint(destination)) continue;
-                var info = new FileInfo(destination);
-                if (info.Length == entry.Size && ToUnixNanoseconds(info.LastWriteTimeUtc) == entry.ModifiedUnixNanoseconds)
+                if (new FileInfo(destination).Length == entry.Size)
                     candidates.Add(slot);
             }
             if (candidates.Count == 0) continue;
+            foreach (var slot in candidates)
+                progress[slot].SetLastFile(entry.RelativePath);
 
             ValidateSourceSnapshot(entry);
             var sourceHash = await HashFileAsync(entry.SourcePath, token, resources).ConfigureAwait(false);
@@ -1709,7 +1748,7 @@ public static class CopyEngine
             {
                 var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
                 ValidateRuntimeDestinationPath(copy.DestinationRoots[slot], entry.RelativePath);
-                WindowsPath.EnsureRegularFile(destination, "El archivo candidato de SkipSame");
+                WindowsPath.EnsureRegularFile(destination, "El archivo existente que se compara");
                 if (new FileInfo(destination).Length != entry.Size)
                     return;
                 var destinationHash = await HashFileAsync(destination, token, resources).ConfigureAwait(false);
@@ -1890,6 +1929,8 @@ public static class CopyEngine
         IReadOnlyList<string> Directories,
         ulong TotalBytes,
         bool[][] PreverifiedSkips,
+        bool[][] ReplaceAllowed,
+        ExistingFilePolicy? ExistingFiles,
         SourceTreeScan? SourceScan,
         StorageDeviceInfo SourceDevice,
         StorageDeviceInfo[] DestinationDevices,
@@ -2142,6 +2183,8 @@ public static class CopyEngine
     private sealed class DestinationWorker
     {
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
+        // Destination files that existed when the copy was prepared and the user allowed to replace.
+        public HashSet<string> ReplaceAllowedPaths { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
         private int _queueDepth;
         private long _pendingPayloadBytes;

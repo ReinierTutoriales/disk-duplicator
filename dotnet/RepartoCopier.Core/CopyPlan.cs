@@ -3,7 +3,7 @@ namespace RepartoCopier.Core;
 public sealed record CopyPlan(
     string Source,
     IReadOnlyList<string> Destinations,
-    bool SkipSame,
+    ExistingFilePolicy? ExistingFiles,
     bool KeepGoing)
 {
     public const int MaxDestinations = 256;
@@ -11,9 +11,10 @@ public sealed record CopyPlan(
     public static CopyPlan Create(
         string source,
         IEnumerable<string> destinations,
-        bool skipSame,
+        ExistingFilePolicy? existingFiles,
         bool keepGoing)
     {
+        PreflightSafety.RequireKnownPolicy(existingFiles);
         source = (source ?? string.Empty).Trim();
         if (source.Length == 0)
             throw new ArgumentException("Selecciona un archivo o carpeta de origen.", nameof(source));
@@ -38,7 +39,7 @@ public sealed record CopyPlan(
         if (clean.Count == 0)
             throw new ArgumentException("Agrega al menos un destino.", nameof(destinations));
 
-        return new CopyPlan(source, clean, skipSame, keepGoing);
+        return new CopyPlan(source, clean, existingFiles, keepGoing);
     }
 
     public static int AppendUniqueDestinations(

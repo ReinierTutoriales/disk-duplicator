@@ -15,7 +15,7 @@ public sealed class AtomicFileCommitTests
         var backup = Path.Combine(temp.Path, "payload.backup");
         File.WriteAllBytes(part, [1, 2, 3, 4]);
 
-        AtomicFileCommit.Commit(part, destination, backup);
+        AtomicFileCommit.Commit(part, destination, backup, allowReplace: false);
 
         CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4 }, File.ReadAllBytes(destination));
         Assert.IsFalse(File.Exists(part));
@@ -32,10 +32,28 @@ public sealed class AtomicFileCommitTests
         File.WriteAllBytes(destination, [9, 9, 9]);
         File.WriteAllBytes(part, [1, 2, 3, 4, 5]);
 
-        AtomicFileCommit.Commit(part, destination, backup);
+        AtomicFileCommit.Commit(part, destination, backup, allowReplace: true);
 
         CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4, 5 }, File.ReadAllBytes(destination));
         Assert.IsFalse(File.Exists(part));
+        Assert.IsFalse(File.Exists(backup));
+    }
+
+    [TestMethod]
+    public void ExistingDestinationIsNeverReplacedWithoutAuthorization()
+    {
+        using var temp = new TempScope();
+        var part = Path.Combine(temp.Path, "payload.part");
+        var destination = Path.Combine(temp.Path, "payload.bin");
+        var backup = Path.Combine(temp.Path, "payload.backup");
+        File.WriteAllBytes(destination, [9, 9, 9]);
+        File.WriteAllBytes(part, [1, 2, 3, 4, 5]);
+
+        Assert.ThrowsExactly<IOException>(() =>
+            AtomicFileCommit.Commit(part, destination, backup, allowReplace: false));
+
+        CollectionAssert.AreEqual(new byte[] { 9, 9, 9 }, File.ReadAllBytes(destination));
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4, 5 }, File.ReadAllBytes(part));
         Assert.IsFalse(File.Exists(backup));
     }
 

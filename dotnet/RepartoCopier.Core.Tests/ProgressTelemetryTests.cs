@@ -36,8 +36,8 @@ public sealed class ProgressTelemetryTests
         await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
 
-        var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
 
         var snapshot = job.Snapshot().Single();
@@ -50,7 +50,7 @@ public sealed class ProgressTelemetryTests
     }
 
     [TestMethod]
-    public async Task AllSkipSameFilesDoNotCreateSecondVerifyWork()
+    public async Task AllIdenticalFilesDoNotCreateSecondVerifyWork()
     {
         using var temp = new TempScope("verify-skip");
         var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
@@ -64,8 +64,8 @@ public sealed class ProgressTelemetryTests
         File.Copy(sourceFile, destinationFile);
         File.SetLastWriteTimeUtc(destinationFile, sourceTime);
 
-        var plan = CopyPlan.Create(source, [destinationBase], skipSame: true, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: true, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceDifferent, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
 
         var snapshot = job.Snapshot().Single();
@@ -84,7 +84,7 @@ public sealed class ProgressTelemetryTests
         await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), new byte[2 * 1024 * 1024]);
         var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
 
-        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -118,7 +118,7 @@ public sealed class ProgressTelemetryTests
             large.SetLength(largeSize);
         var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
 
-        var plan = CopyPlan.Create(source, [destinationBase], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [destinationBase], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(30));
 
