@@ -210,7 +210,7 @@
                         </Grid>
 
                         <Grid Grid.Row="2" ColumnSpacing="16">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <StackPanel><TextBlock Text="Velocidad" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="SpeedMetricText" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Text="Restante" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="RemainingMetricText" Text="--:--:--" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="2"><TextBlock Text="Archivos" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="FilesMetricText" Text="0/0" FontSize="14" FontWeight="SemiBold"/></StackPanel>

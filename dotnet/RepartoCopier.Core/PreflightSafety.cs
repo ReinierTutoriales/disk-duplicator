@@ -253,9 +253,19 @@ internal static class PreflightSafety
         return policy switch
         {
             ExistingFilePolicy.KeepExisting => ExistingFileAction.Keep,
-            ExistingFilePolicy.ReplaceDifferent or ExistingFilePolicy.ReplaceAll => ExistingFileAction.ReplaceAllowed,
+            ExistingFilePolicy.ReplaceDifferent or ExistingFilePolicy.ReplaceAll or
+                ExistingFilePolicy.ReplaceMetadataDifferent => ExistingFileAction.ReplaceAllowed,
             _ => throw new InvalidOperationException("Hay archivos existentes y ninguna política autoriza tocarlos."),
         };
+    }
+
+    /// <summary>Metadata-only heuristic: this never opens payload and does not prove content equality.
+    /// Exact UTC time comparison deliberately does not hide changes inside a filesystem time tolerance.</summary>
+    internal static bool MatchesMetadata(string destination, long sourceSize, DateTime sourceLastWriteTimeUtc)
+    {
+        WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
+        var info = new FileInfo(destination);
+        return info.Exists && info.Length == sourceSize && info.LastWriteTimeUtc == sourceLastWriteTimeUtc;
     }
 
     /// <summary>

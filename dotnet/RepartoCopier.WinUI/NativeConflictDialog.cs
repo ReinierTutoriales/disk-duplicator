@@ -11,6 +11,7 @@ internal static class NativeConflictDialog
     internal const int KeepId = 100;
     internal const int CompareId = 101;
     internal const int ReplaceId = 102;
+    internal const int MetadataId = 103;
     private const uint ClickButtonMessage = 0x0400 + 102;
 
     internal static ExistingFilePolicy? PolicyForButton(int button) => button switch
@@ -18,6 +19,7 @@ internal static class NativeConflictDialog
         KeepId => ExistingFilePolicy.KeepExisting,
         CompareId => ExistingFilePolicy.ReplaceDifferent,
         ReplaceId => ExistingFilePolicy.ReplaceAll,
+        MetadataId => ExistingFilePolicy.ReplaceMetadataDifferent,
         _ => null,
     };
 
@@ -32,6 +34,7 @@ internal static class NativeConflictDialog
             "Conservar existentes\nCopiar solo los archivos que faltan, sin comparar contenido.",
             "Omitir idénticos y reemplazar distintos\nLeer el contenido. Los discos lentos pueden hacer que esta comparación tarde.",
             "Reemplazar todos sin comparar\nSustituir los archivos existentes con los del origen.",
+            "Omitir por tamaño y fecha (rápido)\nNo lee contenido. Reemplaza los que difieran en tamaño o fecha; no detecta daños con los mismos metadatos.",
         };
         var buttons = memory.Buttons(labels, KeepId);
         var shown = nint.Zero;
@@ -67,7 +70,7 @@ internal static class NativeConflictDialog
             WindowTitle = memory.String("RepartoCopier"),
             MainInstruction = memory.String("Hay archivos que ya existen"),
             Content = memory.String($"{total} archivos existentes en {conflict.Destinations.Count} destinos. Elige cómo continuar."),
-            ButtonCount = 3,
+            ButtonCount = (uint)labels.Length,
             Buttons = buttons,
             DefaultButton = CancelId,
             ExpandedInformation = memory.String(details),
