@@ -160,18 +160,22 @@ public static class CopyEngine
     }
 
     /// <summary>
-    /// Independent readers are used only where they cannot hurt: 2-16 destinations, a local NVMe/SATA SSD
-    /// source, and no destination on the source's physical device (that case would make N source reads
-    /// compete with writes on one disk). Otherwise COPY falls back to the single shared reader.
+    /// Independent readers are the default for any source (HDD, SSD, NVMe, USB, network) with 2-16
+    /// destinations: a slow destination never holds back a fast one. One destination gains nothing, and more
+    /// than 16 would shrink each pool below the minimum, so those copies use the single shared reader.
     /// </summary>
-    internal static bool UseIndependentSourceReads(
-        CopyOptions options, StorageDeviceInfo source, int destinations, bool sourceSharesDestinationDevice) =>
-        options.IndependentSourceReads &&
-        destinations is >= 2 and <= MaximumIndependentReaders &&
-        !sourceSharesDestinationDevice &&
-        !source.IsNetwork &&
-        source.MediaKind == StorageMediaKind.SolidState &&
-        source.BusType is "NVMe" or "SATA";
+    internal static bool UseIndependentSourceReads(CopyOptions options, int destinations) =>
+        options.IndependentSourceReads && destinations is >= 2 and <= MaximumIndependentReaders;
+
+    /// <summary>
+    /// Only a local NVMe/SATA SSD serves concurrent sequential streams without penalty. Any other source
+    /// (rotational, USB, network, unknown) takes the independent readers' blocks in turn, one 8 MiB read at
+    /// a time, so a disk head moves once per block instead of thrashing between concurrent requests.
+    /// </summary>
+    internal static bool SerializeIndependentReads(StorageDeviceInfo source) =>
+        source.IsNetwork ||
+        source.MediaKind != StorageMediaKind.SolidState ||
+        source.BusType is not ("NVMe" or "SATA");
 
     internal static int IndependentPoolCapacity(int destinations)
     {
@@ -362,6 +366,7 @@ public static class CopyEngine
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
         var independentPools = new List<SharedFanoutBufferPool>();
+        DeviceScheduler? serializedSourceScheduler = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -396,9 +401,13 @@ public static class CopyEngine
             }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
-            var independent = UseIndependentSourceReads(
-                options, copy.SourceDevice, workers.Length, deviceSchedulers.SharedSourceScheduler is not null);
+            var independent = UseIndependentSourceReads(options, workers.Length);
             job.SetIndependentSourceReads(independent);
+            // A source on a destination's disk is already arbitrated with that disk's writes.
+            var sourceScheduler = deviceSchedulers.SharedSourceScheduler;
+            if (independent && sourceScheduler is null && SerializeIndependentReads(copy.SourceDevice))
+                sourceScheduler = serializedSourceScheduler = new DeviceScheduler(
+                    $"{copy.SourceDevice.PhysicalDeviceId}:source", 1, SharedFanoutBlockBytes);
             if (independent)
             {
                 var capacity = IndependentPoolCapacity(workers.Length);
@@ -425,7 +434,7 @@ public static class CopyEngine
                         try
                         {
                             await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
-                                independentPools[index], deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                                independentPools[index], sourceScheduler).ConfigureAwait(false);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -519,6 +528,7 @@ public static class CopyEngine
             }
             bufferPool?.Dispose();
             foreach (var pool in independentPools) pool.Dispose();
+            serializedSourceScheduler?.Dispose();
             copy.ReleaseStateLeases();
         }
     }
