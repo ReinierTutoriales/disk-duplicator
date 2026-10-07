@@ -214,7 +214,9 @@
                             <StackPanel><TextBlock Text="Velocidad" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="SpeedMetricText" TextWrapping="Wrap" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Text="Restante" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="RemainingMetricText" TextWrapping="Wrap" Text="--:--:--" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                             <StackPanel Grid.Column="2"><TextBlock Text="Archivos" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="FilesMetricText" TextWrapping="Wrap" Text="0/0" FontSize="14" FontWeight="SemiBold"/></StackPanel>
-                            <CheckBox x:Name="ShutdownCheck" Grid.Column="3" Content="Apagar al terminar" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="ShutdownCheck" Grid.Column="3" HorizontalAlignment="Right" VerticalAlignment="Center" AutomationProperties.Name="Apagar al terminar">
+                                <TextBlock Text="Apagar al terminar" TextWrapping="NoWrap"/>
+                            </CheckBox>
                         </Grid>
 
                         <Grid Grid.Row="3" ColumnSpacing="7">
