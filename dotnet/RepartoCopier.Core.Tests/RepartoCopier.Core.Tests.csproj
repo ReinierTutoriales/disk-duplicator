@@ -26,5 +26,6 @@
     <Compile Include="..\RepartoCopier.WinUI\CopyProfile.cs" Link="UI\CopyProfile.cs" />
     <Compile Include="..\RepartoCopier.WinUI\BuildInfo.cs" Link="UI\BuildInfo.cs" />
     <Compile Include="..\RepartoCopier.WinUI\DiagnosticsExport.cs" Link="UI\DiagnosticsExport.cs" />
+    <Compile Include="..\RepartoCopier.WinUI\SourceBenchmarkCommandLine.cs" Link="UI\SourceBenchmarkCommandLine.cs" />
   </ItemGroup>
 </Project>
