@@ -14,6 +14,9 @@ public enum ExistingFilePolicy
 
     /// <summary>Every file that already existed when the copy was prepared is replaced without comparing it.</summary>
     ReplaceAll,
+
+    /// <summary>Same size and last-write time are skipped without reading content; other existing files are replaced.</summary>
+    ReplaceMetadataDifferent,
 }
 
 public sealed record DestinationConflict(

@@ -13,6 +13,7 @@ public sealed class NativeConflictDialogTests
     [DataRow(NativeConflictDialog.KeepId)]
     [DataRow(NativeConflictDialog.CompareId)]
     [DataRow(NativeConflictDialog.ReplaceId)]
+    [DataRow(NativeConflictDialog.MetadataId)]
     public void RealWindowsDialogIsOwnedAndReturnsOnlyTheSelectedPolicy(int button)
     {
         if (!OperatingSystem.IsWindows())
