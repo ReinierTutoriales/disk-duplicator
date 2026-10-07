@@ -65,11 +65,11 @@
         </TitleBar>
 
         <InfoBar x:Name="ErrorBar" Grid.Row="1" IsOpen="False" Severity="Error" IsClosable="True" />
-        <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled"
+        <ScrollViewer x:Name="MainContentScroll" Grid.Row="2" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
-        <Grid Margin="4,0,4,2" MinWidth="540" MaxWidth="720" HorizontalAlignment="Stretch">
+        <Grid Margin="4,0,4,2" HorizontalAlignment="Stretch">
 
-            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="4" MaxWidth="712" HorizontalAlignment="Stretch">
+            <Grid x:Name="PreparationPanel" Visibility="Visible" RowSpacing="4" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
@@ -180,11 +180,11 @@
 
             </Grid>
 
-            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="4" MaxWidth="712" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,4,0,0">
+            <Grid x:Name="RunningPanel" Visibility="Collapsed" RowSpacing="4" HorizontalAlignment="Stretch" VerticalAlignment="Top" Margin="0,4,0,0">
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Border Style="{StaticResource SurfaceCardStyle}" Padding="6,5">
                     <Grid RowSpacing="6">
-                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
                         <Grid ColumnSpacing="10">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -206,18 +206,21 @@
                                     <x:Double x:Key="ProgressBarTrackHeight">10</x:Double>
                                 </ProgressBar.Resources>
                             </ProgressBar>
-                            <TextBlock x:Name="OverallDetailText" Grid.Row="1" Margin="0,3,0,0" Text="Preparando..." Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/>
+                            <TextBlock x:Name="OverallDetailText" Grid.Row="1" Margin="0,3,0,0" Text="Preparando..." TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/>
                         </Grid>
 
                         <Grid Grid.Row="2" ColumnSpacing="16">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                            <StackPanel><TextBlock Text="Velocidad" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="SpeedMetricText" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
-                            <StackPanel Grid.Column="1"><TextBlock Text="Restante" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="RemainingMetricText" Text="--:--:--" FontSize="14" FontWeight="SemiBold"/></StackPanel>
-                            <StackPanel Grid.Column="2"><TextBlock Text="Archivos" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="FilesMetricText" Text="0/0" FontSize="14" FontWeight="SemiBold"/></StackPanel>
-                            <CheckBox x:Name="ShutdownCheck" Grid.Column="3" Content="Apagar al terminar" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="Velocidad" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="SpeedMetricText" TextWrapping="Wrap" Text="0 MiB/s" FontSize="14" FontWeight="SemiBold"/></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Text="Restante" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="RemainingMetricText" TextWrapping="Wrap" Text="--:--:--" FontSize="14" FontWeight="SemiBold"/></StackPanel>
+                            <StackPanel Grid.Column="2"><TextBlock Text="Archivos" Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="12"/><TextBlock x:Name="FilesMetricText" TextWrapping="Wrap" Text="0/0" FontSize="14" FontWeight="SemiBold"/></StackPanel>
                         </Grid>
 
-                        <Grid Grid.Row="3" ColumnSpacing="7">
+                            <CheckBox x:Name="ShutdownCheck" Grid.Row="3" HorizontalAlignment="Right" VerticalAlignment="Center" AutomationProperties.Name="Apagar al terminar">
+                                <TextBlock Text="Apagar al terminar" TextWrapping="NoWrap"/>
+                            </CheckBox>
+
+                        <Grid Grid.Row="4" ColumnSpacing="7">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Button x:Name="PauseButton" Style="{StaticResource CompactButtonStyle}" MinWidth="96" IsEnabled="False" Click="Pause_Click">
                                 <StackPanel Orientation="Horizontal" Spacing="6"><FontIcon x:Name="PauseIcon" Glyph="&#xE769;" FontSize="12"/><TextBlock x:Name="PauseButtonText" Text="Pausar"/></StackPanel>

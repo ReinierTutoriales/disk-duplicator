@@ -2,6 +2,10 @@
 
 ## Unreleased — main
 
+- UI: Ajustes, Acerca de, confirmación de apagado y resultados dejan de usar ContentDialog dentro de la ventana compacta. Comparten TaskDialogIndirect con conflictos, propietario explícito, cierre/cancelación seguros y marshalling de callbacks protegido. Acerca de conserva enlaces; Ajustes conserva tema y persistencia; resultados recorren todos los destinos en páginas de tres y exportan el JSON completo. Apagado exige elegir Apagar y conserva No apagar por defecto.
+- Ventana principal: tamaño inicial en área cliente (720×320 DIP), mínimo de área cliente (540×320 DIP) limitado al área de trabajo del monitor y actualizado al mover/cambiar DPI. El contenido deja de tener un máximo fijo de 720; las métricas y el detalle pueden envolver texto. No se fija un máximo que impida ampliar la ventana.
+- CI: prueba real del EXE con --layout-check (preparación/copia a tres tamaños, temas claro/oscuro, alcance de botones y ajuste de etiquetas, propiedad/modalidad y límites de diálogos nativos y paginación). Informe adjunto en Actions. Se valida el DPI real del runner; las conversiones 100/125/150/200 % se prueban aparte. No sustituye inspección física de contraste, píxeles ni monitores mixtos. Sin cambios al motor de copia.
+
 - Archivos existentes: nueva elección explícita «Omitir por tamaño y fecha (rápido)». Consulta tamaño y fecha UTC exacta, sin leer payload; omite coincidencias y autoriza reemplazar los demás existentes. No acredita igualdad de contenido y conserva la opción estricta. Se revalidan las coincidencias antes de omitirlas y se mantiene el rechazo de archivos aparecidos después de la preparación. El diálogo conserva Cancelar por defecto y no guarda autorizaciones en perfiles.
 - UI: «Apagar al terminar» recibe una columna Auto con su ancho de contenido; la columna de velocidad ocupa el espacio restante. Evita que el texto del checkbox se recorte cuando crecen los contadores.
 
