@@ -358,7 +358,12 @@ public sealed class ExistingFilePolicyTests
         var effectiveRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Source")).FullName;
         var restoredFile = Path.Combine(effectiveRoot, "a.bin");
         StateLayout.PrepareTempDirectory(effectiveRoot);
-        await File.WriteAllBytesAsync(StateLayout.BackupPath(effectiveRoot, restoredFile), [9, 9, 9]);
+        var backup = StateLayout.BackupPath(effectiveRoot, restoredFile);
+        await File.WriteAllBytesAsync(backup, [9, 9, 9]);
+        // Equal-sized writes made close together may get identical timestamps. Metadata
+        // comparison deliberately trusts size/date, so this replacement fixture must differ.
+        File.SetLastWriteTimeUtc(Path.Combine(source, "a.bin"), new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(backup, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
         return (source, destinationBase, restoredFile);
     }
 

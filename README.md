@@ -16,7 +16,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Arquitectura
 
-`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Los conflictos usan un Task Dialog Win32 modal con ventana propia y propietario explícito, independiente de la altura del copiador. Usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos.
+`RepartoCopier.WinUI` contiene exclusivamente la interfaz Windows. Conflictos, Ajustes, Acerca de, confirmación de apagado y resultados usan un Task Dialog Win32 modal con ventana propia y propietario explícito, independiente de la altura del copiador. Los resultados se paginan y el JSON conserva los detalles completos. Los cuadros nativos siguen la presentación del sistema; el tema elegido en Ajustes se aplica a la ventana WinUI. La vista principal usa controles WinUI, recursos de tema/acento, escalado DPI del sistema, focus/teclado y pickers nativos. Su tamaño inicial y mínimo se calculan sobre el área cliente y se limitan al área de trabajo; permite ampliar la ventana y envolver métricas sin anchos máximos fijos.
 
 `RepartoCopier.Core` contiene planificación, preflight, FAN-OUT, recuperación transaccional, telemetría, comparación exacta por bloques de archivos existentes, BLAKE3 para los hashes de copia y recovery y verificación post-copia mediante CRC32C/Castagnoli por bloques. Las llamadas Win32 se mantienen aisladas en las rutas que requieren semántica de almacenamiento no expuesta directamente por las APIs de alto nivel.
 
@@ -53,3 +53,5 @@ dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r
 ```
 
 El protocolo de validación y benchmark físico se mantiene en `TESTING.md`.
+
+La CI también ejecuta el EXE con `--layout-check <informe.json>`: comprueba layout real de preparación y ejecución a 540×320, 720×320 y 1200×720 DIP, temas claro/oscuro, etiquetas de controles, alcance mediante scroll, cuadros nativos con propietario/modalidad y paginación. Usa datos de progreso sintéticos sin copiar archivos, cambiar preferencias, abrir enlaces ni autorizar apagado. El informe registra el DPI real del runner; los otros factores de DPI tienen pruebas de conversión geométrica, no una simulación visual de monitores. Recorte intencional de nombres largos, listas horizontales, contraste y rendering de píxeles requieren comprobación física adicional.
