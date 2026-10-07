@@ -94,6 +94,8 @@ public static class CopyEngine
 
     private const int SharedFanoutBlockBytes = 8 * 1024 * 1024;
     private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
+    private const int IndependentPoolBudgetBytes = 256 * 1024 * 1024;
+    private const int MinimumIndependentPoolBytes = 16 * 1024 * 1024;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -107,6 +109,7 @@ public static class CopyEngine
         var prepared = Preflight(plan);
         try
         {
+            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -135,6 +138,7 @@ public static class CopyEngine
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -147,6 +151,22 @@ public static class CopyEngine
             prepared.ReleaseStateLeases();
             throw;
         }
+    }
+
+    private static void ValidateIndependentMode(PreparedCopy copy, CopyOptions options)
+    {
+        if (!options.IndependentSourceReads) return;
+        if (copy.DestinationRoots.Length is < 2 or > 16 ||
+            copy.SourceDevice.MediaKind != StorageMediaKind.SolidState ||
+            copy.SourceDevice.IsNetwork ||
+            copy.SourceDevice.BusType is not ("NVMe" or "SATA"))
+            throw new IOException("Lecturas independientes requieren un origen SSD interno NVMe/SATA y de 2 a 16 destinos.");
+    }
+
+    internal static int IndependentPoolCapacity(int destinations)
+    {
+        if (destinations is < 2 or > 16) throw new ArgumentOutOfRangeException(nameof(destinations));
+        return Math.Max(MinimumIndependentPoolBytes, IndependentPoolBudgetBytes / destinations);
     }
 
     private static PreparedCopy Preflight(CopyPlan plan, CancellationToken token = default)
@@ -331,6 +351,7 @@ public static class CopyEngine
         var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
+        var independentPools = new List<SharedFanoutBufferPool>();
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
@@ -365,7 +386,13 @@ public static class CopyEngine
             }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
-            var activeBufferPool = bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
+            if (options.IndependentSourceReads)
+            {
+                foreach (var _ in workers)
+                    independentPools.Add(new SharedFanoutBufferPool(IndependentPoolCapacity(workers.Length)));
+            }
+            else
+                bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job))
                 .ToArray();
@@ -373,15 +400,41 @@ public static class CopyEngine
             Exception? producerError = null;
             try
             {
-                await ProducerLoopAsync(
-                    copy,
-                    workers,
-                    progress,
-                    skipMasks,
-                    expectedHashes,
-                    job,
-                    activeBufferPool,
-                    deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                if (options.IndependentSourceReads)
+                {
+                    // A slow writer retains only its own pool. Each producer owns its
+                    // source handle, hash and file-order controls; the device scheduler
+                    // still arbitrates reads when the source shares physical hardware.
+                    var hashes = workers.Select(_ => new Dictionary<string, byte[]>(StringComparer.Ordinal)).ToArray();
+                    var producers = workers.Select((worker, index) => Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await ProducerLoopAsync(copy, [worker], progress, skipMasks, hashes[index], job,
+                                independentPools[index], deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            job.RequestCancel();
+                            throw;
+                        }
+                    })).ToArray();
+                    await Task.WhenAll(producers).ConfigureAwait(false);
+                    // Different readers must not silently commit divergent source contents.
+                    foreach (var file in copy.Files)
+                    {
+                        var key = PathKey(file.RelativePath);
+                        var first = hashes.Select(map => map.GetValueOrDefault(key)).FirstOrDefault(hash => hash is not null);
+                        if (first is null) continue;
+                        if (hashes.Any(map => map.TryGetValue(key, out var hash) && !hash.AsSpan().SequenceEqual(first)))
+                            throw new IOException($"El origen cambió entre lecturas independientes: {file.RelativePath}");
+                    }
+                }
+                else
+                {
+                    await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job,
+                        bufferPool!, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {
@@ -412,8 +465,10 @@ public static class CopyEngine
 
             // COPY owns the large 256 MiB page pool. Verification deliberately does not.
             // Once every writer drained, release that pinned/locked region before VERIFY.
-            activeBufferPool.Dispose();
+            bufferPool?.Dispose();
             bufferPool = null;
+            foreach (var pool in independentPools) pool.Dispose();
+            independentPools.Clear();
 
             if (options.Verify && !token.IsCancellationRequested)
             {
@@ -455,6 +510,7 @@ public static class CopyEngine
                 DrainAndRelease(worker.Channel.Reader, worker);
             }
             bufferPool?.Dispose();
+            foreach (var pool in independentPools) pool.Dispose();
             copy.ReleaseStateLeases();
         }
     }
@@ -482,7 +538,8 @@ public static class CopyEngine
                 var active = new List<DestinationWorker>();
                 for (var slot = 0; slot < workers.Length; slot++)
                 {
-                    if (skipMasks[fileIndex][slot])
+                    var destinationSlot = workers[slot].Slot;
+                    if (skipMasks[fileIndex][destinationSlot])
                     {
                         // Space was reserved excluding metadata matches. If one changed after preparation,
                         // fail closed instead of skipping stale metadata or replacing without a reservation.
@@ -493,7 +550,7 @@ public static class CopyEngine
                             if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
                                 throw new IOException($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
                         }
-                        progress[slot].MarkSkipped((ulong)entry.Size);
+                        progress[destinationSlot].MarkSkipped((ulong)entry.Size);
                         continue;
                     }
                     if (workers[slot].IsActive) active.Add(workers[slot]);
