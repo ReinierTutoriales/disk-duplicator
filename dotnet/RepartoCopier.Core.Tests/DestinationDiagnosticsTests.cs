@@ -222,8 +222,8 @@ public sealed class DestinationDiagnosticsTests
         var first = Directory.CreateDirectory(Path.Combine(temp.Path, "A")).FullName;
         var second = Directory.CreateDirectory(Path.Combine(temp.Path, "B")).FullName;
 
-        var plan = CopyPlan.Create(source, [first, second], skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [first, second], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
 
         foreach (var snapshot in job.Snapshot())
@@ -261,8 +261,8 @@ public sealed class DestinationDiagnosticsTests
         await File.WriteAllBytesAsync(Path.Combine(source, "large.bin"), payload);
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
 
-        var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         job.SetPaused(true);
         job.RequestCancel();
         try { await job.Completion.WaitAsync(TimeSpan.FromSeconds(60)); }

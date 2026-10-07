@@ -19,7 +19,7 @@ public sealed class PreparationCancellationTests
             using var cancellation = new CancellationTokenSource();
             cancellation.Cancel();
             await Assert.ThrowsAsync<OperationCanceledException>(async () =>
-                await CopyEngine.StartAsync(CopyPlan.Create(source, [destination], false, false),
+                await CopyEngine.StartAsync(CopyPlan.Create(source, [destination], ExistingFilePolicy.ReplaceAll, false),
                     cancellationToken: cancellation.Token));
             Assert.IsFalse(Directory.Exists(destination));
             CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, File.ReadAllBytes(source));

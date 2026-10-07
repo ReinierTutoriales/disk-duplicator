@@ -17,7 +17,6 @@ public sealed record DestinationPhaseMark(DestinationPhase Phase, TimeSpan Offse
 
 public sealed record CopyOptions(
     bool Verify = false,
-    bool SkipSame = true,
     bool KeepGoing = false);
 
 public sealed record DestinationSnapshot(

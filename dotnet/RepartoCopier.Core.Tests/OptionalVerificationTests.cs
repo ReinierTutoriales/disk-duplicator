@@ -13,7 +13,7 @@ public sealed class OptionalVerificationTests
     [DataRow(true)]
     public void ProfileRoundTripPreservesVerificationChoice(bool verify)
     {
-        var profile = new CopyProfile(1, @"C:\Source", [@"D:\Backup"], false, false, false, verify);
+        var profile = new CopyProfile(1, @"C:\Source", [@"D:\Backup"], false, false, verify);
         var restored = CopyProfileSerializer.Deserialize(CopyProfileSerializer.Serialize(profile));
         Assert.AreEqual(verify, restored.VerifyAfterCopy);
     }
@@ -46,8 +46,8 @@ public sealed class OptionalVerificationTests
             var payload = new byte[3 * 1024 * 1024 + 137];
             new Random(41).NextBytes(payload);
             await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
-            var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
-            await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: verify, SkipSame: false));
+            var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+            await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: verify));
             await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
             var snapshot = job.Snapshot().Single();
             var diagnostics = job.DiagnosticsSnapshot();

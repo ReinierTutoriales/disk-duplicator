@@ -18,7 +18,7 @@ public sealed class PreflightNamespaceAndSpaceTests
             File.WriteAllBytes(source, payload);
             await Assert.ThrowsAsync<IOException>(async () =>
             {
-                await using var job = await CopyEngine.StartAsync(CopyPlan.Create(source, [destination], false, false));
+                await using var job = await CopyEngine.StartAsync(CopyPlan.Create(source, [destination], ExistingFilePolicy.ReplaceAll, false));
             });
             CollectionAssert.AreEqual(payload, File.ReadAllBytes(source));
         }

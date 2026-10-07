@@ -22,7 +22,7 @@ public sealed class ProductionFastPathTests
         var destinations = Enumerable.Range(0, 2)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
 
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
@@ -56,7 +56,7 @@ public sealed class ProductionFastPathTests
         var destinations = Enumerable.Range(0, 2)
             .Select(index => Directory.CreateDirectory(Path.Combine(temp.Path, $"dest-write-{index}")).FullName)
             .ToArray();
-        var plan = CopyPlan.Create(source, destinations, skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, destinations, existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
 
         await using var job = CopyEngine.Start(plan);
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
@@ -85,9 +85,9 @@ public sealed class ProductionFastPathTests
         const int payloadSize = 6 * 1024 * 1024 + 17;
         await File.WriteAllBytesAsync(Path.Combine(source, "verify.bin"), new byte[payloadSize]);
         var destination = Directory.CreateDirectory(Path.Combine(temp.Path, "dest")).FullName;
-        var plan = CopyPlan.Create(source, [destination], skipSame: false, keepGoing: false);
+        var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
 
-        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, SkipSame: false, KeepGoing: false));
+        await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: true, KeepGoing: false));
         await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
 
         Assert.IsTrue(job.Snapshot().All(item => item.Phase == DestinationPhase.Done));
