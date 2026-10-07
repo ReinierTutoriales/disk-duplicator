@@ -17,14 +17,17 @@ public sealed class CopyJob : IAsyncDisposable
 
     internal CopyJob(IReadOnlyList<DestinationProgress> progress) => _progress = progress;
 
-    private volatile bool _independentSourceReads;
+    private int _readMode; // 0 = not chosen yet, 1 = shared reader, 2 = independent readers
 
     public bool IsPaused => _pauseGate.IsPaused;
     public Task Completion => _completion;
 
-    /// <summary>Read mode actually used by COPY (not merely requested). Set before the first source read.</summary>
-    public bool IndependentSourceReads => _independentSourceReads;
-    internal void SetIndependentSourceReads(bool value) => _independentSourceReads = value;
+    /// <summary>
+    /// Read mode actually used by COPY (not merely requested), or null when the job ended before COPY chose
+    /// one (e.g. failed or cancelled during preparation). Set before the first source read.
+    /// </summary>
+    public bool? IndependentSourceReads => Volatile.Read(ref _readMode) switch { 1 => false, 2 => true, _ => null };
+    internal void SetIndependentSourceReads(bool value) => Volatile.Write(ref _readMode, value ? 2 : 1);
     internal CancellationToken Token => _cancel.Token;
 
     internal void Attach(Task completion) => _completion = completion;
@@ -369,7 +372,16 @@ public static class CopyEngine
         DeviceScheduler? serializedSourceScheduler = null;
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
-        job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
+        var independent = UseIndependentSourceReads(options, copy.DestinationRoots.Length);
+        // A source on a destination's disk is already arbitrated with that disk's writes.
+        var sourceScheduler = deviceSchedulers.SharedSourceScheduler;
+        if (independent && sourceScheduler is null && SerializeIndependentReads(copy.SourceDevice))
+            sourceScheduler = serializedSourceScheduler = new DeviceScheduler(
+                $"{copy.SourceDevice.PhysicalDeviceId}:source", 1, SharedFanoutBlockBytes);
+        job.Telemetry.AttachDeviceSchedulers(serializedSourceScheduler is null
+            ? deviceSchedulers.Schedulers
+            : [.. deviceSchedulers.Schedulers, serializedSourceScheduler]);
+        var sourceTreeChanged = false;
         try
         {
             var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
@@ -401,13 +413,7 @@ public static class CopyEngine
             }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
-            var independent = UseIndependentSourceReads(options, workers.Length);
             job.SetIndependentSourceReads(independent);
-            // A source on a destination's disk is already arbitrated with that disk's writes.
-            var sourceScheduler = deviceSchedulers.SharedSourceScheduler;
-            if (independent && sourceScheduler is null && SerializeIndependentReads(copy.SourceDevice))
-                sourceScheduler = serializedSourceScheduler = new DeviceScheduler(
-                    $"{copy.SourceDevice.PhysicalDeviceId}:source", 1, SharedFanoutBlockBytes);
             if (independent)
             {
                 var capacity = IndependentPoolCapacity(workers.Length);
@@ -435,7 +441,7 @@ public static class CopyEngine
                         try
                         {
                             await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
-                                independentPools[index], sourceScheduler).ConfigureAwait(false);
+                                independentPools[index], sourceScheduler, options.KeepGoing).ConfigureAwait(false);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
@@ -456,11 +462,18 @@ public static class CopyEngine
                 else
                 {
                     await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job,
-                        bufferPool!, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                        bufferPool!, deviceSchedulers.SharedSourceScheduler, options.KeepGoing).ConfigureAwait(false);
                 }
 
                 if (copy.SourceScan is not null)
-                    PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token);
+                {
+                    try { PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token); }
+                    catch (Exception) when (!token.IsCancellationRequested)
+                    {
+                        sourceTreeChanged = true;
+                        throw;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -526,7 +539,14 @@ public static class CopyEngine
         }
         catch (Exception ex)
         {
-            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Failed))
+            // Another destination's failure does not undo one that already committed every file. A source
+            // tree that changed during the copy does: then no destination is a faithful copy.
+            foreach (var item in progress.Where(p => p.Snapshot().Phase switch
+                     {
+                         DestinationPhase.Failed => false,
+                         DestinationPhase.Done => sourceTreeChanged,
+                         _ => true,
+                     }))
                 item.SetPhase(DestinationPhase.Failed, ex.Message);
         }
         finally
@@ -551,7 +571,8 @@ public static class CopyEngine
         ConcurrentDictionary<string, byte[]> expectedHashes,
         CopyJob job,
         SharedFanoutBufferPool bufferPool,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        bool keepGoing)
     {
         var token = job.Token;
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
@@ -568,15 +589,17 @@ public static class CopyEngine
                 if (skipMasks[fileIndex][destinationSlot])
                 {
                     // Space was reserved excluding metadata matches. If one changed after preparation,
-                    // fail that destination closed instead of skipping stale metadata or replacing without a
-                    // reservation. The other destinations are unaffected.
+                    // fail closed instead of skipping stale metadata or replacing without a reservation: that
+                    // file is an error (KeepGoing) or the destination fails. Other destinations are unaffected.
                     if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
                     {
                         var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
                         ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
                         if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
                         {
-                            workers[slot].Fail($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
+                            var message = $"El archivo existente cambió después de comprobar tamaño y fecha: {destination}";
+                            if (keepGoing) progress[destinationSlot].MarkError(message);
+                            else workers[slot].Fail(message);
                             continue;
                         }
                     }

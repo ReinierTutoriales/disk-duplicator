@@ -299,7 +299,18 @@ public sealed partial class MainWindow : Window
         _job.SetPaused(paused);
         PauseButtonText.Text = paused ? "Continuar" : "Pausar";
         PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
-        StatusText.Text = paused ? "Pausado" : "Reanudando…";
+        if (paused)
+        {
+            StatusText.Text = "Pausado";
+        }
+        else
+        {
+            // Restore the running state now; the next refresh only refines it.
+            var verifying = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Verifying);
+            SetOperationState(OperationState.Active, verifying ? "\uE9D5" : "\uE8A5");
+            OperationTitleText.Text = verifying ? "Comprobando integridad…" : "Copiando…";
+            StatusText.Text = verifying ? "Verificando integridad de los destinos…" : "Copiando…";
+        }
         RefreshProgress();
     }
 
