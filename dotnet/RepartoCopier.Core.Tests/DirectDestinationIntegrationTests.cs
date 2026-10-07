@@ -30,8 +30,8 @@ public sealed class DirectDestinationIntegrationTests
             var topology = StorageTopology.InspectDestinations([destinationRoot]).Destinations.Single();
             var eligible = DirectIoDestinationWriter.IsEligible(topology, size);
 
-            var plan = CopyPlan.Create(source, [destinationRoot], skipSame: false, keepGoing: false);
-            await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: false, SkipSame: false, KeepGoing: false));
+            var plan = CopyPlan.Create(source, [destinationRoot], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+            await using var job = CopyEngine.Start(plan, new CopyOptions(Verify: false, KeepGoing: false));
             await job.Completion.WaitAsync(TimeSpan.FromMinutes(2));
 
             Assert.IsTrue(File.Exists(destination));

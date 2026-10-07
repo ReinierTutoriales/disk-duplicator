@@ -28,9 +28,9 @@ public sealed class VerificationFaultIsolationTests
             var sourceFile = Path.Combine(source, "payload.bin");
             var payload = Enumerable.Range(0, 8193).Select(index => (byte)(index % 251)).ToArray();
             File.WriteAllBytes(sourceFile, payload);
-            var plan = CopyPlan.Create(source, [Path.Combine(root, "blocked"), Path.Combine(root, "healthy")], false, false);
+            var plan = CopyPlan.Create(source, [Path.Combine(root, "blocked"), Path.Combine(root, "healthy")], ExistingFilePolicy.ReplaceAll, false);
             prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.Static | BindingFlags.NonPublic)!
-                .Invoke(null, [plan, true, CancellationToken.None])!;
+                .Invoke(null, [plan, CancellationToken.None])!;
             var preparedType = prepared.GetType();
             var roots = (string[])preparedType.GetProperty("DestinationRoots")!.GetValue(prepared)!;
             var devices = (StorageDeviceInfo[])preparedType.GetProperty("DestinationDevices")!.GetValue(prepared)!;

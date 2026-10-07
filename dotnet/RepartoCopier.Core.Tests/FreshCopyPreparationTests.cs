@@ -54,10 +54,9 @@ public sealed class FreshCopyPreparationTests
     }
 
     [TestMethod]
-    [DataRow(false, false)]
-    [DataRow(true, false)]
-    [DataRow(true, true)]
-    public async Task RepeatedFreshCopyReallyWritesEveryFile(bool asyncStart, bool planSaysSkip)
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task RepeatedReplaceAllCopyReallyWritesEveryFile(bool asyncStart)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -70,8 +69,8 @@ public sealed class FreshCopyPreparationTests
         var payload = new byte[3 * 1024 * 1024 + 137];
         new Random(71).NextBytes(payload);
         await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
-        var plan = CopyPlan.Create(source, [destination], skipSame: planSaysSkip, keepGoing: false);
-        var options = new CopyOptions(Verify: false, SkipSame: false);
+        var plan = CopyPlan.Create(source, [destination], existingFiles: ExistingFilePolicy.ReplaceAll, keepGoing: false);
+        var options = new CopyOptions(Verify: false);
         for (var run = 0; run < 2; run++)
         {
             await using var job = asyncStart
