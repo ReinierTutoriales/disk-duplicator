@@ -13,14 +13,16 @@ internal sealed record DiagnosticsDocument(
     CopyDiagnosticsSnapshot? Diagnostics,
     IReadOnlyList<DestinationSnapshot> Destinations,
     IReadOnlyList<string> MeasurementNotes,
-    bool? VerificationRequested);
+    bool? VerificationRequested,
+    bool? IndependentSourceReads);
 
 internal static class DiagnosticsExport
 {
     // 2: adds BuildRevision/BuildInformationalVersion and, per destination, device identification,
     // WriteTime, durable flush counts/times, phase marks, CopyFinishedAt/VerifyFinishedAt, durations and Outcome.
     // 3: adds VerificationRequested to distinguish copied from verified jobs.
-    internal const int SchemaVersion = 3;
+    // 4: records the independent source-read COPY mode used for performance comparisons.
+    internal const int SchemaVersion = 4;
 
     internal static IReadOnlyList<string> MeasurementNotes { get; } =
     [
@@ -37,6 +39,7 @@ internal static class DiagnosticsExport
         "Destinations[].Outcome is Completed, CompletedWithErrors, Failed, Cancelled or InProgress, derived from the final Phase and FilesErrored.",
         "BuildRevision is the commit SHA embedded at build time (SourceRevisionId) and is null when the build had none.",
         "This final snapshot does not record a time series.",
+        "IndependentSourceReads records whether COPY used one source read per destination and one bounded pool per destination. If true, SourceReadBytes and SourceHashBytes are physical aggregate work across producers and can be up to N times logical bytes. BufferWaitTime sums waits across producers and cannot be divided by COPY wall time to infer one producer's stall.",
         "ComparisonBytesRead counts actual destination bytes read when comparing existing content; source reads are not included. ComparisonBytesProcessed counts logical candidate bytes classified, including unread tails once a difference is found. ComparisonFilesDone and ComparisonIdenticalFiles count candidates classified and identical candidates. Comparison precedes COPY and is excluded from CopyPhaseElapsed and final verification counters.",
         "VerificationRequested records the final full-content reread choice (null if unknown). Outcome=Completed means the requested operation completed, not that verification ran. VerifyFinishedAt and verification counters record actual verification. Without verification, source hashing, write checks, durable flush and atomic commit still run; destination content is not checked by final reread.",
     ];
@@ -47,7 +50,8 @@ internal static class DiagnosticsExport
         DateTimeOffset? startedAt,
         CopyDiagnosticsSnapshot? diagnostics,
         IReadOnlyList<DestinationSnapshot> destinations,
-        bool? verificationRequested = null) =>
+        bool? verificationRequested = null,
+        bool? independentSourceReads = null) =>
         new(
             SchemaVersion,
             applicationVersion,
@@ -57,7 +61,8 @@ internal static class DiagnosticsExport
             diagnostics,
             destinations,
             MeasurementNotes,
-            verificationRequested);
+            verificationRequested,
+            independentSourceReads);
 
     internal static string Serialize(DiagnosticsDocument document)
     {

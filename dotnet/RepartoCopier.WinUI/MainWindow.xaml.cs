@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private CopyDiagnosticsSnapshot? _lastDiagnostics;
     private DateTimeOffset? _copyStartedAt;
     private bool _verificationRequested;
+    private bool _independentSourceReadsRequested;
     private readonly LogicalProgressRate _copyProgressRate = new();
     private readonly LogicalProgressRate _comparisonProgressRate = new();
 
@@ -199,10 +200,12 @@ public sealed partial class MainWindow : Window
                 KeepGoingCheck.IsChecked == true);
             var options = new CopyOptions(
                 Verify: VerifyCheck.IsChecked == true,
-                KeepGoing: plan.KeepGoing);
+                KeepGoing: plan.KeepGoing,
+                IndependentSourceReads: IndependentReadsCheck.IsChecked == true);
 
             SetEditingEnabled(false);
             _verificationRequested = options.Verify;
+            _independentSourceReadsRequested = options.IndependentSourceReads;
             _preparationCancel = new CancellationTokenSource();
             _cancellationRequested = false;
             NewCopyButton.Visibility = Visibility.Collapsed;
@@ -644,6 +647,7 @@ public sealed partial class MainWindow : Window
         SourcePathBox.IsEnabled = enabled;
         DestinationList.IsEnabled = enabled;
         KeepGoingCheck.IsEnabled = enabled;
+        IndependentReadsCheck.IsEnabled = enabled;
         VerifyCheck.IsEnabled = enabled;
     }
 
@@ -716,7 +720,8 @@ public sealed partial class MainWindow : Window
                     startedAt,
                     diagnostics,
                     destinations,
-                    verificationRequested));
+                    verificationRequested,
+                    _independentSourceReadsRequested));
                 await File.WriteAllTextAsync(file.Path, json);
             }
         }

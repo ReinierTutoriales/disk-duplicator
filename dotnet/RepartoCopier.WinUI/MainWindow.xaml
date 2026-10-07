@@ -171,6 +171,8 @@
                               <StackPanel Orientation="Horizontal" Spacing="10">
                                 <CheckBox x:Name="KeepGoingCheck" Content="Continuar ante error"/>
                               </StackPanel>
+                                <CheckBox x:Name="IndependentReadsCheck" Content="Lecturas independientes (prueba; origen NVMe/SSD interno)" IsChecked="False"
+                                          ToolTipService.ToolTip="Cada destino lee el origen por separado y usa un pool acotado. Permite que un USB lento no retenga los bloques de un NVMe. Puede aumentar la carga del origen y CPU; comparar diagnóstico por destino."/>
                                 <CheckBox x:Name="VerifyCheck" Content="Verificar contenido al terminar" IsChecked="False"
                                           ToolTipService.ToolTip="Relee todo el origen y los destinos. Sin esta opción, la copia termina tras escribir y confirmar los archivos, sin comprobar su contenido mediante relectura."/>
                             </StackPanel>
