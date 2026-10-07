@@ -22,7 +22,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Invariantes de copia
 
-- FAN-OUT es el único modo de copia.
+- La lectura compartida FAN-OUT es el modo predeterminado. La opción de prueba «Lecturas independientes» usa un lector y un pool por destino cuando el origen se identifica como SSD interno NVMe/SATA y hay de 2 a 16 destinos. Se activa por trabajo; no se guarda en perfiles.
 - Una carpeta seleccionada se replica incluyendo su carpeta raíz.
 - Se conserva exactamente la estructura de directorios, incluidas carpetas vacías.
 - Un archivo seleccionado copia únicamente ese archivo.
@@ -38,7 +38,7 @@ La fase de comparación muestra avance lógico y bytes leídos por destino. Usa 
 
 ## Rendimiento
 
-El hot path FAN-OUT sigue un modelo shared-buffer deliberadamente simple: una lectura física del origen entra en un pool acotado de bloques alineados y el mismo bloque, con conteo de referencias, se entrega a una cola ligera por destino. Cada writer libera su referencia al completar la escritura; cuando el pool se llena, el lector espera espacio. No existen replay/spool, staging por rama ni copias privadas del payload en el camino normal.
+La ruta FAN-OUT predeterminada sigue un modelo shared-buffer deliberadamente simple: una lectura física del origen entra en un pool acotado de bloques alineados y el mismo bloque, con conteo de referencias, se entrega a una cola ligera por destino. Cada writer libera su referencia al completar la escritura; cuando el pool se llena, el lector espera espacio. En el modo predeterminado no existen replay/spool, staging por rama ni copias privadas del payload. El modo de prueba da a cada destino una lectura adicional del origen y un pool propio de 16 a 128 MiB, con un máximo conjunto de 256 MiB; así el retraso de un USB no retiene memoria de un NVMe. Leer y hashear el origen N veces puede saturar el origen, su controlador o la CPU: no se garantiza más velocidad hasta medir el COPY por destino con el mismo conjunto de archivos y la misma compilación. La verificación final opcional conserva su planificación conjunta.
 
 Cuando se solicita, después de copiar la verificación relee el origen y los destinos coordinadamente bloque a bloque: una lectura outstanding por dispositivo, CRC32C inmediato, comparación y reutilización del buffer. Usa un workspace fijo de 8 MiB, repartido entre origen y destinos. El pool de copia de 256 MiB se libera antes de esta fase. Las lecturas buffered parciales se completan antes de comparar; un fallo permanente de un destino no invalida las ramas sanas.
 

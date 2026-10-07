@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased — independent source reads prototype
+
+- Motor: modo de prueba explícito de lectura y pool independientes por destino para origen NVMe/SATA sólido, de 2 a 16 destinos. Presupuesto conjunto máximo de 256 MiB; la ruta compartida continúa por defecto. La telemetría JSON distingue modos y contabiliza las relecturas físicas; VERIFY continúa conjunto.
+
 ## Unreleased — main
 
 - UI: Ajustes, Acerca de, confirmación de apagado y resultados dejan de usar ContentDialog dentro de la ventana compacta. Comparten TaskDialogIndirect con conflictos, propietario explícito, cierre/cancelación seguros y marshalling de callbacks protegido. Acerca de conserva enlaces; Ajustes conserva tema y persistencia; resultados recorren todos los destinos en páginas de tres y exportan el JSON completo. Apagado exige elegir Apagar y conserva No apagar por defecto.

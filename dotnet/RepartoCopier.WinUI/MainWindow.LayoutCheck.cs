@@ -31,7 +31,12 @@ public sealed partial class MainWindow
             await SettleLayoutAsync();
             foreach (var control in new FrameworkElement[] { StartButton, PickSourceFileButton, PickSourceFolderButton,
                 AddDestinationsButton, ClearDestinationsButton }) await CheckReachableAsync(control);
-            report.Add($"Preparation {theme} {size.Width}×{size.Height} DIP: actions reachable and labels fit.");
+            OptionsExpander.IsExpanded = true;
+            await SettleLayoutAsync();
+            await CheckReachableAsync(IndependentReadsCheck);
+            await CheckReachableAsync(VerifyCheck);
+            OptionsExpander.IsExpanded = false;
+            report.Add($"Preparation {theme} {size.Width}×{size.Height} DIP: actions and expanded options reachable; labels fit.");
             ShowRunningView();
             RunningDestinationScroll.Visibility = Visibility.Visible;
             foreach (var drive in new[] { "D", "F", "G", "I", "J" })
@@ -90,15 +95,21 @@ public sealed partial class MainWindow
         await SettleLayoutAsync();
         var bounds = control.TransformToVisual(Root).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
         var bottom = Root.ActualHeight - 24; // footer row
-        if (bounds.Bottom > bottom)
+        // Expanding options can remeasure while the scroll position changes. Keep
+        // scrolling toward the control until it is wholly visible or no travel remains.
+        for (var attempt = 0; attempt < 4 && bounds.Bottom > bottom + 1; attempt++)
         {
-            MainContentScroll.ChangeView(null, MainContentScroll.VerticalOffset + bounds.Bottom - bottom + 2, null, true);
+            var before = MainContentScroll.VerticalOffset;
+            var desired = Math.Min(MainContentScroll.ScrollableHeight,
+                before + Math.Max(16, bounds.Bottom - bottom + 8));
+            if (desired <= before + 0.5) break;
+            MainContentScroll.ChangeView(null, desired, null, true);
             await SettleLayoutAsync();
             bounds = control.TransformToVisual(Root).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
         }
         if (control.ActualWidth <= 0 || control.ActualHeight <= 0 || bounds.Left < -1 ||
             bounds.Right > Root.ActualWidth + 1 || bounds.Top < -1 || bounds.Bottom > bottom + 1)
-            throw new InvalidOperationException($"Control cannot be reached: {control.Name} {bounds} in {Root.ActualWidth}×{Root.ActualHeight}.");
+            throw new InvalidOperationException($"Control cannot be reached: {control.Name} {bounds} in {Root.ActualWidth}×{Root.ActualHeight}; scroll offset {MainContentScroll.VerticalOffset}, scrollable {MainContentScroll.ScrollableHeight}, extent {MainContentScroll.ExtentHeight}, viewport {MainContentScroll.ViewportHeight}.");
         CheckTextFits(control);
     }
 
