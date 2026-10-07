@@ -258,8 +258,9 @@
                                     <TextBlock x:Name="CurrentPathText" Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" MaxLines="1"/>
                                 </StackPanel>
+                                <!-- Fixed width: going from "0%" to "100%" must not shift the title column. -->
                                 <TextBlock x:Name="OverallPercentText" Grid.Column="2" Text="0%" Style="{StaticResource SubtitleTextBlockStyle}"
-                                           VerticalAlignment="Center" />
+                                           MinWidth="60" TextAlignment="Right" VerticalAlignment="Center" />
                             </Grid>
 
                             <StackPanel Spacing="4">
