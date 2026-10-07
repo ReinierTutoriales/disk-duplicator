@@ -59,13 +59,19 @@ public sealed partial class MainWindow
             Root.RequestedTheme = theme;
             await SettleLayoutAsync();
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            Exception? inspectionError = null;
             async Task Inspect(AppDialog dialog, string name)
             {
-                await SettleLayoutAsync();
-                dialog.Root.UpdateLayout();
-                report.Add($"{name} {theme}: {CheckDialog(dialog)}");
-                CheckTextFits(dialog.Root);
-                dialog.Close(AppDialog.Dismissed);
+                // Runs from the dialog's Loaded callback; keep the first failure and always dismiss.
+                try
+                {
+                    await SettleLayoutAsync();
+                    dialog.Root.UpdateLayout();
+                    report.Add($"{name} {theme}: {CheckDialog(dialog)}");
+                    CheckTextFits(dialog.Root);
+                }
+                catch (Exception ex) { inspectionError ??= new InvalidOperationException($"{name} {theme}: {ex.Message}", ex); }
+                finally { dialog.Close(AppDialog.Dismissed); }
             }
             await AppDialogs.AboutAsync(this, "2.1.1", _ => throw new InvalidOperationException("Layout check must not open a URL."),
                 deadline.Token, dialog => _ = Inspect(dialog, "About"));
@@ -80,6 +86,7 @@ public sealed partial class MainWindow
                 "", 0, 0)).ToArray();
             if (await AppDialogs.ResultsAsync(this, results, true, true, deadline.Token, dialog => _ = Inspect(dialog, "Results")))
                 throw new InvalidOperationException("Dismissed results authorized saving.");
+            if (inspectionError is not null) throw inspectionError;
             if (deadline.IsCancellationRequested) throw new InvalidOperationException("A dialog did not open in time.");
         }
         await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(new { Passed = true, Checks = report },

@@ -55,7 +55,7 @@ public sealed class IndependentSourceReadTests
                 CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(
                     Path.Combine(destination, "Source", "payload.bin")));
             Assert.IsTrue(job.Snapshot().All(snapshot => snapshot.Phase == DestinationPhase.Done));
-            Assert.IsTrue(job.IndependentSourceReads);
+            Assert.AreEqual(true, job.IndependentSourceReads);
             // Each destination records its own completion when its reader and writer finish.
             Assert.IsTrue(job.Snapshot().All(snapshot => snapshot.CopyFinishedAt is not null));
             Assert.AreEqual(2L * payload.Length, job.DiagnosticsSnapshot().SourceHashBytes);
