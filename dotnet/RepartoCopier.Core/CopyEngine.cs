@@ -194,186 +194,181 @@ public static class CopyEngine
         var createdDestinations = new List<string>();
         try
         {
-            return PreflightCore(plan, createdDestinations, token);
+            token.ThrowIfCancellationRequested();
+            PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
+            var requestedSource = Path.GetFullPath(plan.Source);
+            var sourceIsDirectory = Directory.Exists(requestedSource);
+            var sourceIsFile = File.Exists(requestedSource);
+            if (!sourceIsDirectory && !sourceIsFile)
+                throw new IOException("El origen debe ser un archivo regular o una carpeta existente.");
+            if (WindowsPath.IsLink(requestedSource))
+                throw new IOException("El origen no puede ser un symlink/junction/reparse point.");
+
+            var source = PreflightSafety.CanonicalExisting(requestedSource, "origen");
+            var sourceName = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
+            if (string.IsNullOrWhiteSpace(sourceName))
+                throw new IOException("El origen debe tener un nombre; no se puede duplicar una raíz completa.");
+
+            var effectiveDestinations = plan.Destinations
+                .Select(Path.GetFullPath)
+                .Select(basePath => sourceIsDirectory ? Path.Combine(basePath, sourceName) : basePath)
+                .ToArray();
+            var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
+                source,
+                effectiveDestinations, token, createdDestinations);
+            PreflightSafety.ValidateRecoveryPaths(source, destinationRoots);
+
+            var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
+            var destinationDevices = destinationTopology.Destinations.ToArray();
+            if (destinationDevices.Length != destinationRoots.Length)
+                throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
+            var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
+
+            var sourceRoot = sourceIsDirectory
+                ? source
+                : Path.GetDirectoryName(source)
+                    ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
+
+            SourceTreeScan scan;
+            if (sourceIsDirectory)
+            {
+                scan = PreflightSafety.ScanDirectory(source, token);
+            }
+            else
+            {
+                RejectReparse(source, "archivo de origen");
+                var info = new FileInfo(source);
+                scan = new SourceTreeScan(
+                    [new ScannedFile(
+                        source,
+                        Path.GetFileName(source),
+                        info.Length,
+                        info.LastWriteTimeUtc)],
+                    []);
+            }
+
+            var files = scan.Files
+                .Select(file => new FileEntry(
+                    file.FullPath,
+                    file.RelativePath,
+                    file.Size,
+                    file.LastWriteTimeUtc,
+                    ToUnixNanoseconds(file.LastWriteTimeUtc)))
+                .ToList();
+            var directories = scan.Directories.ToList();
+            var totalBytes = files.Aggregate<FileEntry, ulong>(
+                0,
+                (sum, file) => checked(sum + (ulong)file.Size));
+            PreflightSafety.RejectFilesTooLargeForFileSystem(destinationRoots, destinationDevices, scan.Files);
+
+            // Read-only: look for files that already exist before leases, recovery or any write touch a
+            // destination. Existence only; content is compared later and only when the user asked for it.
+            var relativePaths = files.Select(file => file.RelativePath).ToArray();
+            var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
+            if (plan.ExistingFiles is null)
+                PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
+            var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+
+            var recoveryFiles = files
+                .Select(file => new RecoveryFile(
+                    file.SourcePath,
+                    file.RelativePath,
+                    file.Size,
+                    file.ModifiedUnixNanoseconds))
+                .ToArray();
+            var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+            var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
+            var spaceRequirements = new List<DestinationSpaceRequirement>(destinationRoots.Length);
+            try
+            {
+                foreach (var root in destinationRoots)
+                {
+                    token.ThrowIfCancellationRequested();
+                    stateLeases.Add(DestinationStateLease.Acquire(root));
+                }
+
+                for (var slot = 0; slot < destinationRoots.Length; slot++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var root = destinationRoots[slot];
+                    PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
+                    // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
+                    // content is compared once, in the visible comparison phase, never during preparation.
+                    _ = RecoveryManager.PrepareAndNormalize(
+                        sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
+                    // Recovery may have restored an interrupted replacement: re-read what really exists now.
+                    var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
+                    var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        var exists = existingNow[fileIndex][0];
+                        existingFiles[fileIndex][slot] = exists;
+                        if (plan.ExistingFiles is null)
+                            continue; // reported below, before anything is written
+                        switch (PreflightSafety.Decide(plan.ExistingFiles, exists))
+                        {
+                            case PreflightSafety.ExistingFileAction.Keep:
+                                // KeepExisting leaves the file untouched: it is skipped like any completed file.
+                                preverifiedSkips[fileIndex][slot] = true;
+                                skippedPaths.Add(files[fileIndex].RelativePath);
+                                break;
+                            case PreflightSafety.ExistingFileAction.ReplaceAllowed:
+                                if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
+                                    PreflightSafety.MatchesMetadata(
+                                        Path.Combine(root, files[fileIndex].RelativePath),
+                                        files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc,
+                                        PreflightSafety.TimestampTolerance(destinationDevices[slot].FileSystem)))
+                                {
+                                    preverifiedSkips[fileIndex][slot] = true;
+                                    skippedPaths.Add(files[fileIndex].RelativePath);
+                                    break;
+                                }
+                                // Only a file seen at analysis time may be replaced at commit time.
+                                replaceAllowed[fileIndex][slot] = true;
+                                break;
+                        }
+                    }
+                    if (scan.Files.Count > 0)
+                        spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
+                }
+                if (plan.ExistingFiles is null)
+                    PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
+                PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
+                foreach (var root in destinationRoots)
+                {
+                    foreach (var relative in directories)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        EnsureDestinationDirectory(root, relative);
+                    }
+                }
+
+                return new PreparedCopy(
+                    sourceRoot,
+                    destinationRoots,
+                    files,
+                    directories,
+                    totalBytes,
+                    preverifiedSkips,
+                    replaceAllowed,
+                    plan.ExistingFiles,
+                    sourceIsDirectory ? scan : null,
+                    sourceDevice,
+                    destinationDevices,
+                    stateLeases.ToArray());
+            }
+            catch
+            {
+                foreach (var lease in stateLeases)
+                    lease.Dispose();
+                throw;
+            }
         }
         catch
         {
             // A preparation that fails or is cancelled leaves no empty destination folder behind.
             PreflightSafety.RemoveCreatedEmptyDirectories(createdDestinations);
-            throw;
-        }
-    }
-
-    private static PreparedCopy PreflightCore(CopyPlan plan, List<string> createdDestinations, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
-        var requestedSource = Path.GetFullPath(plan.Source);
-        var sourceIsDirectory = Directory.Exists(requestedSource);
-        var sourceIsFile = File.Exists(requestedSource);
-        if (!sourceIsDirectory && !sourceIsFile)
-            throw new IOException("El origen debe ser un archivo regular o una carpeta existente.");
-        if (WindowsPath.IsLink(requestedSource))
-            throw new IOException("El origen no puede ser un symlink/junction/reparse point.");
-
-        var source = PreflightSafety.CanonicalExisting(requestedSource, "origen");
-        var sourceName = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
-        if (string.IsNullOrWhiteSpace(sourceName))
-            throw new IOException("El origen debe tener un nombre; no se puede duplicar una raíz completa.");
-
-        var effectiveDestinations = plan.Destinations
-            .Select(Path.GetFullPath)
-            .Select(basePath => sourceIsDirectory ? Path.Combine(basePath, sourceName) : basePath)
-            .ToArray();
-        var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
-            source,
-            effectiveDestinations, token, createdDestinations);
-        PreflightSafety.ValidateRecoveryPaths(source, destinationRoots);
-
-        var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
-        var destinationDevices = destinationTopology.Destinations.ToArray();
-        if (destinationDevices.Length != destinationRoots.Length)
-            throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
-        var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
-
-        var sourceRoot = sourceIsDirectory
-            ? source
-            : Path.GetDirectoryName(source)
-                ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
-
-        SourceTreeScan scan;
-        if (sourceIsDirectory)
-        {
-            scan = PreflightSafety.ScanDirectory(source, token);
-        }
-        else
-        {
-            RejectReparse(source, "archivo de origen");
-            var info = new FileInfo(source);
-            scan = new SourceTreeScan(
-                [new ScannedFile(
-                    source,
-                    Path.GetFileName(source),
-                    info.Length,
-                    info.LastWriteTimeUtc)],
-                []);
-        }
-
-        var files = scan.Files
-            .Select(file => new FileEntry(
-                file.FullPath,
-                file.RelativePath,
-                file.Size,
-                file.LastWriteTimeUtc,
-                ToUnixNanoseconds(file.LastWriteTimeUtc)))
-            .ToList();
-        var directories = scan.Directories.ToList();
-        var totalBytes = files.Aggregate<FileEntry, ulong>(
-            0,
-            (sum, file) => checked(sum + (ulong)file.Size));
-        PreflightSafety.RejectFilesTooLargeForFileSystem(destinationRoots, destinationDevices, scan.Files);
-
-        // Read-only: look for files that already exist before leases, recovery or any write touch a
-        // destination. Existence only; content is compared later and only when the user asked for it.
-        var relativePaths = files.Select(file => file.RelativePath).ToArray();
-        var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
-        if (plan.ExistingFiles is null)
-            PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
-        var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
-
-        var recoveryFiles = files
-            .Select(file => new RecoveryFile(
-                file.SourcePath,
-                file.RelativePath,
-                file.Size,
-                file.ModifiedUnixNanoseconds))
-            .ToArray();
-        var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
-        var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
-        var spaceRequirements = new List<DestinationSpaceRequirement>(destinationRoots.Length);
-        try
-        {
-            foreach (var root in destinationRoots)
-            {
-                token.ThrowIfCancellationRequested();
-                stateLeases.Add(DestinationStateLease.Acquire(root));
-            }
-
-            for (var slot = 0; slot < destinationRoots.Length; slot++)
-            {
-                token.ThrowIfCancellationRequested();
-                var root = destinationRoots[slot];
-                PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
-                // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
-                // content is compared once, in the visible comparison phase, never during preparation.
-                _ = RecoveryManager.PrepareAndNormalize(
-                    sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
-                // Recovery may have restored an interrupted replacement: re-read what really exists now.
-                var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
-                var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
-                {
-                    token.ThrowIfCancellationRequested();
-                    var exists = existingNow[fileIndex][0];
-                    existingFiles[fileIndex][slot] = exists;
-                    if (plan.ExistingFiles is null)
-                        continue; // reported below, before anything is written
-                    switch (PreflightSafety.Decide(plan.ExistingFiles, exists))
-                    {
-                        case PreflightSafety.ExistingFileAction.Keep:
-                            // KeepExisting leaves the file untouched: it is skipped like any completed file.
-                            preverifiedSkips[fileIndex][slot] = true;
-                            skippedPaths.Add(files[fileIndex].RelativePath);
-                            break;
-                        case PreflightSafety.ExistingFileAction.ReplaceAllowed:
-                            if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
-                                PreflightSafety.MatchesMetadata(
-                                    Path.Combine(root, files[fileIndex].RelativePath),
-                                    files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc,
-                                    PreflightSafety.TimestampTolerance(destinationDevices[slot].FileSystem)))
-                            {
-                                preverifiedSkips[fileIndex][slot] = true;
-                                skippedPaths.Add(files[fileIndex].RelativePath);
-                                break;
-                            }
-                            // Only a file seen at analysis time may be replaced at commit time.
-                            replaceAllowed[fileIndex][slot] = true;
-                            break;
-                    }
-                }
-                if (scan.Files.Count > 0)
-                    spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
-            }
-            if (plan.ExistingFiles is null)
-                PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
-            PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
-            foreach (var root in destinationRoots)
-            {
-                foreach (var relative in directories)
-                {
-                    token.ThrowIfCancellationRequested();
-                    EnsureDestinationDirectory(root, relative);
-                }
-            }
-
-            return new PreparedCopy(
-                sourceRoot,
-                destinationRoots,
-                files,
-                directories,
-                totalBytes,
-                preverifiedSkips,
-                replaceAllowed,
-                plan.ExistingFiles,
-                sourceIsDirectory ? scan : null,
-                sourceDevice,
-                destinationDevices,
-                stateLeases.ToArray());
-        }
-        catch
-        {
-            foreach (var lease in stateLeases)
-                lease.Dispose();
             throw;
         }
     }
