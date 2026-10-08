@@ -137,6 +137,40 @@ public sealed class MetadataComparisonTests
         CollectionAssert.AreEqual(new byte[] { 9, 9, 9, 9 }, await File.ReadAllBytesAsync(target));
     }
 
+    [TestMethod]
+    public async Task MetadataMatchChangedAfterPreparationIsAFileErrorWithKeepGoing()
+    {
+        if (!RequireWindows()) return;
+        using var temp = new TempScope();
+        var source = Directory.CreateDirectory(Path.Combine(temp.Path, "Source")).FullName;
+        var destinationBase = Directory.CreateDirectory(Path.Combine(temp.Path, "Destination")).FullName;
+        var targetRoot = Directory.CreateDirectory(Path.Combine(destinationBase, "Source")).FullName;
+        var sourceFile = Path.Combine(source, "a.bin");
+        var target = Path.Combine(targetRoot, "a.bin");
+        await File.WriteAllBytesAsync(sourceFile, [1, 2, 3]);
+        await File.WriteAllBytesAsync(target, [1, 2, 3]);
+        File.SetLastWriteTimeUtc(target, File.GetLastWriteTimeUtc(sourceFile));
+        var plan = CopyPlan.Create(source, [destinationBase], ExistingFilePolicy.ReplaceMetadataDifferent, true);
+        var prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [plan, CancellationToken.None])!;
+        var roots = (string[])prepared.GetType().GetProperty("DestinationRoots")!.GetValue(prepared)!;
+        var progress = roots.Select(path => new DestinationProgress(path, 3, 1)).ToArray();
+        await using var job = new CopyJob(progress);
+        job.SetPaused(true);
+        var running = (Task)typeof(CopyEngine).GetMethod("RunAsync", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [prepared, progress, new CopyOptions(Verify: false, KeepGoing: true), job])!;
+        job.Attach(running);
+        await File.WriteAllBytesAsync(target, [9, 9, 9, 9]);
+        job.SetPaused(false);
+        await job.Completion.WaitAsync(TimeSpan.FromSeconds(60));
+
+        // KeepGoing: the changed file is reported and left alone; the destination itself completes.
+        Assert.AreEqual(DestinationPhase.Done, job.Snapshot().Single().Phase);
+        Assert.AreEqual(1UL, job.Snapshot().Single().FilesErrored);
+        Assert.AreEqual(0UL, job.Snapshot().Single().FilesSkipped);
+        CollectionAssert.AreEqual(new byte[] { 9, 9, 9, 9 }, await File.ReadAllBytesAsync(target));
+    }
+
     private static bool RequireWindows()
     {
         if (OperatingSystem.IsWindows()) return true;

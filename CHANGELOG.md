@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.2.1 — motor adaptativo por origen, interfaz Windows 11 y diálogos con tema
+
+- Motor: el modo de lectura se elige por el origen. SSD NVMe local con 2–16 destinos → lectores independientes en paralelo. SSD o HDD SATA, USB, red o desconocido → un lector compartido que lee el origen una vez para todos los destinos, con el bloque siguiente ya en lectura mientras se hashea y entrega el actual (como máximo una lectura en curso). Medido en hardware real: leer un HDD USB por turnos para 3 NVMe daba ~35 MB/s por destino (el HDD a 108 MB/s repartido entre 3); el lector compartido entrega la velocidad completa del HDD a cada uno. Se elimina la lectura por turnos.
+- Motor: los lectores acuerdan el hash BLAKE3 de cada archivo antes de enviar el cierre a su destino; un origen que cambia entre lecturas detiene la copia antes de que un segundo destino confirme contenido distinto. Se elimina el riesgo documentado del prototipo.
+- Motor: la comprobación final del árbol de origen se ejecuta una vez en lugar de una por lector. Un archivo existente que cambia tras la comprobación rápida ahora falla solo ese destino.
+- Diagnóstico (esquema 5): `IndependentSourceReads` registra el modo realmente usado.
+- UI: la omisión rápida por tamaño y fecha es la política fija para archivos existentes; se eliminan el selector, el diálogo de conflictos y la fase de comparación de contenido de la interfaz. La lectura independiente es fija (sin casilla).
+- UI: iconos de estado Segoe Fluent rellenos (completado, error, aviso) en capas con pinceles de tema, que siguen el tema claro/oscuro sin código; tarjetas por destino con enlaces compilados `x:Bind` que solo notifican cambios reales; una sola pasada por las instantáneas en cada refresco de 250 ms.
+- UI: diseño adaptable (márgenes 12/16, ancho máximo legible, botones solo con icono en ventanas estrechas), menú nativo con atajos Ctrl+O/Ctrl+S, Ctrl+Enter para iniciar, iconos Segoe Fluent con color de estado, tarjetas por destino con barra de progreso propia.
+- UI: los diálogos (Ajustes, Acerca de, Apagar, Resultados) pasan de TaskDialog Win32, que no tiene modo oscuro, a ventanas WinUI propias: separadas de la app, modales y con propietario, ajustadas al contenido y con el tema claro/oscuro de la app, estilo de diálogo de Windows 11, botón principal en acento y Esc para cerrar. Resultados muestra todos los destinos en una lista desplazable. La comprobación de layout de la CI abre cada diálogo en ambos temas.
+- Coherencia: si el origen cambia durante la copia (contenido, tamaño, fecha o árbol), ningún destino queda como terminado; un destino ya caído conserva su error real; un diálogo nunca se cierra dos veces; la lectura anticipada no retiene un bloque ya leído si el búfer está lleno.
+- Limpieza: se eliminan código y parámetros sin uso.
+
 ## Unreleased — independent source reads prototype
 
 - Motor: modo de prueba explícito de lectura y pool independientes por destino para origen NVMe/SATA sólido, de 2 a 16 destinos. Presupuesto conjunto máximo de 256 MiB; la ruta compartida continúa por defecto. La telemetría JSON distingue modos y contabiliza las relecturas físicas; VERIFY continúa conjunto.

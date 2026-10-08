@@ -1,5 +1,3 @@
-using System.Threading;
-
 namespace RepartoCopier.Core;
 
 public sealed record DeviceIoSnapshot(
@@ -76,8 +74,8 @@ internal sealed class DeviceScheduler : IDisposable
         {
             ThrowIfDisposed();
             if (_outstandingIo == 0 && _waiters.Count == 0)
-                return ValueTask.FromResult(GrantLeaseLocked(bytes));
-            var waiter = new IoWaiter(bytes);
+                return ValueTask.FromResult(GrantLeaseLocked());
+            var waiter = new IoWaiter();
             _waiters.Enqueue(waiter);
             waiter.Cancellation = token.Register(static state =>
             {
@@ -110,11 +108,11 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    private IoLease GrantLeaseLocked(int bytes)
+    private IoLease GrantLeaseLocked()
     {
         _outstandingIo = 1;
         if (_peakOutstandingIo < 1) _peakOutstandingIo = 1;
-        return new IoLease(this, bytes);
+        return new IoLease(this);
     }
 
     private void CancelWaiter(IoWaiter waiter, CancellationToken token)
@@ -145,7 +143,7 @@ internal sealed class DeviceScheduler : IDisposable
                 }
                 candidate.Granted = true;
                 ready = candidate;
-                lease = GrantLeaseLocked(candidate.Bytes);
+                lease = GrantLeaseLocked();
                 break;
             }
         }
@@ -189,9 +187,8 @@ internal sealed class DeviceScheduler : IDisposable
         }
     }
 
-    private sealed class IoWaiter(int bytes)
+    private sealed class IoWaiter
     {
-        public int Bytes { get; } = bytes;
         public TaskCompletionSource<IoLease> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public CancellationTokenRegistration Cancellation { get; set; }
         public bool Granted { get; set; }
@@ -201,7 +198,7 @@ internal sealed class DeviceScheduler : IDisposable
     internal sealed class IoLease : IDisposable
     {
         private DeviceScheduler? _owner;
-        internal IoLease(DeviceScheduler owner, int bytes) { _owner = owner; }
+        internal IoLease(DeviceScheduler owner) { _owner = owner; }
         public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ReleaseIo();
     }
 }
