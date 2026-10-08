@@ -4,7 +4,11 @@ using RepartoCopier.Core;
 
 namespace RepartoCopier.WinUI;
 
-public sealed record DestinationRow(string Path);
+public sealed record DestinationRow(string Path)
+{
+    /// <summary>Screen-reader name of the chip's remove button: says which folder it removes.</summary>
+    public string RemoveLabel => $"Quitar destino {Path}";
+}
 
 /// <summary>
 /// One running destination card. Bound with compiled x:Bind; every property raises a change only when its
@@ -16,6 +20,8 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
 
     private readonly string _fullPath = path;
     private State _state = State.Active;
+    private int _detailTicks;
+    private DestinationPhase? _detailPhase;
 
     public string Label { get; } = ShortLabel(path);
     public string Progress { get; private set; } = "Preparando";
@@ -53,8 +59,16 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
         };
 
         if (Progress != progress) { Progress = progress; Raise(nameof(Progress)); }
-        var detail = BuildDetail(snapshot, progress);
-        if (Detail != detail) { Detail = detail; Raise(nameof(Detail)); }
+        // The tooltip and screen-reader text carry live byte counts; refreshing them every 2 s instead of
+        // every 250 ms saves four strings and two property pushes per card per second. A phase change
+        // updates them at once.
+        if (_detailPhase != snapshot.Phase || ++_detailTicks >= 8)
+        {
+            _detailTicks = 0;
+            _detailPhase = snapshot.Phase;
+            var detail = BuildDetail(snapshot, progress);
+            if (Detail != detail) { Detail = detail; Raise(nameof(Detail)); }
+        }
         if (Math.Abs(Percent - percent) >= 0.1) { Percent = percent; Raise(nameof(Percent)); }
         if (ActiveGlyph != activeGlyph) { ActiveGlyph = activeGlyph; Raise(nameof(ActiveGlyph)); }
         if (CautionGlyph != cautionGlyph) { CautionGlyph = cautionGlyph; Raise(nameof(CautionGlyph)); }

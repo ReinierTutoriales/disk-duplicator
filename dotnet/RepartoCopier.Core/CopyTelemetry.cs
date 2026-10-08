@@ -211,6 +211,9 @@ internal sealed class CopyTelemetry
         UpdateMax(ref _maxObservedBufferTargetBytes, targetBytes);
     }
 
+    /// <summary>Verify rate for the live progress view, without building a full diagnostics snapshot.</summary>
+    internal double VerifyLogical5sBytesPerSecond => _verifyLogicalRate.Snapshot().FiveSecondsBytesPerSecond;
+
     internal CopyDiagnosticsSnapshot Snapshot()
     {
         var sustained = _writeRate.Snapshot();

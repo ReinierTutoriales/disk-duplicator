@@ -162,6 +162,11 @@ public sealed class CoreParityTests
             PreflightSafety.ReserveForVolume(10UL * 1024 * 1024 * 1024));
         Assert.AreEqual(16UL * 1024 * 1024 * 1024,
             PreflightSafety.ReserveForVolume(100UL * 1024 * 1024 * 1024 * 1024));
+        // A data volume keeps 0.1 %, 64 MiB to 1 GiB, so a USB stick can be filled.
+        Assert.AreEqual(64UL * 1024 * 1024,
+            PreflightSafety.ReserveForVolume(16UL * 1000 * 1000 * 1000, systemVolume: false));
+        Assert.AreEqual(1UL * 1024 * 1024 * 1024,
+            PreflightSafety.ReserveForVolume(4UL * 1024 * 1024 * 1024 * 1024, systemVolume: false));
     }
 
     [TestMethod]

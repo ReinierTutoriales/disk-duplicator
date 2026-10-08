@@ -7,11 +7,11 @@ namespace RepartoCopier.Core.Tests;
 public sealed class PathSafetyTests
 {
     [TestMethod]
-    public void IsReparsePointFailsClosedWhenAttributesCannotBeRead()
+    public void IsLinkFailsClosedWhenAttributesCannotBeRead()
     {
         var missing = Path.Combine(Path.GetTempPath(), $"repartocopier-missing-{Guid.NewGuid():N}", "missing.bin");
 
-        var error = Assert.ThrowsExactly<IOException>(() => WindowsPath.IsReparsePoint(missing));
+        var error = Assert.ThrowsExactly<IOException>(() => WindowsPath.IsLink(missing));
 
         StringAssert.Contains(error.Message, "No se pudo validar de forma segura");
         Assert.IsNotNull(error.InnerException);
