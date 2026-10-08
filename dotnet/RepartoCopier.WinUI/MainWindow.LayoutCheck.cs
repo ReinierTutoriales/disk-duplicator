@@ -73,7 +73,7 @@ public sealed partial class MainWindow
                 catch (Exception ex) { inspectionError ??= new InvalidOperationException($"{name} {theme}: {ex.Message}", ex); }
                 finally { dialog.Close(AppDialog.Dismissed); }
             }
-            await AppDialogs.AboutAsync(this, "2.1.1", _ => throw new InvalidOperationException("Layout check must not open a URL."),
+            await AppDialogs.AboutAsync(this, "2.2.1", _ => throw new InvalidOperationException("Layout check must not open a URL."),
                 deadline.Token, dialog => _ = Inspect(dialog, "About"));
             if (await AppDialogs.SettingsAsync(this, ThemePreference.System, deadline.Token,
                     dialog => _ = Inspect(dialog, "Settings")) is not null)

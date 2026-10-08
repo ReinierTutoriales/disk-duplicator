@@ -177,9 +177,7 @@ public static class CopyEngine
 
     /// <summary>Only a local NVMe SSD has read bandwidth to spare for several concurrent sequential streams.</summary>
     internal static bool IsParallelReadSource(StorageDeviceInfo source) =>
-        !source.IsNetwork &&
-        source.MediaKind == StorageMediaKind.SolidState &&
-        source.BusType == "NVMe";
+        StorageIoProfile.For(source).Kind == StorageProfileKind.Nvme;
 
     internal static int IndependentPoolCapacity(int destinations)
     {
@@ -377,7 +375,9 @@ public static class CopyEngine
         // The shared reader of a single-stream source (HDD, USB, network) keeps the next block in flight while
         // the current one is hashed and handed out, so the device never idles between requests.
         var sourceReadAhead = !independent && !IsParallelReadSource(copy.SourceDevice);
-        var sourceTreeChanged = false;
+        // Set when the source itself proved different between reads (content, size, date or tree). Then no
+        // destination is a faithful copy, including one that already finished.
+        var sourceChanged = false;
         try
         {
             var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
@@ -443,6 +443,7 @@ public static class CopyEngine
                         catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             failure = ex;
+                            if (ex is SourceChangedException) sourceChanged = true;
                             job.RequestCancel();
                             throw;
                         }
@@ -468,7 +469,7 @@ public static class CopyEngine
                     try { PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token); }
                     catch (Exception) when (!token.IsCancellationRequested)
                     {
-                        sourceTreeChanged = true;
+                        sourceChanged = true;
                         throw;
                     }
                 }
@@ -476,6 +477,7 @@ public static class CopyEngine
             catch (Exception ex)
             {
                 producerError = ex;
+                if (ex is SourceChangedException) sourceChanged = true;
             }
             finally
             {
@@ -538,11 +540,11 @@ public static class CopyEngine
         catch (Exception ex)
         {
             // Another destination's failure does not undo one that already committed every file. A source
-            // tree that changed during the copy does: then no destination is a faithful copy.
+            // that changed during the copy does: then no destination is a faithful copy.
             foreach (var item in progress.Where(p => p.Snapshot().Phase switch
                      {
                          DestinationPhase.Failed => false,
-                         DestinationPhase.Done => sourceTreeChanged,
+                         DestinationPhase.Done => sourceChanged,
                          _ => true,
                      }))
                 item.SetPhase(DestinationPhase.Failed, ex.Message);
@@ -584,6 +586,8 @@ public static class CopyEngine
             for (var slot = 0; slot < workers.Length; slot++)
             {
                 var destinationSlot = workers[slot].Slot;
+                if (!workers[slot].IsActive)
+                    continue; // a failed destination keeps its own error; nothing more is checked or counted
                 if (skipMasks[fileIndex][destinationSlot])
                 {
                     // Space was reserved excluding metadata matches. If one changed after preparation,
@@ -604,7 +608,7 @@ public static class CopyEngine
                     progress[destinationSlot].MarkSkipped((ulong)entry.Size);
                     continue;
                 }
-                if (workers[slot].IsActive) active.Add(workers[slot]);
+                active.Add(workers[slot]);
             }
             if (active.Count == 0) continue;
 
@@ -630,7 +634,7 @@ public static class CopyEngine
             var hash = sourceResult.Hash;
             var agreed = expectedHashes.GetOrAdd(PathKey(entry.RelativePath), hash);
             if (!ReferenceEquals(agreed, hash) && !hash.AsSpan().SequenceEqual(agreed))
-                throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
+                throw new SourceChangedException($"El origen cambió durante la copia: {entry.RelativePath}");
             active.RemoveAll(worker => !worker.IsActive);
             await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
         }
@@ -650,10 +654,11 @@ public static class CopyEngine
         using var hasher = Hasher.New();
         DirectIoSourceReader.OverlappedSession? direct = null;
         FileStream? buffered = null;
-        // At most one source read is ever in flight. With readAhead the next block's read is issued as soon as
-        // the current one completes, and overlaps its hashing and delivery; otherwise read, hash and deliver
-        // run strictly in turn as before.
-        PendingSourceBlock? next = null;
+        // At most one source read is ever in flight. With readAhead the next block is requested as soon as the
+        // current read completes and overlaps its hashing and delivery. Renting its buffer runs in the
+        // background: with a full pool the block already in memory is still delivered instead of waiting.
+        using var readAheadCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
+        Task<PendingSourceBlock>? next = null;
         try
         {
             if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
@@ -668,7 +673,7 @@ public static class CopyEngine
                 if (active.Count == 0)
                     return null;
 
-                var block = next ?? await BeginSourceBlockAsync(totalRead).ConfigureAwait(false);
+                var block = await (next ?? BeginSourceBlockAsync(totalRead, job.Token)).ConfigureAwait(false);
                 next = null;
                 SharedFanoutBufferPool.Lease? lease = block.Lease;
                 try
@@ -679,7 +684,7 @@ public static class CopyEngine
 
                     totalRead += read;
                     if (readAhead && totalRead < entry.Size)
-                        next = await BeginSourceBlockAsync(totalRead).ConfigureAwait(false);
+                        next = BeginSourceBlockAsync(totalRead, readAheadCancel.Token);
 
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
@@ -714,18 +719,25 @@ public static class CopyEngine
         }
         finally
         {
-            // Never release a buffer or close the file under a read that is still running.
+            // Never release a buffer or close the file under a read that is still running. A rent still waiting
+            // for pool space is cancelled first, so leaving can never hang on a full pool.
             if (next is not null)
             {
-                try { await next.Read.ConfigureAwait(false); } catch { }
-                next.Lease.Dispose();
+                readAheadCancel.Cancel();
+                try
+                {
+                    var pending = await next.ConfigureAwait(false);
+                    try { await pending.Read.ConfigureAwait(false); } catch { }
+                    pending.Lease.Dispose();
+                }
+                catch { }
             }
             direct?.Dispose();
             if (buffered is not null)
                 await buffered.DisposeAsync().ConfigureAwait(false);
         }
 
-        async Task<PendingSourceBlock> BeginSourceBlockAsync(long offset)
+        async Task<PendingSourceBlock> BeginSourceBlockAsync(long offset, CancellationToken token)
         {
             var reservedReferences = active.Count;
             var poolStarted = Stopwatch.GetTimestamp();
@@ -733,13 +745,13 @@ public static class CopyEngine
                 readBufferSize,
                 transferAlignment,
                 reservedReferences,
-                job.Token).ConfigureAwait(false);
+                token).ConfigureAwait(false);
             job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
             job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
-            return new PendingSourceBlock(lease, reservedReferences, ReadSourceBlockAsync(lease, offset));
+            return new PendingSourceBlock(lease, reservedReferences, ReadSourceBlockAsync(lease, offset, token));
         }
 
-        async Task<int> ReadSourceBlockAsync(SharedFanoutBufferPool.Lease lease, long offset)
+        async Task<int> ReadSourceBlockAsync(SharedFanoutBufferPool.Lease lease, long offset, CancellationToken token)
         {
             var remaining = checked((int)Math.Min(readBufferSize, entry.Size - offset));
             var readStarted = Stopwatch.GetTimestamp();
@@ -748,13 +760,13 @@ public static class CopyEngine
             try
             {
                 if (sharedSourceScheduler is not null)
-                    sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
+                    sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, token).ConfigureAwait(false);
 
                 if (direct is not null)
                 {
                     try
                     {
-                        read = await direct.ReadAsync(lease.Buffer, readBufferSize, offset, job.Token).ConfigureAwait(false);
+                        read = await direct.ReadAsync(lease.Buffer, readBufferSize, offset, token).ConfigureAwait(false);
                         job.Telemetry.RecordDirectSourceRead(read);
                     }
                     catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
@@ -764,13 +776,13 @@ public static class CopyEngine
                         job.Telemetry.RecordDirectSourceFallback();
                         buffered = OpenSourceStream(entry.SourcePath);
                         buffered.Position = offset;
-                        read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                        read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                     }
                 }
                 else
                 {
                     buffered!.Position = offset;
-                    read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
+                    read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
                 }
             }
             finally
@@ -781,6 +793,9 @@ public static class CopyEngine
             return read;
         }
     }
+
+    /// <summary>The source differed from its snapshot or between reads: no copy of it can be trusted.</summary>
+    internal sealed class SourceChangedException(string message) : IOException(message);
 
     private sealed record PendingSourceBlock(SharedFanoutBufferPool.Lease Lease, int ReservedReferences, Task<int> Read);
 
@@ -797,7 +812,7 @@ public static class CopyEngine
     private static void ValidateCompletedSourceRead(FileEntry entry, long totalRead)
     {
         if (totalRead != entry.Size)
-            throw new IOException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
+            throw new SourceChangedException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
         ValidateSourceSnapshot(entry);
     }
 
@@ -1958,7 +1973,7 @@ public static class CopyEngine
         WindowsPath.EnsureRegularFile(entry.SourcePath, "El origen");
         var info = new FileInfo(entry.SourcePath);
         if (info.Length != entry.Size || ToUnixNanoseconds(info.LastWriteTimeUtc) != entry.ModifiedUnixNanoseconds)
-            throw new IOException($"El origen cambió: {entry.SourcePath}");
+            throw new SourceChangedException($"El origen cambió: {entry.SourcePath}");
     }
 
     private static void RejectReparse(string path, string label)
