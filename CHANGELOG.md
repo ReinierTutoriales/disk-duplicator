@@ -2,7 +2,7 @@
 
 ## Unreleased — lectura independiente por defecto y pulido de la interfaz
 
-- Motor: el modo de lectura se elige por el origen. SSD local NVMe/SATA con 2–16 destinos → lectores independientes en paralelo. HDD, USB, red o desconocido → un lector compartido que lee el origen una vez para todos los destinos, con el bloque siguiente ya en lectura mientras se hashea y entrega el actual (como máximo una lectura en curso). Medido en hardware real: leer un HDD USB por turnos para 3 NVMe daba ~35 MB/s por destino (el HDD a 108 MB/s repartido entre 3); el lector compartido entrega la velocidad completa del HDD a cada uno. Se elimina la lectura por turnos.
+- Motor: el modo de lectura se elige por el origen. SSD NVMe local con 2–16 destinos → lectores independientes en paralelo. SSD o HDD SATA, USB, red o desconocido → un lector compartido que lee el origen una vez para todos los destinos, con el bloque siguiente ya en lectura mientras se hashea y entrega el actual (como máximo una lectura en curso). Medido en hardware real: leer un HDD USB por turnos para 3 NVMe daba ~35 MB/s por destino (el HDD a 108 MB/s repartido entre 3); el lector compartido entrega la velocidad completa del HDD a cada uno. Se elimina la lectura por turnos.
 - Motor: los lectores acuerdan el hash BLAKE3 de cada archivo antes de enviar el cierre a su destino; un origen que cambia entre lecturas detiene la copia antes de que un segundo destino confirme contenido distinto. Se elimina el riesgo documentado del prototipo.
 - Motor: la comprobación final del árbol de origen se ejecuta una vez en lugar de una por lector. Un archivo existente que cambia tras la comprobación rápida ahora falla solo ese destino.
 - Diagnóstico (esquema 5): `IndependentSourceReads` registra el modo realmente usado.
