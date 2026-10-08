@@ -194,7 +194,7 @@ public static class CopyEngine
         var createdDestinations = new List<string>();
         try
         {
-            return Preflight(plan, createdDestinations, token);
+            return PreflightCore(plan, createdDestinations, token);
         }
         catch
         {
@@ -204,7 +204,7 @@ public static class CopyEngine
         }
     }
 
-    private static PreparedCopy Preflight(CopyPlan plan, List<string> createdDestinations, CancellationToken token)
+    private static PreparedCopy PreflightCore(CopyPlan plan, List<string> createdDestinations, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
