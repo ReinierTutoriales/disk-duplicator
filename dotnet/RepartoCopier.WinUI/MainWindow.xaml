@@ -2,10 +2,7 @@
     x:Class="RepartoCopier.WinUI.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:local="using:RepartoCopier.WinUI"
-    mc:Ignorable="d"
     Title="RepartoCopier">
 
     <Grid x:Name="Root" Background="Transparent" SizeChanged="Root_SizeChanged">
@@ -37,7 +34,6 @@
         </Grid.Resources>
 
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="28" />
@@ -83,15 +79,20 @@
             </TitleBar.RightHeader>
         </TitleBar>
 
-        <InfoBar x:Name="ErrorBar" Grid.Row="1" Margin="12,0,12,4" IsOpen="False" Severity="Error"
-                 Title="No se pudo completar" IsClosable="True" />
-
-        <ScrollViewer x:Name="MainContentScroll" Grid.Row="2" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
+        <ScrollViewer x:Name="MainContentScroll" Grid.Row="1" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
             <!-- MaxWidth keeps line lengths readable on wide/maximized windows; content stays centered. -->
             <Grid x:Name="ContentHost" Padding="16,8,16,16" MaxWidth="980" HorizontalAlignment="Stretch">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
 
-                <StackPanel x:Name="PreparationPanel" Visibility="Visible" Spacing="12">
+                <!-- Errors and warnings share the content column, so they line up with the cards at any width. -->
+                <InfoBar x:Name="ErrorBar" Margin="0,0,0,12" IsOpen="False" Severity="Error"
+                         Title="No se pudo completar" IsClosable="True" />
+
+                <StackPanel x:Name="PreparationPanel" Grid.Row="1" Visibility="Visible" Spacing="12">
 
                     <Grid ColumnSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -184,7 +185,7 @@
                                     </ItemsRepeater.Layout>
                                     <ItemsRepeater.ItemTemplate>
                                         <DataTemplate>
-                                            <Border Height="36" Padding="10,0,2,0" CornerRadius="{ThemeResource ControlCornerRadius}"
+                                            <Border Height="36" Padding="12,0,4,0" CornerRadius="{ThemeResource ControlCornerRadius}"
                                                     Background="{ThemeResource ControlFillColorDefaultBrush}"
                                                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}" BorderThickness="1"
                                                     ToolTipService.ToolTip="{Binding Path}">
@@ -194,7 +195,7 @@
                                                     <TextBlock Grid.Column="1" Text="{Binding Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                                     <Button Grid.Column="2" Width="28" Height="28" Padding="0" Background="Transparent" BorderThickness="0"
                                                             Tag="{Binding Path}" Click="RemoveDestination_Click"
-                                                            ToolTipService.ToolTip="Quitar" AutomationProperties.Name="Quitar destino">
+                                                            ToolTipService.ToolTip="Quitar" AutomationProperties.Name="{Binding RemoveLabel}">
                                                         <FontIcon Glyph="&#xE711;" FontSize="12"/>
                                                     </Button>
                                                 </Grid>
@@ -226,7 +227,7 @@
                     </Expander>
                 </StackPanel>
 
-                <StackPanel x:Name="RunningPanel" Visibility="Collapsed" Spacing="12" VerticalAlignment="Top">
+                <StackPanel x:Name="RunningPanel" Visibility="Collapsed" Spacing="12" VerticalAlignment="Top" Grid.Row="1">
                     <Border Style="{StaticResource SurfaceCardStyle}">
                         <StackPanel Spacing="12">
 
@@ -264,7 +265,8 @@
                             </Grid>
 
                             <StackPanel Spacing="4">
-                                <ProgressBar x:Name="OverallProgressBar" Height="10" MinHeight="10" Minimum="0" Maximum="100" Value="0">
+                                <ProgressBar x:Name="OverallProgressBar" Height="10" MinHeight="10" Minimum="0" Maximum="100" Value="0"
+                                             AutomationProperties.Name="Progreso total">
                                     <ProgressBar.Resources>
                                         <x:Double x:Key="ProgressBarTrackHeight">10</x:Double>
                                     </ProgressBar.Resources>
@@ -303,13 +305,15 @@
 
                             <Grid ColumnSpacing="8" RowSpacing="8">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <Button x:Name="PauseButton" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Pause_Click">
+                                <Button x:Name="PauseButton" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Pause_Click"
+                                        AutomationProperties.Name="Pausar">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon x:Name="PauseIcon" Glyph="&#xE769;" FontSize="14"/>
                                         <TextBlock x:Name="PauseButtonText" Text="Pausar"/>
                                     </StackPanel>
                                 </Button>
-                                <Button x:Name="CancelButton" Grid.Column="1" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Cancel_Click">
+                                <Button x:Name="CancelButton" Grid.Column="1" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Cancel_Click"
+                                        AutomationProperties.Name="Cancelar copia">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE711;" FontSize="14"/>
                                         <TextBlock Text="Cancelar"/>
@@ -321,15 +325,16 @@
                                 </CheckBox>
                             </Grid>
 
-                            <StackPanel x:Name="ResultActions" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                                <Button x:Name="ResultDetailsButton" MinHeight="32" Visibility="Collapsed" Click="ResultDetails_Click">
+                            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                                <Button x:Name="ResultDetailsButton" MinHeight="32" Visibility="Collapsed" Click="ResultDetails_Click"
+                                        AutomationProperties.Name="Detalles del resultado">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE9D9;" FontSize="14"/>
                                         <TextBlock Text="Detalles"/>
                                     </StackPanel>
                                 </Button>
                                 <Button x:Name="NewCopyButton" MinHeight="32" Visibility="Collapsed" Click="NewCopy_Click"
-                                        Style="{StaticResource AccentButtonStyle}">
+                                        Style="{StaticResource AccentButtonStyle}" AutomationProperties.Name="Nueva copia">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE710;" FontSize="14"/>
                                         <TextBlock Text="Nueva copia"/>
@@ -354,7 +359,7 @@
                                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
                                             ToolTipService.ToolTip="{x:Bind Detail, Mode=OneWay}"
                                             AutomationProperties.Name="{x:Bind Detail, Mode=OneWay}">
-                                        <StackPanel Spacing="6">
+                                        <StackPanel Spacing="8">
                                             <Grid ColumnSpacing="8">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                                 <Grid VerticalAlignment="Center">
@@ -385,7 +390,7 @@
             </Grid>
         </ScrollViewer>
 
-        <Border Grid.Row="3" Padding="12,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+        <Border Grid.Row="2" Padding="12,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

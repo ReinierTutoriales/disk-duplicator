@@ -1,0 +1,110 @@
+name: Release
+
+# Publishes a GitHub release for a version tag (vX.Y.Z) pushed on an already validated commit.
+# The binary is built from the tagged commit itself, so its embedded revision is the tag's commit,
+# and nothing is committed back to main.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Check tag, project version and release notes
+        id: meta
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.Substring(1)
+          [xml]$project = Get-Content 'dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj'
+          $projectVersion = @($project.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ })[0]
+          if ($projectVersion -ne $version) { throw "Tag v$version does not match project version $projectVersion." }
+          $notes = ".github/release-notes/v$version.md"
+          if (-not (Test-Path $notes)) { throw "Missing release notes: $notes" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+
+      - name: Restore core tests
+        run: dotnet restore dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj
+
+      - name: Test core Release
+        run: dotnet test dotnet/RepartoCopier.Core.Tests/RepartoCopier.Core.Tests.csproj -c Release --no-restore
+
+      - name: Restore WinUI x64
+        run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
+
+      - name: Publish portable self-contained win-x64
+        run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier -p:SourceRevisionId=${{ github.sha }}
+
+      - name: Verify version and embedded revision
+        shell: pwsh
+        run: |
+          $dll = 'artifact/RepartoCopier/RepartoCopier.WinUI.dll'
+          if (-not (Test-Path 'artifact/RepartoCopier/RepartoCopier.WinUI.exe')) { throw 'Published executable missing.' }
+          if (-not (Test-Path $dll)) { throw 'Published assembly missing.' }
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $dll))
+          if ($info.FileVersion -ne '${{ steps.meta.outputs.version }}.0') { throw "Unexpected file version: $($info.FileVersion)" }
+          if (-not $info.ProductVersion.EndsWith('+${{ github.sha }}', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Unexpected product version: $($info.ProductVersion)"
+          }
+
+      - name: Smoke-test the portable folder
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' -PassThru
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline -and $app.MainWindowHandle -eq [IntPtr]::Zero) {
+              if ($app.HasExited) { throw "App exited during startup: $($app.ExitCode)" }
+              Start-Sleep -Milliseconds 250
+              $app.Refresh()
+            }
+            if ($app.MainWindowHandle -eq [IntPtr]::Zero) { throw 'App did not create its window.' }
+            if (-not $app.CloseMainWindow() -or -not $app.WaitForExit(10000)) { throw 'App did not close normally.' }
+            if ($app.ExitCode -ne 0) { throw "App failed on close: $($app.ExitCode)" }
+          }
+          finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+          }
+
+      - name: Package release and checksum
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'RepartoCopier-v${{ steps.meta.outputs.version }}-win-x64.zip'
+          Compress-Archive -Path 'artifact/RepartoCopier/*' -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zip" | Set-Content SHA256SUMS.txt -Encoding ascii
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.package.outputs.zip }}
+
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create '${{ github.ref_name }}' '${{ steps.package.outputs.zip }}' 'SHA256SUMS.txt' `
+            --title 'RepartoCopier ${{ github.ref_name }}' `
+            --notes-file '${{ steps.meta.outputs.notes }}' `
+            --verify-tag

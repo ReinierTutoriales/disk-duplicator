@@ -27,10 +27,14 @@ public sealed partial class MainWindow : Window
     private bool _verificationRequested;
     private bool? _independentSourceReadsUsed;
     private readonly LogicalProgressRate _copyProgressRate = new();
+    private readonly TaskbarProgress _taskbar;
+    private readonly CompletionNotifier _notifier;
 
     public MainWindow()
     {
         InitializeComponent();
+        _taskbar = new TaskbarProgress(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        _notifier = new CompletionNotifier(this);
         DestinationList.ItemsSource = _destinations;
         RunningDestinationList.ItemsSource = _runningDestinations;
         _destinations.CollectionChanged += (_, _) => UpdateDestinationSummary();
@@ -40,9 +44,13 @@ public sealed partial class MainWindow : Window
         ResizeForCurrentDpi(new SizeInt32(DefaultWidth, DefaultHeight));
 
         try { SystemBackdrop = new MicaBackdrop(); } catch { }
-        ConfigureNativeWindowChrome();
+        // Alt+Tab, the taskbar and the title bar show the app icon, not the default executable icon.
+        try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.ico")); } catch { }
 
         ApplySavedTheme();
+        // Caption buttons follow the theme the content actually renders in (app setting or Windows).
+        AppDialog.StyleCaptionButtons(AppWindow, Root.ActualTheme);
+        Root.ActualThemeChanged += (sender, _) => AppDialog.StyleCaptionButtons(AppWindow, sender.ActualTheme);
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
         AppWindow.Closing += MainWindow_Closing;
@@ -106,19 +114,6 @@ public sealed partial class MainWindow : Window
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern uint GetDpiForWindow(IntPtr hwnd);
 
-    private void ConfigureNativeWindowChrome()
-    {
-        try
-        {
-            var titleBar = AppWindow.TitleBar;
-            titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-            titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-            titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(24, 128, 128, 128);
-            titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 128, 128, 128);
-        }
-        catch { }
-    }
-
     private void ApplySavedTheme()
     {
         var settings = SettingsStore.Load();
@@ -181,14 +176,12 @@ public sealed partial class MainWindow : Window
             var results = await picker.PickMultipleFoldersAsync();
             var paths = results.Select(result => result.Path).ToArray();
             var existing = _destinations.Select(item => item.Path).ToList();
-            var added = CopyPlan.AppendUniqueDestinations(SourcePathBox.Text, existing, paths);
-            if (added > 0)
-            {
-                _destinations.Clear();
-                foreach (var path in existing) _destinations.Add(new DestinationRow(path));
-            }
-            if (paths.Length > added && existing.Count >= CopyPlan.MaxDestinations)
-                StatusText.Text = $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos.";
+            var previous = existing.Count;
+            CopyPlan.AppendUniqueDestinations(SourcePathBox.Text, existing, paths);
+            // Only the new folders are added; existing chips are not rebuilt.
+            for (var index = previous; index < existing.Count; index++) _destinations.Add(new DestinationRow(existing[index]));
+            if (existing.Count >= CopyPlan.MaxDestinations && paths.Length > existing.Count - previous)
+                ShowWarning("Límite de destinos", $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos; las demás carpetas no se agregaron.");
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
@@ -247,8 +240,8 @@ public sealed partial class MainWindow : Window
             OverallDetailText.Text = options.Verify
                 ? "Preparando copia con verificación completa…"
                 : "Preparando copia sin verificación final…";
-            PauseButtonText.Text = "Pausar";
-            PauseIcon.Glyph = "\uE769";
+            SetPauseButton(paused: false);
+            _taskbar.Set(TaskbarState.Indeterminate);
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
 
@@ -269,6 +262,7 @@ public sealed partial class MainWindow : Window
         {
             _job = null;
             _copyStartedAt = null;
+            _taskbar.Set(TaskbarState.None);
             ShowPreparationView();
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
@@ -279,6 +273,7 @@ public sealed partial class MainWindow : Window
         {
             _job = null;
             _copyStartedAt = null;
+            _taskbar.Set(TaskbarState.None);
             ShowPreparationView();
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
@@ -297,8 +292,7 @@ public sealed partial class MainWindow : Window
         if (_job is null) return;
         var paused = !_job.IsPaused;
         _job.SetPaused(paused);
-        PauseButtonText.Text = paused ? "Continuar" : "Pausar";
-        PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
+        SetPauseButton(paused);
         if (paused)
         {
             StatusText.Text = "Pausado";
@@ -312,6 +306,14 @@ public sealed partial class MainWindow : Window
             StatusText.Text = verifying ? "Verificando integridad de los destinos…" : "Copiando…";
         }
         RefreshProgress();
+    }
+
+    private void SetPauseButton(bool paused)
+    {
+        var label = paused ? "Continuar" : "Pausar";
+        PauseButtonText.Text = label;
+        PauseIcon.Glyph = paused ? "\uE768" : "\uE769";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(PauseButton, label);
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
@@ -374,8 +376,14 @@ public sealed partial class MainWindow : Window
                 RemainingMetricText.Text = "00:00:00";
                 PauseButton.IsEnabled = false;
                 CancelButton.IsEnabled = false;
-                await observed.DisposeAsync();
+                // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
+                _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
+                Announce(StatusText.Text);
+                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text, StatusText.Text);
                 _job = null;
+                // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
+                try { await observed.DisposeAsync(); }
+                catch (Exception ex) { ShowError(ex.Message); }
                 SetEditingEnabled(true);
                 StartButton.IsEnabled = true;
                 NewCopyButton.Visibility = Visibility.Visible;
@@ -443,48 +451,66 @@ public sealed partial class MainWindow : Window
         if (verifying)
         {
             percent = verifyTotal == 0 ? 100 : Math.Clamp(verified * 100.0 / verifyTotal, 0, 100);
-            OverallDetailText.Text = $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}";
+            SetText(OverallDetailText, $"Verificados {FormatBytes(verified)} de {FormatBytes(verifyTotal)}");
             // Logical throughput counts a source block once. Estimate with the
             // largest remaining branch rather than multiplying ETA by destinations.
-            var speed = paused ? 0d : _job.DiagnosticsSnapshot().VerifyLogical5sBytesPerSecond;
-            SpeedMetricText.Text = Throughput.Format(speed);
-            RemainingMetricText.Text = speed > 1 ? FormatDuration(TimeSpan.FromSeconds(verifyRemaining / speed)) : "--:--:--";
+            var speed = paused ? 0d : _job.VerifyBytesPerSecond;
+            SetText(SpeedMetricText, Throughput.Format(speed));
+            SetText(RemainingMetricText, speed > 1 ? FormatDuration(TimeSpan.FromSeconds(verifyRemaining / speed)) : "--:--:--");
             if (!paused && !_cancellationRequested)
             {
                 SetOperationState(OperationState.Active, "\uE9D5");
-                OperationTitleText.Text = "Comprobando integridad…";
-                StatusText.Text = "Verificando integridad de los destinos…";
+                SetText(OperationTitleText, "Comprobando integridad…");
+                SetText(StatusText, "Verificando integridad de los destinos…");
             }
         }
         else
         {
             var speed = paused ? 0d : _copyProgressRate.Observe(written);
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
-            OverallDetailText.Text = snapshots.Count >= 2
+            SetText(OverallDetailText, snapshots.Count >= 2
                 ? $"Destino más lento: {FormatBytes(written)} de {FormatBytes(total)}"
-                : $"{FormatBytes(written)} de {FormatBytes(total)}";
-            SpeedMetricText.Text = Throughput.Format(speed);
-            RemainingMetricText.Text = speed > 1 ? FormatDuration(TimeSpan.FromSeconds((total - Math.Min(total, written)) / speed)) : "--:--:--";
+                : $"{FormatBytes(written)} de {FormatBytes(total)}");
+            SetText(SpeedMetricText, Throughput.Format(speed));
+            SetText(RemainingMetricText, speed > 1 ? FormatDuration(TimeSpan.FromSeconds((total - Math.Min(total, written)) / speed)) : "--:--:--");
             if (!paused && !_cancellationRequested && anyCopying)
             {
                 SetOperationState(OperationState.Active, "\uE8A5");
-                OperationTitleText.Text = "Copiando…";
-                StatusText.Text = $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…";
+                SetText(OperationTitleText, "Copiando…");
+                SetText(StatusText, $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…");
             }
         }
         if (paused && !_cancellationRequested)
         {
             SetOperationState(OperationState.Caution, "\uE769");
-            OperationTitleText.Text = "Pausado";
+            SetText(OperationTitleText, "Pausado");
         }
 
         OverallProgressBar.Value = percent;
         OverallProgressBar.ShowPaused = paused;
-        OverallPercentText.Text = $"{DestinationProgressText.FloorPercent(percent)}%";
-        FilesMetricText.Text = $"{filesDone}/{filesTotal}";
+        _taskbar.Set(paused ? TaskbarState.Paused : TaskbarState.Normal, percent);
+        SetText(OverallPercentText, $"{DestinationProgressText.FloorPercent(percent)}%");
+        SetText(FilesMetricText, $"{filesDone}/{filesTotal}");
         if (_copyStartedAt is not null)
-            ElapsedText.Text = $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}";
-        if (current is not null) CurrentFileText.Text = Path.GetFileName(current);
+            SetText(ElapsedText, $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}");
+        if (current is not null) SetText(CurrentFileText, Path.GetFileName(current));
+    }
+
+    // Four refreshes per second mostly repeat the same strings; skip the property change (and its layout).
+    private static void SetText(Microsoft.UI.Xaml.Controls.TextBlock target, string value)
+    {
+        if (!string.Equals(target.Text, value, StringComparison.Ordinal)) target.Text = value;
+    }
+
+    // Narrator reads the final state once, without the four-per-second progress noise.
+    private void Announce(string message)
+    {
+        var peer = Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.FromElement(StatusText)
+                   ?? Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(StatusText);
+        peer?.RaiseNotificationEvent(
+            Microsoft.UI.Xaml.Automation.Peers.AutomationNotificationKind.ActionCompleted,
+            Microsoft.UI.Xaml.Automation.Peers.AutomationNotificationProcessing.ImportantMostRecent,
+            message, "RepartoCopierResult");
     }
 
     private async void LoadProfile_Click(object sender, RoutedEventArgs e)
@@ -600,8 +626,9 @@ public sealed partial class MainWindow : Window
 
     private async Task OfferShutdownAsync()
     {
+        // The dialog already gave a cancellable 60 s countdown, so Windows shuts down right away.
         if (await ShowDialogAsync(() => AppDialogs.ShutdownAsync(this, _windowLifetime.Token)))
-            Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 60") { UseShellExecute = false, CreateNoWindow = true });
+            Process.Start(new ProcessStartInfo("shutdown.exe", "/s /t 0") { UseShellExecute = false, CreateNoWindow = true });
     }
 
     private void ShowRunningView()
@@ -632,9 +659,21 @@ public sealed partial class MainWindow : Window
 
     private void ShowError(string message)
     {
+        ShowInfoBar(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Error, "No se pudo completar", message);
+        StatusText.Text = "Ocurrió un error";
+    }
+
+    private void ShowWarning(string title, string message) =>
+        ShowInfoBar(Microsoft.UI.Xaml.Controls.InfoBarSeverity.Warning, title, message);
+
+    private void ShowInfoBar(Microsoft.UI.Xaml.Controls.InfoBarSeverity severity, string title, string message)
+    {
+        ErrorBar.Severity = severity;
+        ErrorBar.Title = title;
         ErrorBar.Message = message;
         ErrorBar.IsOpen = true;
-        StatusText.Text = "Ocurrió un error";
+        // The bar sits at the top of the scrolling content: bring it into view.
+        MainContentScroll.ChangeView(null, 0, null);
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
@@ -642,6 +681,7 @@ public sealed partial class MainWindow : Window
         _windowLifetime.Cancel();
         _progressTimer.Stop();
         _job?.RequestCancel();
+        _notifier.Unregister();
     }
 
     private void MainWindow_Closing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
@@ -666,6 +706,7 @@ public sealed partial class MainWindow : Window
     private void NewCopy_Click(object sender, RoutedEventArgs e)
     {
         if (_job is not null || _preparationCancel is not null) return;
+        _taskbar.Set(TaskbarState.None);
         ShowPreparationView();
         StatusText.Text = "Listo";
     }
@@ -764,9 +805,11 @@ public sealed partial class MainWindow : Window
     private static string FormatDuration(TimeSpan value) =>
         $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
 
+    private static readonly string[] ByteUnits = ["B", "KiB", "MiB", "GiB", "TiB"];
+
     internal static string FormatBytes(ulong bytes)
     {
-        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var units = ByteUnits;
         var value = (double)bytes;
         var unit = 0;
         while (value >= 1024 && unit < units.Length - 1)

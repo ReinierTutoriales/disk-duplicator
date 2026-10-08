@@ -1,4 +1,6 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
 using RepartoCopier.Core;
@@ -36,10 +38,54 @@ internal static class AppDialogs
             Footer: "© 2026 ReinierTutoriales. Todos los derechos reservados.", Extra: links), token, onShown);
     }
 
-    internal static async Task<bool> ShutdownAsync(Window owner, CancellationToken token, Action<AppDialog>? onShown = null) =>
-        await AppDialog.ShowAsync(owner, new AppDialogSpec("¿Apagar el equipo?",
-            "La copia terminó. Si eliges Apagar, el equipo se apagará en 60 segundos. Puedes cancelarlo desde Windows con shutdown /a.",
-            ["Apagar", "No apagar"], DefaultButton: 1, CancelButton: 1, AppDialogIcon.Warning), token, onShown) == 0;
+    internal const int ShutdownCountdownSeconds = 60;
+
+    /// <summary>
+    /// "Apagar al terminar" was already chosen, so silence means yes: the dialog counts down and confirms on its
+    /// own, which is what makes the option work on an unattended PC. Cancelling stays one click (and Escape).
+    /// </summary>
+    internal static async Task<bool> ShutdownAsync(Window owner, CancellationToken token, Action<AppDialog>? onShown = null)
+    {
+        var remaining = ShutdownCountdownSeconds;
+        var countdown = new TextBlock
+        {
+            Text = CountdownText(remaining),
+            Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+        };
+        AutomationProperties.SetLiveSetting(countdown, AutomationLiveSetting.Polite);
+        AppDialog? shown = null;
+        var timer = owner.DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(1);
+        timer.Tick += (sender, _) =>
+        {
+            remaining--;
+            if (remaining > 0)
+            {
+                countdown.Text = CountdownText(remaining);
+                return;
+            }
+            sender.Stop();
+            shown?.Close(0);
+        };
+        try
+        {
+            return await AppDialog.ShowAsync(owner, new AppDialogSpec("Apagando el equipo",
+                "La copia terminó correctamente y elegiste apagar al terminar.",
+                ["Apagar ahora", "Cancelar apagado"], DefaultButton: 1, CancelButton: 1, AppDialogIcon.Warning,
+                Extra: countdown), token, dialog =>
+                {
+                    shown = dialog;
+                    timer.Start();
+                    onShown?.Invoke(dialog);
+                }) == 0;
+        }
+        finally
+        {
+            timer.Stop();
+        }
+
+        static string CountdownText(int seconds) => $"Se apagará en {seconds} s.";
+    }
 
     /// <summary>Every destination in one scrollable list; complete paths and messages stay in the JSON export.</summary>
     internal static async Task<bool> ResultsAsync(Window owner, IReadOnlyList<DestinationSnapshot> destinations,
@@ -48,10 +94,16 @@ internal static class AppDialogs
         var failed = destinations.Count(item => item.Phase == DestinationPhase.Failed);
         var withErrors = destinations.Count(item => item.Phase != DestinationPhase.Failed && item.FilesErrored > 0);
         var cancelled = destinations.Any(item => item.Phase == DestinationPhase.Cancelled);
-        var list = new StackPanel { Spacing = 8 };
-        foreach (var item in destinations) list.Children.Add(ResultRow(item, verifyRequested));
-        if (destinations.Count == 0)
-            list.Children.Add(new TextBlock { Text = "No hay resultados.", TextWrapping = TextWrapping.Wrap });
+        // One parsed template for every row instead of two XAML parses per destination (up to 256). Every row is
+        // realized up front so the dialog can size itself to the real content height.
+        UIElement list = destinations.Count == 0
+            ? new TextBlock { Text = "No hay resultados.", TextWrapping = TextWrapping.Wrap }
+            : new ItemsControl
+            {
+                ItemsSource = destinations.Select(item => new ResultRow(item, verifyRequested)).ToArray(),
+                ItemTemplate = ResultRowTemplate.Value,
+                IsTabStop = false,
+            };
         var (heading, icon) = failed > 0 || withErrors > 0
             ? ("Terminó con errores", AppDialogIcon.Error)
             : cancelled ? ("Copia cancelada", AppDialogIcon.Warning) : ("Copia completada", AppDialogIcon.Success);
@@ -70,48 +122,63 @@ internal static class AppDialogs
         return link;
     }
 
-    private static FrameworkElement ResultRow(DestinationSnapshot item, bool verifyRequested)
-    {
-        var icon = item.Phase switch
-        {
-            DestinationPhase.Failed => AppDialogIcon.Error,
-            DestinationPhase.Cancelled => AppDialogIcon.Warning,
-            _ when item.FilesErrored > 0 => AppDialogIcon.Warning,
-            _ => AppDialogIcon.Success,
-        };
-        // Theme brushes come from XAML; user-controlled text is assigned afterwards, never parsed.
-        var row = (Grid)XamlReader.Load("""
-            <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-                  Padding="12" ColumnSpacing="12" CornerRadius="{ThemeResource ControlCornerRadius}"
+    // Theme brushes come from XAML; user-controlled text only arrives through bindings, never parsed.
+    private static readonly Lazy<DataTemplate> ResultRowTemplate = new(() => (DataTemplate)XamlReader.Load("""
+        <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+            <Grid Margin="0,0,0,8" Padding="12" ColumnSpacing="12" CornerRadius="{ThemeResource ControlCornerRadius}"
                   Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                   BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <Grid x:Name="IconHost" VerticalAlignment="Top" Margin="0,2,0,0"/>
+                <Grid VerticalAlignment="Top" Margin="0,2,0,0">
+                    <FontIcon Glyph="&#xEC61;" FontSize="16" Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                              Visibility="{Binding SuccessVisibility}"/>
+                    <FontIcon Glyph="&#xE7BA;" FontSize="16" Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                              Visibility="{Binding WarningVisibility}"/>
+                    <FontIcon Glyph="&#xEB90;" FontSize="16" Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                              Visibility="{Binding ErrorIconVisibility}"/>
+                </Grid>
                 <StackPanel Grid.Column="1" Spacing="2">
-                    <TextBlock x:Name="Label" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock x:Name="Summary" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                    <TextBlock Text="{Binding Label}" ToolTipService.ToolTip="{Binding Label}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding Summary}" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                    <TextBlock x:Name="Error" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                    <TextBlock Text="{Binding Error}" Visibility="{Binding ErrorVisibility}"
+                               Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
                                Foreground="{ThemeResource SystemFillColorCriticalBrush}" IsTextSelectionEnabled="True"/>
                 </StackPanel>
             </Grid>
-            """);
-        if (AppDialog.CreateIcon(icon, 16) is { } glyph) ((Grid)row.FindName("IconHost")).Children.Add(glyph);
-        var label = (TextBlock)row.FindName("Label");
-        label.Text = item.Label;
-        ToolTipService.SetToolTip(label, item.Label);
-        ((TextBlock)row.FindName("Summary")).Text =
+        </DataTemplate>
+        """));
+}
+
+/// <summary>One destination in the results dialog, shaped for the row template's bindings.</summary>
+public sealed class ResultRow
+{
+    internal ResultRow(DestinationSnapshot item, bool verifyRequested)
+    {
+        Label = item.Label;
+        Summary =
             $"{DestinationProgressText.Format(item)} · Archivos {item.FilesDone}/{item.FilesTotal} · Omitidos {item.FilesSkipped} · Errores {item.FilesErrored}\n" +
             $"Verificación final: {(verifyRequested ? DestinationProgressText.Verification(item) : "No solicitada")}";
-        var error = (TextBlock)row.FindName("Error");
-        error.Text = Shorten(item.Error);
-        error.Visibility = string.IsNullOrWhiteSpace(item.Error) ? Visibility.Collapsed : Visibility.Visible;
-        return row;
+        Error = Shorten(item.Error);
+        ErrorVisibility = Error.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        var failed = item.Phase == DestinationPhase.Failed;
+        var warning = !failed && (item.Phase == DestinationPhase.Cancelled || item.FilesErrored > 0);
+        ErrorIconVisibility = failed ? Visibility.Visible : Visibility.Collapsed;
+        WarningVisibility = warning ? Visibility.Visible : Visibility.Collapsed;
+        SuccessVisibility = !failed && !warning ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    public string Label { get; }
+    public string Summary { get; }
+    public string Error { get; }
+    public Visibility ErrorVisibility { get; }
+    public Visibility SuccessVisibility { get; }
+    public Visibility WarningVisibility { get; }
+    public Visibility ErrorIconVisibility { get; }
 
     private static string Shorten(string? value)
     {

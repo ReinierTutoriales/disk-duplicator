@@ -32,6 +32,13 @@ internal static class PreflightSafety
     private const ulong GiB = 1024UL * 1024UL * 1024UL;
     private const ulong MinFreeReserve = 1UL * GiB;
     private const ulong MaxFreeReserve = 16UL * GiB;
+    private const ulong MinDataFreeReserve = 64UL * 1024UL * 1024UL;
+    private const ulong MaxDataFreeReserve = 1UL * GiB;
+    private static readonly Lazy<string?> SystemVolumeId = new(() =>
+    {
+        try { return WindowsNative.GetVolumeMetrics(Environment.SystemDirectory).VolumeId; }
+        catch (Exception) { return null; } // unknown: every volume keeps the conservative system reserve
+    });
 
     internal static void ValidateRecoveryPaths(string source, IReadOnlyList<string> destinations)
     {
@@ -65,7 +72,8 @@ internal static class PreflightSafety
     internal static string[] ValidateAndCanonicalizeDestinations(
         string overlapPath,
         IEnumerable<string> effectiveDestinations,
-        CancellationToken token = default)
+        CancellationToken token = default,
+        List<string>? created = null)
     {
         var source = CanonicalExisting(overlapPath, "origen");
         var canonical = new List<string>();
@@ -76,7 +84,11 @@ internal static class PreflightSafety
             var full = Path.GetFullPath(requested);
             if (PathsOverlap(source, full))
                 throw new IOException($"El destino {requested} se solapa con el origen.");
-            Directory.CreateDirectory(full);
+            if (!Directory.Exists(full))
+            {
+                Directory.CreateDirectory(full);
+                created?.Add(full);
+            }
             RejectReparse(full, "destino");
             var destination = CanonicalExisting(full, "destino");
             WindowsPath.EnsureNormalDirectory(destination, "El destino");
@@ -99,6 +111,50 @@ internal static class PreflightSafety
         }
 
         return [.. canonical];
+    }
+
+    /// <summary>Best effort: removes destination folders this preparation created, only while still empty.</summary>
+    internal static void RemoveCreatedEmptyDirectories(IReadOnlyList<string> created)
+    {
+        for (var index = created.Count - 1; index >= 0; index--)
+        {
+            try
+            {
+                if (Directory.Exists(created[index]) && !Directory.EnumerateFileSystemEntries(created[index]).Any())
+                    Directory.Delete(created[index]);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Cleanup must never hide the preparation error that triggered it.
+            }
+        }
+    }
+
+    /// <summary>
+    /// FAT and FAT32 cannot hold a file of 4 GiB or more. Fail before writing anything instead of
+    /// after copying gigabytes into a destination that can never accept the file.
+    /// </summary>
+    internal static void RejectFilesTooLargeForFileSystem(
+        IReadOnlyList<string> destinationRoots,
+        IReadOnlyList<StorageDeviceInfo> destinationDevices,
+        IReadOnlyList<ScannedFile> files)
+    {
+        const long fatMaximumFileBytes = uint.MaxValue;
+        ScannedFile? largest = null;
+        foreach (var file in files)
+        {
+            if (file.Size > fatMaximumFileBytes && (largest is null || file.Size > largest.Size))
+                largest = file;
+        }
+        if (largest is null)
+            return;
+        for (var slot = 0; slot < destinationRoots.Count; slot++)
+        {
+            if (destinationDevices[slot].FileSystem.ToUpperInvariant() is "FAT" or "FAT12" or "FAT16" or "FAT32")
+                throw new IOException(
+                    $"{destinationRoots[slot]} usa {destinationDevices[slot].FileSystem}, que no admite archivos de 4 GiB o más " +
+                    $"({largest.RelativePath}). Formatea esa unidad como exFAT o NTFS.");
+        }
     }
 
     internal static SourceTreeScan ScanDirectory(string sourceRoot, CancellationToken token = default)
@@ -126,9 +182,9 @@ internal static class PreflightSafety
                     throw new IOException($"No se pudo inspeccionar {entry}: {ex.Message}", ex);
                 }
 
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                if (WindowsPath.IsLink(entry, attributes))
                     throw new IOException(
-                        $"No se permite copiar un symlink, junction o reparse point: {entry}");
+                        $"No se permite copiar un symlink, junction o acceso directo de aplicación: {entry}");
 
                 if ((attributes & FileAttributes.Directory) != 0)
                 {
@@ -260,13 +316,25 @@ internal static class PreflightSafety
     }
 
     /// <summary>Metadata-only heuristic: this never opens payload and does not prove content equality.
-    /// Exact UTC time comparison deliberately does not hide changes inside a filesystem time tolerance.</summary>
-    internal static bool MatchesMetadata(string destination, long sourceSize, DateTime sourceLastWriteTimeUtc)
+    /// Times compare exactly, except within the storage precision of the destination file system (see
+    /// <see cref="TimestampTolerance"/>): a FAT copy can never hold the source's exact time.</summary>
+    internal static bool MatchesMetadata(string destination, long sourceSize, DateTime sourceLastWriteTimeUtc,
+        TimeSpan tolerance = default)
     {
         WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
         var info = new FileInfo(destination);
-        return info.Exists && info.Length == sourceSize && info.LastWriteTimeUtc == sourceLastWriteTimeUtc;
+        return info.Exists && info.Length == sourceSize &&
+               (info.LastWriteTimeUtc - sourceLastWriteTimeUtc).Duration() <= tolerance;
     }
+
+    /// <summary>Write-time precision of a file system: 2 s on FAT, 10 ms on exFAT, exact elsewhere
+    /// (NTFS and ReFS keep 100 ns, the same unit as the source). This is what robocopy /FFT allows.</summary>
+    internal static TimeSpan TimestampTolerance(string? fileSystem) => fileSystem?.ToUpperInvariant() switch
+    {
+        "FAT" or "FAT12" or "FAT16" or "FAT32" => TimeSpan.FromSeconds(2),
+        "EXFAT" => TimeSpan.FromMilliseconds(10),
+        _ => TimeSpan.Zero,
+    };
 
     /// <summary>
     /// Read-only existence check of every source file in every destination. It never opens or hashes content.
@@ -329,7 +397,7 @@ internal static class PreflightSafety
             if (File.Exists(target))
                 throw new IOException(
                     $"Conflicto en {target}: el origen requiere una carpeta, pero el destino contiene un archivo.");
-            if (Directory.Exists(target) && WindowsPath.IsReparsePoint(target))
+            if (Directory.Exists(target) && WindowsPath.IsLink(target))
                 throw new IOException($"La carpeta de destino es un reparse point: {target}");
         }
 
@@ -345,7 +413,7 @@ internal static class PreflightSafety
                 current = Path.Combine(current, parts[index]);
                 if (!File.Exists(current) && !Directory.Exists(current))
                     continue;
-                if (WindowsPath.IsReparsePoint(current))
+                if (WindowsPath.IsLink(current))
                     throw new IOException($"La ruta de destino contiene un reparse point: {current}");
                 if (index < parts.Length - 1 && !Directory.Exists(current))
                     throw new IOException($"Componente de destino ya no es carpeta: {current}");
@@ -421,8 +489,10 @@ internal static class PreflightSafety
             // conservative simultaneous upper bound, with one reserve per volume.
             var peak = group.Aggregate(0UL, (sum, item) => SaturatingAdd(sum, item.PeakExtraBytes));
             var available = group.Min(item => item.Volume.AvailableBytes);
+            var systemVolume = SystemVolumeId.Value is not { } systemId ||
+                               string.Equals(group.Key, systemId, StringComparison.OrdinalIgnoreCase);
             var reserve = group.Any(item => item.BytesToWrite > 0)
-                ? ReserveForVolume(group.Max(item => item.Volume.TotalBytes)) : 0UL;
+                ? ReserveForVolume(group.Max(item => item.Volume.TotalBytes), systemVolume) : 0UL;
             var required = SaturatingAdd(peak, reserve);
             if (available >= required) continue;
             throw new IOException(
@@ -442,11 +512,14 @@ internal static class PreflightSafety
         return SaturatingAdd(value, granularity - remainder);
     }
 
-    internal static ulong ReserveForVolume(ulong totalBytes)
-    {
-        var onePercent = totalBytes / 100UL;
-        return Math.Clamp(onePercent, MinFreeReserve, MaxFreeReserve);
-    }
+    /// <summary>
+    /// Free space left untouched after the copy. The Windows volume keeps 1 % (1–16 GiB) so the system can
+    /// still page, update and log. A data volume (USB stick, external or second disk) only keeps 0.1 %
+    /// (64 MiB–1 GiB) for file-system metadata, so a stick can actually be filled.
+    /// </summary>
+    internal static ulong ReserveForVolume(ulong totalBytes, bool systemVolume = true) => systemVolume
+        ? Math.Clamp(totalBytes / 100UL, MinFreeReserve, MaxFreeReserve)
+        : Math.Clamp(totalBytes / 1000UL, MinDataFreeReserve, MaxDataFreeReserve);
 
     internal static bool PathsOverlap(string left, string right)
     {
@@ -475,9 +548,9 @@ internal static class PreflightSafety
             throw new IOException($"No se pudo inspeccionar {label} {path}: {ex.Message}", ex);
         }
 
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        if (WindowsPath.IsLink(path, attributes))
             throw new IOException(
-                $"No se permite usar un enlace simbólico, junction o reparse point como {label}: {path}.");
+                $"No se permite usar un enlace simbólico o junction como {label}: {path}.");
     }
 
     private static void WritableProbe(string directory)
@@ -529,7 +602,7 @@ internal static class WindowsNative
     internal static string GetFinalPath(string path, string label)
     {
         using var handle = CreateFileW(
-            path,
+            WindowsPath.Extended(Path.GetFullPath(path)),
             0,
             FileShare.ReadWrite | FileShare.Delete,
             IntPtr.Zero,

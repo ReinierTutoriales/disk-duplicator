@@ -87,4 +87,4 @@ Las pruebas automatizadas cubren aislamiento lógico, cancelación, recovery y f
 - Probar 100/125/150/200 % de escala y ventana reducida: los controles y el resumen siguen accesibles mediante desplazamiento.
 - Comparar throughput y diagnósticos con v2.1.1 usando el protocolo físico anterior. Bloques, pool, colas y políticas de flush permanecen en el baseline.
 
-El CI de Windows también publica el ejecutable, lo inicia desde una carpeta aislada que contiene únicamente ese archivo y comprueba su cierre normal. Esta prueba detecta dependencias omitidas del paquete descargable; no sustituye las pruebas visuales ni las de almacenamiento físico.
+El CI de Windows también publica la carpeta portable, la copia a una carpeta aislada, inicia el ejecutable desde allí y comprueba su cierre normal y que no se autoextrae en %TEMP%. Esta prueba detecta dependencias omitidas del paquete descargable; no sustituye las pruebas visuales ni las de almacenamiento físico.

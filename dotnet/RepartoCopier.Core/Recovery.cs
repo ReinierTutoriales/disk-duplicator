@@ -98,7 +98,7 @@ internal sealed class RecoveryCheckpointWriter : IDisposable
             ?? throw new IOException($"Ruta inválida de {label}: {path}");
         Directory.CreateDirectory(parent);
         WindowsPath.EnsureNormalDirectory(parent, $"La carpeta de {label}");
-        if (Directory.Exists(path) || (File.Exists(path) && WindowsPath.IsReparsePoint(path)))
+        if (Directory.Exists(path) || (File.Exists(path) && WindowsPath.IsLink(path)))
             throw new IOException($"Entrada de estado no segura para {label}: {path}");
 
         return new FileStream(path, new FileStreamOptions
@@ -424,7 +424,7 @@ internal static class RecoveryManager
             var destination = Path.Combine(destinationRoot, file.RelativePath);
             if (!File.Exists(destination) || Directory.Exists(destination))
                 continue;
-            if (WindowsPath.IsReparsePoint(destination))
+            if (WindowsPath.IsLink(destination))
                 continue;
             if (new FileInfo(destination).Length != file.Size)
                 continue;
@@ -616,7 +616,7 @@ internal static class RecoveryManager
 
     private static void EnsureOwnedRegularFile(string path, string label)
     {
-        if (Directory.Exists(path) || !File.Exists(path) || WindowsPath.IsReparsePoint(path))
+        if (Directory.Exists(path) || !File.Exists(path) || WindowsPath.IsLink(path))
             throw new IOException(
                 $"Entrada de estado no segura para {label}: {path}. Se esperaba un archivo regular sin enlaces ni reparse points.");
     }
