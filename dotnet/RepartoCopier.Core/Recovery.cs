@@ -443,16 +443,31 @@ internal static class RecoveryManager
         IReadOnlyList<RecoveryFile> files,
         CancellationToken token = default)
     {
+        // Every candidate lives in the state tmp folder. List it once: when it is empty (the normal case) no
+        // per-file hashing or existence probing is needed at all, and otherwise only names really present are
+        // probed instead of six paths per file.
+        var tmp = Path.Combine(StateLayout.StateDirectoryFor(destinationRoot), "tmp");
+        if (!Directory.Exists(tmp))
+            return;
+        var present = new HashSet<string>(
+            Directory.EnumerateFileSystemEntries(tmp).Select(entry => Path.GetFileName(entry)),
+            StringComparer.OrdinalIgnoreCase);
+        if (present.Count == 0)
+            return;
+
         foreach (var file in files)
         {
             token.ThrowIfCancellationRequested();
             var destination = Path.Combine(destinationRoot, file.RelativePath);
             foreach (var part in PartCandidates(destinationRoot, destination))
-                DeleteOwnedFileIfPresent(part, "temporal");
+            {
+                if (present.Contains(Path.GetFileName(part)))
+                    DeleteOwnedFileIfPresent(part, "temporal");
+            }
 
             foreach (var backup in BackupCandidates(destinationRoot, destination))
             {
-                if (!File.Exists(backup) && !Directory.Exists(backup))
+                if (!present.Contains(Path.GetFileName(backup)) || (!File.Exists(backup) && !Directory.Exists(backup)))
                     continue;
                 EnsureOwnedRegularFile(backup, "backup de copia");
                 if (File.Exists(destination) || Directory.Exists(destination))
