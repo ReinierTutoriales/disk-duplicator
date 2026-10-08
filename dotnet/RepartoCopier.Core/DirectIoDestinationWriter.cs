@@ -11,7 +11,9 @@ namespace RepartoCopier.Core;
 internal static class DirectIoDestinationWriter
 {
     private const uint GenericWrite = 0x40000000;
-    private const uint OpenExisting = 3;
+    private const uint CreateNew = 1;
+    private const int ErrorDiskFull = 112;
+    private const int ErrorFileTooLarge = 223;
     private const uint FileFlagNoBuffering = 0x20000000;
     private const uint FileFlagSequentialScan = 0x08000000;
 
@@ -32,28 +34,62 @@ internal static class DirectIoDestinationWriter
         return fileSize >= 64L * 1024 || fileSize % alignment == 0;
     }
 
-    internal static bool TryOpen(string path, StorageDeviceInfo device, long fileSize, out Session? session)
+    /// <summary>
+    /// Creates the part file directly with NO_BUFFERING and reserves its allocation on that same handle: one
+    /// create per file instead of create + preallocate + close + reopen. Returns false (nothing created) when the
+    /// volume refuses unbuffered handles, so the caller creates a buffered stream instead.
+    /// </summary>
+    internal static bool TryOpen(string path, StorageDeviceInfo device, long fileSize, long preallocationSize,
+        out Session? session)
     {
         session = null;
         if (!IsEligible(device, fileSize))
             return false;
 
+        var fullPath = Path.GetFullPath(path);
         var handle = NativeMethods.CreateFileW(
-            WindowsPath.Extended(Path.GetFullPath(path)),
+            WindowsPath.Extended(fullPath),
             GenericWrite,
             FileShare.Read,
             IntPtr.Zero,
-            OpenExisting,
+            CreateNew,
             FileFlagNoBuffering | FileFlagSequentialScan,
             IntPtr.Zero);
         if (handle.IsInvalid)
         {
+            var error = Marshal.GetLastWin32Error();
             handle.Dispose();
+            if (error == 80) // ERROR_FILE_EXISTS: a stale part; the caller removes it and retries.
+                throw new IOException($"El archivo temporal ya existe: {fullPath}", unchecked((int)0x80070050));
             return false;
         }
 
+        try
+        {
+            Preallocate(handle, preallocationSize, fullPath);
+        }
+        catch
+        {
+            handle.Dispose();
+            try { File.Delete(fullPath); } catch { }
+            throw;
+        }
         session = new Session(handle, DirectIoSourceReader.RequiredAlignment(device));
         return true;
+    }
+
+    // Same contract as FileStreamOptions.PreallocationSize: reserve clusters (not the end of file), fail only
+    // when the volume cannot hold the file, and treat any other refusal as "no preallocation".
+    private static void Preallocate(SafeFileHandle handle, long bytes, string path)
+    {
+        if (bytes <= 0)
+            return;
+        var allocation = bytes;
+        if (NativeMethods.SetFileInformationByHandle(handle, 5 /* FileAllocationInfo */, ref allocation, sizeof(long)))
+            return;
+        var error = Marshal.GetLastWin32Error();
+        if (error is ErrorDiskFull or ErrorFileTooLarge)
+            throw new IOException($"No hay espacio para reservar {bytes} bytes en {path}.", unchecked((int)(0x80070000 | (uint)error)));
     }
 
     internal static bool IsFallbackable(Exception error) =>
@@ -160,6 +196,18 @@ internal static class DirectIoDestinationWriter
             }
         }
 
+        internal void SetLastWriteTimeUtc(DateTime lastWriteTimeUtc)
+        {
+            var handle = _handle ?? throw new ObjectDisposedException(nameof(Session));
+            File.SetLastWriteTimeUtc(handle, lastWriteTimeUtc);
+        }
+
+        internal long Length()
+        {
+            var handle = _handle ?? throw new ObjectDisposedException(nameof(Session));
+            return RandomAccess.GetLength(handle);
+        }
+
         internal void FlushToDisk()
         {
             var handle = _handle ?? throw new ObjectDisposedException(nameof(Session));
@@ -191,6 +239,11 @@ internal static class DirectIoDestinationWriter
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool WriteFile(SafeFileHandle hFile, IntPtr buffer, uint numberOfBytesToWrite, out uint numberOfBytesWritten, IntPtr overlapped);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetFileInformationByHandle(SafeFileHandle hFile, int fileInformationClass, ref long information, uint bufferSize);
 
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]

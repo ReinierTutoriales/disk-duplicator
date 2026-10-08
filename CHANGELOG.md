@@ -17,6 +17,15 @@
 - Menos trabajo por refresco: textos solo se actualizan si cambian, el detalle de cada tarjeta cada 2 s, la velocidad de verificación sin crear un diagnóstico completo, el diálogo de resultados interpreta su plantilla una sola vez y agregar destinos ya no reconstruye la lista.
 - Distribución: carpeta portable con ReadyToRun en lugar de un ejecutable que se autoextraía (~200 MB por versión) en %TEMP%. Windows App SDK 2.5.1, MSTest 4.5.1, `global.json`, manifiesto con DPI por monitor y montón segmentado, registro de fallos en `%LOCALAPPDATA%\RepartoCopier\errores.log`.
 - Publicación: flujo permanente por etiqueta `vX.Y.Z` que compila el commit etiquetado, comprueba versión y revisión, prueba el arranque, adjunta la atestación de procedencia y no escribe en `main`.
+- Motor, muchos archivos pequeños:
+  - Preparación: el origen se lista una vez por carpeta, con una consulta de metadatos por archivo en lugar de tres. Cada destino se lee con un listado por carpeta que la copia toca, en lugar de dos recorridos de existencia, la validación ruta a ruta y el cálculo de espacio archivo a archivo. La recuperación solo examina la carpeta temporal si contiene algo.
+  - Escritura: el temporal se crea con un solo handle (sin buffer y con su reserva de espacio), sin el borrado previo ni el cierre y reapertura. La carpeta temporal y las carpetas ya validadas quedan en caché, y la fecha y el tamaño se fijan y leen sobre el mismo handle antes de un único vaciado a disco.
+  - Archivos omitidos: comprobarlos de nuevo durante la copia cuesta una consulta en lugar de recorrer la ruta.
+  - Verificación: un único búfer fijo de 8 MiB por pasada en lugar de uno por archivo.
+  - Hilos reservados por destino para que las escrituras síncronas no frenen la lectura del origen.
+  - El presupuesto de control ya no serializa el paso entre archivos cuando la memoria del equipo está alta.
+  - El bloqueo en RAM del búfer compartido funciona de verdad: antes fallaba sin avisar.
+  - Un lector cuyo destino ya falló deja de leer.
 
 ## v2.2.1 — motor adaptativo por origen, interfaz Windows 11 y diálogos con tema
 
