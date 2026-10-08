@@ -106,6 +106,8 @@ public static class StorageTopology
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationRoot);
         var full = Path.GetFullPath(destinationRoot);
         var volumeRoot = Path.GetPathRoot(full) ?? string.Empty;
+        // A volume mounted in a folder (C:\mnt\usb) is its own device, not the drive that holds the folder.
+        var mountedVolumeDevice = MountedFolderVolumeDevice(full, ref volumeRoot);
 
         var fileSystem = "Unknown";
         var driveType = DriveType.Unknown;
@@ -113,7 +115,8 @@ public static class StorageTopology
         long? totalSpace = null;
         var volumeWarnings = new List<string>();
 
-        if (!string.IsNullOrWhiteSpace(volumeRoot))
+        // DriveInfo only understands drive roots; a mounted folder's file system comes from its own handle below.
+        if (!string.IsNullOrWhiteSpace(volumeRoot) && mountedVolumeDevice is null)
         {
             try
             {
@@ -178,7 +181,7 @@ public static class StorageTopology
                 totalSpace);
         }
 
-        var devicePath = $@"\\.\{char.ToUpperInvariant(volumeRoot[0])}:";
+        var devicePath = mountedVolumeDevice ?? $@"\\.\{char.ToUpperInvariant(volumeRoot[0])}:";
         using var handle = NativeMethods.CreateFileW(
             devicePath,
             0,
@@ -343,6 +346,31 @@ public static class StorageTopology
         !isNetwork &&
         (string.Equals(fileSystem, "NTFS", StringComparison.OrdinalIgnoreCase) ||
          string.Equals(fileSystem, "ReFS", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// When <paramref name="fullPath"/> lives on a volume mounted in a folder rather than at a drive root,
+    /// returns that volume's device path (\\.\Volume{GUID}) and sets <paramref name="volumeRoot"/> to the
+    /// mount folder. Returns null for ordinary drive-letter paths and on any lookup failure.
+    /// </summary>
+    private static string? MountedFolderVolumeDevice(string fullPath, ref string volumeRoot)
+    {
+        if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+            return null;
+        var mount = new StringBuilder(32768);
+        if (!NativeMethods.GetVolumePathNameW(fullPath, mount, (uint)mount.Capacity))
+            return null;
+        var mountPath = mount.ToString();
+        if (mountPath.Length <= 3)
+            return null; // a drive root such as D:\
+        var volumeName = new StringBuilder(64);
+        if (!NativeMethods.GetVolumeNameForVolumeMountPointW(mountPath, volumeName, (uint)volumeName.Capacity))
+            return null;
+        var name = volumeName.ToString(); // \\?\Volume{GUID}\
+        if (!name.StartsWith(@"\\?\Volume{", StringComparison.OrdinalIgnoreCase))
+            return null;
+        volumeRoot = mountPath;
+        return @"\\.\" + name[4..].TrimEnd('\\');
+    }
 
     internal static bool IsNetworkDestination(string fullPath, DriveType driveType) =>
         driveType == DriveType.Network ||
@@ -624,6 +652,16 @@ public static class StorageTopology
             out uint fileSystemFlags,
             StringBuilder fileSystemNameBuffer,
             uint fileSystemNameSize);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetVolumePathNameW(string path, StringBuilder volumePath, uint length);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetVolumeNameForVolumeMountPointW(string mountPoint, StringBuilder volumeName, uint length);
 #pragma warning restore SYSLIB1054
     }
 }

@@ -15,6 +15,7 @@ on:
       - 'docs/SOURCE-BENCHMARK.md'
       - 'docs/FANOUT-PERFORMANCE-ROADMAP.md'
       - 'RepartoCopier.sln'
+      - 'global.json'
       - '.github/workflows/windows-dotnet.yml'
   push:
     branches: [main]
@@ -26,6 +27,7 @@ on:
       - 'docs/SOURCE-BENCHMARK.md'
       - 'docs/FANOUT-PERFORMANCE-ROADMAP.md'
       - 'RepartoCopier.sln'
+      - 'global.json'
       - '.github/workflows/windows-dotnet.yml'
   workflow_dispatch:
 
@@ -43,11 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -105,7 +107,7 @@ jobs:
           $smokeDirectory = Join-Path $env:RUNNER_TEMP "RepartoCopier-smoke-$env:GITHUB_RUN_ID"
           New-Item -ItemType Directory -Path $smokeDirectory -Force | Out-Null
           $smokeExe = Join-Path $smokeDirectory 'RepartoCopier.WinUI.exe'
-          Copy-Item 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' $smokeExe
+          Copy-Item 'artifact/RepartoCopier/*' $smokeDirectory -Recurse
           $appProcess = $null
           try {
             $appProcess = Start-Process -FilePath $smokeExe -WorkingDirectory $smokeDirectory -PassThru
@@ -121,6 +123,7 @@ jobs:
             if (-not $appProcess.CloseMainWindow()) { throw 'Standalone app did not accept a normal close request.' }
             if (-not $appProcess.WaitForExit(10000)) { throw 'Standalone app did not finish normal close.' }
             if ($appProcess.ExitCode -ne 0) { throw "Standalone app failed on close: $($appProcess.ExitCode)" }
+            if (Test-Path (Join-Path $env:TEMP '.net/RepartoCopier.WinUI')) { throw 'The portable build must not self-extract into %TEMP%.' }
           }
           finally {
             if ($null -ne $appProcess -and -not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
@@ -180,7 +183,7 @@ jobs:
 
       - name: Upload source benchmark report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: RepartoCopier-source-bench-report
           path: ${{ runner.temp }}/source-bench-${{ github.run_id }}.json
@@ -189,7 +192,7 @@ jobs:
 
       - name: Upload rendered layout report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: RepartoCopier-layout-report
           path: ${{ runner.temp }}/RepartoCopier-layout-check.json
@@ -197,9 +200,9 @@ jobs:
           retention-days: 14
 
       - name: Upload downloadable test build
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: RepartoCopier-main-win-x64
-          path: artifact/RepartoCopier/RepartoCopier.WinUI.exe
+          path: artifact/RepartoCopier/
           if-no-files-found: error
           retention-days: 14

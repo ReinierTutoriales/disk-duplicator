@@ -66,7 +66,7 @@ internal static class DirectIoSourceReader
             return false;
 
         var handle = NativeMethods.CreateFileW(
-            path,
+            WindowsPath.Extended(Path.GetFullPath(path)),
             GenericRead,
             FileShare.Read,
             IntPtr.Zero,

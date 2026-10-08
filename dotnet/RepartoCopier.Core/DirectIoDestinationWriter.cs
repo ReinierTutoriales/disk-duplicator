@@ -39,7 +39,7 @@ internal static class DirectIoDestinationWriter
             return false;
 
         var handle = NativeMethods.CreateFileW(
-            path,
+            WindowsPath.Extended(Path.GetFullPath(path)),
             GenericWrite,
             FileShare.Read,
             IntPtr.Zero,

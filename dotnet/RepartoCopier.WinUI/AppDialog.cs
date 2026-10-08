@@ -32,7 +32,6 @@ internal sealed record AppDialogSpec(
 internal sealed class AppDialog
 {
     internal const int Dismissed = -1;
-    private const double TitleBarDip = 32;
 
     private readonly Window _window = new();
     private readonly nint _owner;
@@ -57,11 +56,32 @@ internal sealed class AppDialog
         Action<AppDialog>? onShown = null)
     {
         if (token.IsCancellationRequested) return Task.FromResult(spec.CancelButton);
+        // A minimized owner has no usable position (-32000): bring it back so the dialog centers on it.
+        if (owner.AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } ownerPresenter)
+            ownerPresenter.Restore();
         var ownerHandle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
         var dialog = new AppDialog(ownerHandle, spec.CancelButton);
-        var theme = (owner.Content as FrameworkElement)?.ActualTheme ?? ElementTheme.Default;
-        dialog.Build(spec, theme);
-        dialog.Open(owner, spec.WidthDip, onShown);
+        var ownerRoot = owner.Content as FrameworkElement;
+        dialog.Build(spec, ownerRoot?.ActualTheme ?? ElementTheme.Default);
+        try
+        {
+            dialog.Open(owner, spec.WidthDip, onShown);
+        }
+        catch
+        {
+            // Never leave the owner disabled or an invisible window behind.
+            EnableWindow(ownerHandle, true);
+            try { dialog._window.Close(); } catch { }
+            throw;
+        }
+        if (ownerRoot is not null)
+        {
+            // Follow a theme change (app setting or Windows schedule) while the dialog is open.
+            TypedEventHandler<FrameworkElement, object> themeChanged = (sender, _) => dialog.ApplyTheme(sender.ActualTheme);
+            ownerRoot.ActualThemeChanged += themeChanged;
+            _ = dialog._result.Task.ContinueWith(_ => owner.DispatcherQueue.TryEnqueue(
+                () => ownerRoot.ActualThemeChanged -= themeChanged), TaskScheduler.Default);
+        }
         var registration = token.Register(() => dialog._window.DispatcherQueue.TryEnqueue(() => dialog.Close(spec.CancelButton)));
         _ = dialog._result.Task.ContinueWith(_ => registration.Dispose(), TaskScheduler.Default);
         return dialog._result.Task;
@@ -76,6 +96,13 @@ internal sealed class AppDialog
         EnableWindow(_owner, true);
         _result.TrySetResult(result);
         _window.Close();
+    }
+
+    private void ApplyTheme(ElementTheme theme)
+    {
+        if (_closing || theme == _theme) return;
+        Root.RequestedTheme = _theme = theme;
+        StyleCaptionButtons(_window.AppWindow, theme);
     }
 
     private void Build(AppDialogSpec spec, ElementTheme theme)
@@ -181,7 +208,7 @@ internal sealed class AppDialog
         presenter.IsMinimizable = false;
         presenter.IsMaximizable = false;
         appWindow.SetPresenter(presenter);
-        StyleCaptionButtons(appWindow, _theme == ElementTheme.Dark);
+        StyleCaptionButtons(appWindow, _theme);
 
         // Owned + owner disabled = modal, and it stays above the main window and outside its bounds.
         SetWindowLongPtr(Handle, GwlpHwndParent, _owner);
@@ -227,18 +254,31 @@ internal sealed class AppDialog
         dialog.Move(new PointInt32(x, y));
     }
 
-    private static void StyleCaptionButtons(AppWindow window, bool dark)
+    /// <summary>
+    /// Caption buttons drawn over app content: transparent background, glyphs in the app's resolved theme.
+    /// High contrast keeps the system colors untouched.
+    /// </summary>
+    internal static void StyleCaptionButtons(AppWindow window, ElementTheme theme)
     {
         try
         {
             var bar = window.TitleBar;
+            if (new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
+            {
+                bar.ResetToDefault();
+                return;
+            }
+            var dark = theme == ElementTheme.Dark;
             var foreground = dark ? Colors.White : Colors.Black;
+            var inactive = dark ? Windows.UI.Color.FromArgb(255, 157, 157, 157) : Windows.UI.Color.FromArgb(255, 112, 112, 112);
             bar.ButtonBackgroundColor = Colors.Transparent;
             bar.ButtonInactiveBackgroundColor = Colors.Transparent;
             bar.ButtonForegroundColor = foreground;
             bar.ButtonHoverForegroundColor = foreground;
-            bar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(24, 128, 128, 128);
-            bar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(40, 128, 128, 128);
+            bar.ButtonPressedForegroundColor = foreground;
+            bar.ButtonInactiveForegroundColor = inactive;
+            bar.ButtonHoverBackgroundColor = dark ? Windows.UI.Color.FromArgb(15, 255, 255, 255) : Windows.UI.Color.FromArgb(9, 0, 0, 0);
+            bar.ButtonPressedBackgroundColor = dark ? Windows.UI.Color.FromArgb(10, 255, 255, 255) : Windows.UI.Color.FromArgb(6, 0, 0, 0);
         }
         catch { }
     }

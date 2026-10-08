@@ -36,6 +36,9 @@ public sealed class CopyJob : IAsyncDisposable
         _progress.Select(item => item.Snapshot()).ToArray();
 
     public CopyDiagnosticsSnapshot DiagnosticsSnapshot() => _telemetry.Snapshot();
+
+    /// <summary>Logical verify throughput over the last 5 s; cheap enough for every progress tick.</summary>
+    public double VerifyBytesPerSecond => _telemetry.VerifyLogical5sBytesPerSecond;
     internal CopyTelemetry Telemetry => _telemetry;
 
     public void SetPaused(bool paused) => _pauseGate.SetPaused(paused);
@@ -51,8 +54,9 @@ public sealed class CopyJob : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         RequestCancel();
+        // Completion's own failure is reported by whoever awaits Completion; disposing never rethrows it.
         try { await _completion.ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
+        catch (Exception) { }
         _cancel.Dispose();
     }
 
@@ -187,172 +191,184 @@ public static class CopyEngine
 
     private static PreparedCopy Preflight(CopyPlan plan, CancellationToken token = default)
     {
-        token.ThrowIfCancellationRequested();
-        PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
-        var requestedSource = Path.GetFullPath(plan.Source);
-        var sourceIsDirectory = Directory.Exists(requestedSource);
-        var sourceIsFile = File.Exists(requestedSource);
-        if (!sourceIsDirectory && !sourceIsFile)
-            throw new IOException("El origen debe ser un archivo regular o una carpeta existente.");
-        if (WindowsPath.IsReparsePoint(requestedSource))
-            throw new IOException("El origen no puede ser un symlink/junction/reparse point.");
-
-        var source = PreflightSafety.CanonicalExisting(requestedSource, "origen");
-        var sourceName = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
-        if (string.IsNullOrWhiteSpace(sourceName))
-            throw new IOException("El origen debe tener un nombre; no se puede duplicar una raíz completa.");
-
-        var effectiveDestinations = plan.Destinations
-            .Select(Path.GetFullPath)
-            .Select(basePath => sourceIsDirectory ? Path.Combine(basePath, sourceName) : basePath)
-            .ToArray();
-        var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
-            source,
-            effectiveDestinations, token);
-        PreflightSafety.ValidateRecoveryPaths(source, destinationRoots);
-
-        var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
-        var destinationDevices = destinationTopology.Destinations.ToArray();
-        if (destinationDevices.Length != destinationRoots.Length)
-            throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
-        var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
-
-        var sourceRoot = sourceIsDirectory
-            ? source
-            : Path.GetDirectoryName(source)
-                ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
-
-        SourceTreeScan scan;
-        if (sourceIsDirectory)
-        {
-            scan = PreflightSafety.ScanDirectory(source, token);
-        }
-        else
-        {
-            RejectReparse(source, "archivo de origen");
-            var info = new FileInfo(source);
-            scan = new SourceTreeScan(
-                [new ScannedFile(
-                    source,
-                    Path.GetFileName(source),
-                    info.Length,
-                    info.LastWriteTimeUtc)],
-                []);
-        }
-
-        var files = scan.Files
-            .Select(file => new FileEntry(
-                file.FullPath,
-                file.RelativePath,
-                file.Size,
-                file.LastWriteTimeUtc,
-                ToUnixNanoseconds(file.LastWriteTimeUtc)))
-            .ToList();
-        var directories = scan.Directories.ToList();
-        var totalBytes = files.Aggregate<FileEntry, ulong>(
-            0,
-            (sum, file) => checked(sum + (ulong)file.Size));
-
-        // Read-only: look for files that already exist before leases, recovery or any write touch a
-        // destination. Existence only; content is compared later and only when the user asked for it.
-        var relativePaths = files.Select(file => file.RelativePath).ToArray();
-        var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
-        if (plan.ExistingFiles is null)
-            PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
-        var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
-
-        var recoveryFiles = files
-            .Select(file => new RecoveryFile(
-                file.SourcePath,
-                file.RelativePath,
-                file.Size,
-                file.ModifiedUnixNanoseconds))
-            .ToArray();
-        var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
-        var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
-        var spaceRequirements = new List<DestinationSpaceRequirement>(destinationRoots.Length);
+        var createdDestinations = new List<string>();
         try
         {
-            foreach (var root in destinationRoots)
+            token.ThrowIfCancellationRequested();
+            PreflightSafety.RequireKnownPolicy(plan.ExistingFiles);
+            var requestedSource = Path.GetFullPath(plan.Source);
+            var sourceIsDirectory = Directory.Exists(requestedSource);
+            var sourceIsFile = File.Exists(requestedSource);
+            if (!sourceIsDirectory && !sourceIsFile)
+                throw new IOException("El origen debe ser un archivo regular o una carpeta existente.");
+            if (WindowsPath.IsLink(requestedSource))
+                throw new IOException("El origen no puede ser un symlink/junction/reparse point.");
+
+            var source = PreflightSafety.CanonicalExisting(requestedSource, "origen");
+            var sourceName = Path.GetFileName(Path.TrimEndingDirectorySeparator(source));
+            if (string.IsNullOrWhiteSpace(sourceName))
+                throw new IOException("El origen debe tener un nombre; no se puede duplicar una raíz completa.");
+
+            var effectiveDestinations = plan.Destinations
+                .Select(Path.GetFullPath)
+                .Select(basePath => sourceIsDirectory ? Path.Combine(basePath, sourceName) : basePath)
+                .ToArray();
+            var destinationRoots = PreflightSafety.ValidateAndCanonicalizeDestinations(
+                source,
+                effectiveDestinations, token, createdDestinations);
+            PreflightSafety.ValidateRecoveryPaths(source, destinationRoots);
+
+            var destinationTopology = StorageTopology.InspectDestinations(destinationRoots);
+            var destinationDevices = destinationTopology.Destinations.ToArray();
+            if (destinationDevices.Length != destinationRoots.Length)
+                throw new IOException("La topología de almacenamiento no coincide con los destinos preparados.");
+            var sourceDevice = StorageTopology.InspectDestinations([source]).Destinations.Single();
+
+            var sourceRoot = sourceIsDirectory
+                ? source
+                : Path.GetDirectoryName(source)
+                    ?? throw new IOException("El archivo de origen no tiene carpeta padre.");
+
+            SourceTreeScan scan;
+            if (sourceIsDirectory)
             {
-                token.ThrowIfCancellationRequested();
-                stateLeases.Add(DestinationStateLease.Acquire(root));
+                scan = PreflightSafety.ScanDirectory(source, token);
+            }
+            else
+            {
+                RejectReparse(source, "archivo de origen");
+                var info = new FileInfo(source);
+                scan = new SourceTreeScan(
+                    [new ScannedFile(
+                        source,
+                        Path.GetFileName(source),
+                        info.Length,
+                        info.LastWriteTimeUtc)],
+                    []);
             }
 
-            for (var slot = 0; slot < destinationRoots.Length; slot++)
+            var files = scan.Files
+                .Select(file => new FileEntry(
+                    file.FullPath,
+                    file.RelativePath,
+                    file.Size,
+                    file.LastWriteTimeUtc,
+                    ToUnixNanoseconds(file.LastWriteTimeUtc)))
+                .ToList();
+            var directories = scan.Directories.ToList();
+            var totalBytes = files.Aggregate<FileEntry, ulong>(
+                0,
+                (sum, file) => checked(sum + (ulong)file.Size));
+            PreflightSafety.RejectFilesTooLargeForFileSystem(destinationRoots, destinationDevices, scan.Files);
+
+            // Read-only: look for files that already exist before leases, recovery or any write touch a
+            // destination. Existence only; content is compared later and only when the user asked for it.
+            var relativePaths = files.Select(file => file.RelativePath).ToArray();
+            var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
+            if (plan.ExistingFiles is null)
+                PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
+            var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+
+            var recoveryFiles = files
+                .Select(file => new RecoveryFile(
+                    file.SourcePath,
+                    file.RelativePath,
+                    file.Size,
+                    file.ModifiedUnixNanoseconds))
+                .ToArray();
+            var preverifiedSkips = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
+            var stateLeases = new List<DestinationStateLease>(destinationRoots.Length);
+            var spaceRequirements = new List<DestinationSpaceRequirement>(destinationRoots.Length);
+            try
             {
-                token.ThrowIfCancellationRequested();
-                var root = destinationRoots[slot];
-                PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
-                // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
-                // content is compared once, in the visible comparison phase, never during preparation.
-                _ = RecoveryManager.PrepareAndNormalize(
-                    sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
-                // Recovery may have restored an interrupted replacement: re-read what really exists now.
-                var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
-                var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
+                foreach (var root in destinationRoots)
                 {
                     token.ThrowIfCancellationRequested();
-                    var exists = existingNow[fileIndex][0];
-                    existingFiles[fileIndex][slot] = exists;
-                    if (plan.ExistingFiles is null)
-                        continue; // reported below, before anything is written
-                    switch (PreflightSafety.Decide(plan.ExistingFiles, exists))
+                    stateLeases.Add(DestinationStateLease.Acquire(root));
+                }
+
+                for (var slot = 0; slot < destinationRoots.Length; slot++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var root = destinationRoots[slot];
+                    PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
+                    // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
+                    // content is compared once, in the visible comparison phase, never during preparation.
+                    _ = RecoveryManager.PrepareAndNormalize(
+                        sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
+                    // Recovery may have restored an interrupted replacement: re-read what really exists now.
+                    var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
+                    var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
                     {
-                        case PreflightSafety.ExistingFileAction.Keep:
-                            // KeepExisting leaves the file untouched: it is skipped like any completed file.
-                            preverifiedSkips[fileIndex][slot] = true;
-                            skippedPaths.Add(files[fileIndex].RelativePath);
-                            break;
-                        case PreflightSafety.ExistingFileAction.ReplaceAllowed:
-                            if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
-                                PreflightSafety.MatchesMetadata(
-                                    Path.Combine(root, files[fileIndex].RelativePath),
-                                    files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc))
-                            {
+                        token.ThrowIfCancellationRequested();
+                        var exists = existingNow[fileIndex][0];
+                        existingFiles[fileIndex][slot] = exists;
+                        if (plan.ExistingFiles is null)
+                            continue; // reported below, before anything is written
+                        switch (PreflightSafety.Decide(plan.ExistingFiles, exists))
+                        {
+                            case PreflightSafety.ExistingFileAction.Keep:
+                                // KeepExisting leaves the file untouched: it is skipped like any completed file.
                                 preverifiedSkips[fileIndex][slot] = true;
                                 skippedPaths.Add(files[fileIndex].RelativePath);
                                 break;
-                            }
-                            // Only a file seen at analysis time may be replaced at commit time.
-                            replaceAllowed[fileIndex][slot] = true;
-                            break;
+                            case PreflightSafety.ExistingFileAction.ReplaceAllowed:
+                                if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
+                                    PreflightSafety.MatchesMetadata(
+                                        Path.Combine(root, files[fileIndex].RelativePath),
+                                        files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc,
+                                        PreflightSafety.TimestampTolerance(destinationDevices[slot].FileSystem)))
+                                {
+                                    preverifiedSkips[fileIndex][slot] = true;
+                                    skippedPaths.Add(files[fileIndex].RelativePath);
+                                    break;
+                                }
+                                // Only a file seen at analysis time may be replaced at commit time.
+                                replaceAllowed[fileIndex][slot] = true;
+                                break;
+                        }
+                    }
+                    if (scan.Files.Count > 0)
+                        spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
+                }
+                if (plan.ExistingFiles is null)
+                    PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
+                PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
+                foreach (var root in destinationRoots)
+                {
+                    foreach (var relative in directories)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        EnsureDestinationDirectory(root, relative);
                     }
                 }
-                if (scan.Files.Count > 0)
-                    spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
-            }
-            if (plan.ExistingFiles is null)
-                PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
-            PreflightSafety.EnsureFreeSpaceForVolumes(spaceRequirements);
-            foreach (var root in destinationRoots)
-            {
-                foreach (var relative in directories)
-                {
-                    token.ThrowIfCancellationRequested();
-                    EnsureDestinationDirectory(root, relative);
-                }
-            }
 
-            return new PreparedCopy(
-                sourceRoot,
-                destinationRoots,
-                files,
-                directories,
-                totalBytes,
-                preverifiedSkips,
-                replaceAllowed,
-                plan.ExistingFiles,
-                sourceIsDirectory ? scan : null,
-                sourceDevice,
-                destinationDevices,
-                stateLeases.ToArray());
+                return new PreparedCopy(
+                    sourceRoot,
+                    destinationRoots,
+                    files,
+                    directories,
+                    totalBytes,
+                    preverifiedSkips,
+                    replaceAllowed,
+                    plan.ExistingFiles,
+                    sourceIsDirectory ? scan : null,
+                    sourceDevice,
+                    destinationDevices,
+                    stateLeases.ToArray());
+            }
+            catch
+            {
+                foreach (var lease in stateLeases)
+                    lease.Dispose();
+                throw;
+            }
         }
         catch
         {
-            foreach (var lease in stateLeases)
-                lease.Dispose();
+            // A preparation that fails or is cancelled leaves no empty destination folder behind.
+            PreflightSafety.RemoveCreatedEmptyDirectories(createdDestinations);
             throw;
         }
     }
@@ -525,8 +541,10 @@ public static class CopyEngine
 
             for (var i = 0; i < progress.Length; i++)
             {
-                // A destination that already finished stays Done even if the job is cancelled afterwards.
-                if (token.IsCancellationRequested && progress[i].Snapshot().Phase is not DestinationPhase.Done)
+                // A destination that already finished stays Done, and one that failed keeps its own error,
+                // even if the job is cancelled afterwards.
+                if (token.IsCancellationRequested &&
+                    progress[i].Snapshot().Phase is not (DestinationPhase.Done or DestinationPhase.Failed))
                     progress[i].SetPhase(DestinationPhase.Cancelled, "Cancelado");
                 else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed)
                     progress[i].SetPhase(DestinationPhase.Done);
@@ -534,7 +552,7 @@ public static class CopyEngine
         }
         catch (OperationCanceledException)
         {
-            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Done))
+            foreach (var item in progress.Where(p => p.Snapshot().Phase is not (DestinationPhase.Done or DestinationPhase.Failed)))
                 item.SetPhase(DestinationPhase.Cancelled, "Cancelado");
         }
         catch (Exception ex)
@@ -556,9 +574,16 @@ public static class CopyEngine
                 worker.Channel.Writer.TryComplete();
                 DrainAndRelease(worker.Channel.Reader, worker);
             }
-            bufferPool?.Dispose();
-            foreach (var pool in independentPools) pool.Dispose();
-            copy.ReleaseStateLeases();
+            try
+            {
+                bufferPool?.Dispose();
+                foreach (var pool in independentPools) pool.Dispose();
+            }
+            finally
+            {
+                // The destination locks are released even if a pool reports a reference still held.
+                copy.ReleaseStateLeases();
+            }
         }
     }
 
@@ -597,7 +622,8 @@ public static class CopyEngine
                     {
                         var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
                         ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
-                        if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
+                        if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc,
+                                PreflightSafety.TimestampTolerance(workers[slot].Device.FileSystem)))
                         {
                             var message = $"El archivo existente cambió después de comprobar tamaño y fecha: {destination}";
                             if (keepGoing) progress[destinationSlot].MarkError(message);
@@ -618,16 +644,31 @@ public static class CopyEngine
             var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
             job.Telemetry.RecordTransferSize(readBufferSize);
 
-            var sourceResult = await ReadAndFanOutSequentialAsync(
-                entry,
-                copy.SourceDevice,
-                active,
-                readBufferSize,
-                transferAlignment,
-                bufferPool,
-                job,
-                sharedSourceScheduler,
-                readAhead).ConfigureAwait(false);
+            SourceReadResult? sourceResult;
+            try
+            {
+                sourceResult = await ReadAndFanOutSequentialAsync(
+                    entry,
+                    copy.SourceDevice,
+                    active,
+                    readBufferSize,
+                    transferAlignment,
+                    bufferPool,
+                    job,
+                    sharedSourceScheduler,
+                    readAhead).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (keepGoing && IsFileIoError(ex) && ex is not SourceChangedException &&
+                                       !token.IsCancellationRequested && Directory.Exists(copy.SourceRoot))
+            {
+                // A source file that cannot be opened or read (locked by another program, unreadable sector)
+                // is an error of that file only: every destination drops its partial copy and the job goes on.
+                // A source that changed between reads, or a source drive that disappeared, still stops everything.
+                active.RemoveAll(worker => !worker.IsActive);
+                await DeliverAsync(active, new AbortFileMessage($"{entry.RelativePath}: {ex.Message}"), job)
+                    .ConfigureAwait(false);
+                continue;
+            }
             if (sourceResult is null)
                 continue;
 
@@ -999,7 +1040,8 @@ public static class CopyEngine
 
                             if (current.DirectFallbackRequested)
                             {
-                                var fallbackError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                                var fallbackError = CancellationAsIs(
+                                    await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false), job.Token);
                                 if (fallbackError is not null)
                                 {
                                     FailCurrentFile(worker, current, options, fallbackError.Message);
@@ -1007,7 +1049,8 @@ public static class CopyEngine
                                 }
                             }
 
-                            var admissionError = await EnsureWriteWindowAsync(worker, current, job).ConfigureAwait(false);
+                            var admissionError = CancellationAsIs(
+                                await EnsureWriteWindowAsync(worker, current, job).ConfigureAwait(false), job.Token);
                             if (admissionError is not null)
                             {
                                 FailCurrentFile(worker, current, options, admissionError.Message);
@@ -1024,12 +1067,23 @@ public static class CopyEngine
                         case DataMessage:
                             break;
 
+                        case AbortFileMessage when skippingFailedFile:
+                            skippingFailedFile = false;
+                            break;
+
+                        case AbortFileMessage abort when current is not null:
+                            await ReleasePendingWritesAsync(worker, current).ConfigureAwait(false);
+                            FailCurrentFile(worker, current, options, abort.Error);
+                            current = null;
+                            break;
+
                         case EndMessage when skippingFailedFile:
                             skippingFailedFile = false;
                             break;
 
                         case EndMessage end when current is not null:
-                            var pendingError = await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false);
+                            var pendingError = CancellationAsIs(
+                                await DrainPendingWritesAsync(worker, current, job).ConfigureAwait(false), job.Token);
                             if (pendingError is not null)
                                 FailCurrentFile(worker, current, options, pendingError.Message);
                             if (!current.Failed)
@@ -1127,6 +1181,14 @@ public static class CopyEngine
             TryDelete(part);
             throw;
         }
+    }
+
+    /// <summary>A cancelled write is the job's cancellation, never a file error (KeepGoing would count it).</summary>
+    private static Exception? CancellationAsIs(Exception? error, CancellationToken token)
+    {
+        if (error is OperationCanceledException && token.IsCancellationRequested)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(error);
+        return error;
     }
 
     private static bool IsFileIoError(Exception error) =>
@@ -1895,7 +1957,7 @@ public static class CopyEngine
             for (var slot = 0; slot < progress.Length; slot++)
             {
                 var destination = Path.Combine(copy.DestinationRoots[slot], entry.RelativePath);
-                if (!File.Exists(destination) || WindowsPath.IsReparsePoint(destination)) continue;
+                if (!File.Exists(destination) || WindowsPath.IsLink(destination)) continue;
                 if (new FileInfo(destination).Length != entry.Size) continue;
                 candidates.Add(slot);
                 totals[slot] = checked(totals[slot] + (ulong)entry.Size);
@@ -1959,7 +2021,7 @@ public static class CopyEngine
         {
             current = Path.Combine(current, parts[index]);
             if (!File.Exists(current) && !Directory.Exists(current)) continue;
-            if (WindowsPath.IsReparsePoint(current))
+            if (WindowsPath.IsLink(current))
                 throw new IOException($"La ruta de destino cambió a symlink/junction/reparse point: {current}");
             if (index < parts.Length - 1 && !Directory.Exists(current))
                 throw new IOException($"Componente de destino ya no es carpeta: {current}");
@@ -1978,7 +2040,7 @@ public static class CopyEngine
 
     private static void RejectReparse(string path, string label)
     {
-        if (WindowsPath.IsReparsePoint(path))
+        if (WindowsPath.IsLink(path))
             throw new IOException($"{label} no puede ser symlink/junction/reparse point: {path}");
     }
 
@@ -2094,6 +2156,8 @@ public static class CopyEngine
     private sealed record BeginMessage(FileEntry Entry) : ControlMessage;
     private sealed record DataMessage(SharedBlock Block) : FanoutMessage;
     private sealed record EndMessage(byte[] Hash) : ControlMessage;
+    /// <summary>The source file failed to read with KeepGoing: drop this file's partial copy and go on.</summary>
+    private sealed record AbortFileMessage(string Error) : ControlMessage;
 
     private sealed record ControlDelivery : FanoutMessage
     {

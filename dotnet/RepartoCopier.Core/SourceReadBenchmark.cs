@@ -45,7 +45,7 @@ public static class SourceReadBenchmark
         var info = new FileInfo(path);
         if (!info.Exists || info.Length < BlockBytes)
             throw new IOException("El origen de prueba debe ser un archivo existente de al menos 8 MiB.");
-        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+        if (WindowsPath.IsLink(path, info.Attributes))
             throw new IOException("No se permiten enlaces simbólicos como origen de la prueba.");
 
         var length = info.Length;
