@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
 using System.Runtime.InteropServices;
@@ -16,8 +17,17 @@ public sealed class CopyJob : IAsyncDisposable
 
     internal CopyJob(IReadOnlyList<DestinationProgress> progress) => _progress = progress;
 
+    private int _readMode; // 0 = not chosen yet, 1 = shared reader, 2 = independent readers
+
     public bool IsPaused => _pauseGate.IsPaused;
     public Task Completion => _completion;
+
+    /// <summary>
+    /// Read mode actually used by COPY (not merely requested), or null when the job ended before COPY chose
+    /// one (e.g. failed or cancelled during preparation). Set before the first source read.
+    /// </summary>
+    public bool? IndependentSourceReads => Volatile.Read(ref _readMode) switch { 1 => false, 2 => true, _ => null };
+    internal void SetIndependentSourceReads(bool value) => Volatile.Write(ref _readMode, value ? 2 : 1);
     internal CancellationToken Token => _cancel.Token;
 
     internal void Attach(Task completion) => _completion = completion;
@@ -96,6 +106,7 @@ public static class CopyEngine
     private const long SharedFanoutPoolBytes = 256L * 1024 * 1024;
     private const int IndependentPoolBudgetBytes = 256 * 1024 * 1024;
     private const int MinimumIndependentPoolBytes = 16 * 1024 * 1024;
+    private const int MaximumIndependentReaders = 16;
     private const int VerificationWorkspaceBytes = 8 * 1024 * 1024;
 
 
@@ -109,7 +120,6 @@ public static class CopyEngine
         var prepared = Preflight(plan);
         try
         {
-            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -138,7 +148,6 @@ public static class CopyEngine
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ValidateIndependentMode(prepared, options);
             var progress = prepared.DestinationRoots
                 .Select(root => new DestinationProgress(root, prepared.TotalBytes, (ulong)prepared.Files.Count))
                 .ToArray();
@@ -153,19 +162,26 @@ public static class CopyEngine
         }
     }
 
-    private static void ValidateIndependentMode(PreparedCopy copy, CopyOptions options)
-    {
-        if (!options.IndependentSourceReads) return;
-        if (copy.DestinationRoots.Length is < 2 or > 16 ||
-            copy.SourceDevice.MediaKind != StorageMediaKind.SolidState ||
-            copy.SourceDevice.IsNetwork ||
-            copy.SourceDevice.BusType is not ("NVMe" or "SATA"))
-            throw new IOException("Lecturas independientes requieren un origen SSD interno NVMe/SATA y de 2 a 16 destinos.");
-    }
+    /// <summary>
+    /// Independent readers (one per destination, each with its own pool) are used only when the source can
+    /// serve several sequential streams at once: a local NVMe SSD with 2-16 destinations. Measured on real
+    /// hardware, fast destinations then finish at their own speed instead of waiting for the slowest one.
+    /// Any other source (SATA SSD or HDD, USB, network, unidentified) has a total read rate that N readers
+    /// split between them (USB HDD at 108 MB/s to three NVMe: ~35 MB/s each; a ~550 MB/s SATA SSD would give
+    /// ~180 MB/s each), so it uses the single shared reader and every destination gets the source's full rate.
+    /// </summary>
+    internal static bool UseIndependentSourceReads(CopyOptions options, StorageDeviceInfo source, int destinations) =>
+        options.IndependentSourceReads &&
+        destinations is >= 2 and <= MaximumIndependentReaders &&
+        IsParallelReadSource(source);
+
+    /// <summary>Only a local NVMe SSD has read bandwidth to spare for several concurrent sequential streams.</summary>
+    internal static bool IsParallelReadSource(StorageDeviceInfo source) =>
+        StorageIoProfile.For(source).Kind == StorageProfileKind.Nvme;
 
     internal static int IndependentPoolCapacity(int destinations)
     {
-        if (destinations is < 2 or > 16) throw new ArgumentOutOfRangeException(nameof(destinations));
+        if (destinations is < 2 or > MaximumIndependentReaders) throw new ArgumentOutOfRangeException(nameof(destinations));
         return Math.Max(MinimumIndependentPoolBytes, IndependentPoolBudgetBytes / destinations);
     }
 
@@ -348,13 +364,20 @@ public static class CopyEngine
         CopyJob job)
     {
         var token = job.Token;
-        var expectedHashes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
         var independentPools = new List<SharedFanoutBufferPool>();
         var controlBudget = AdaptiveControlByteBudget.CreateForSystem();
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
+        var independent = UseIndependentSourceReads(options, copy.SourceDevice, copy.DestinationRoots.Length);
+        // The shared reader of a single-stream source (HDD, USB, network) keeps the next block in flight while
+        // the current one is hashed and handed out, so the device never idles between requests.
+        var sourceReadAhead = !independent && !IsParallelReadSource(copy.SourceDevice);
+        // Set when the source itself proved different between reads (content, size, date or tree). Then no
+        // destination is a faithful copy, including one that already finished.
+        var sourceChanged = false;
         try
         {
             var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
@@ -386,10 +409,12 @@ public static class CopyEngine
             }
 
             var copyPhaseStarted = Stopwatch.GetTimestamp();
-            if (options.IndependentSourceReads)
+            job.SetIndependentSourceReads(independent);
+            if (independent)
             {
+                var capacity = IndependentPoolCapacity(workers.Length);
                 foreach (var _ in workers)
-                    independentPools.Add(new SharedFanoutBufferPool(IndependentPoolCapacity(workers.Length)));
+                    independentPools.Add(new SharedFanoutBufferPool(capacity));
             }
             else
                 bufferPool = new SharedFanoutBufferPool(checked((int)SharedFanoutPoolBytes));
@@ -400,45 +425,59 @@ public static class CopyEngine
             Exception? producerError = null;
             try
             {
-                if (options.IndependentSourceReads)
+                if (independent)
                 {
-                    // A slow writer retains only its own pool. Each producer owns its
-                    // source handle, hash and file-order controls; the device scheduler
-                    // still arbitrates reads when the source shares physical hardware.
-                    var hashes = workers.Select(_ => new Dictionary<string, byte[]>(StringComparer.Ordinal)).ToArray();
+                    // One reader and one bounded pool per destination: a slow writer only holds its own
+                    // pool, so fast destinations keep reading at their own pace. All readers agree on one
+                    // hash per file before any of them sends End, so a source that changes between reads
+                    // stops the copy before a second destination commits divergent content.
                     var producers = workers.Select((worker, index) => Task.Run(async () =>
                     {
+                        Exception? failure = null;
                         try
                         {
-                            await ProducerLoopAsync(copy, [worker], progress, skipMasks, hashes[index], job,
-                                independentPools[index], deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                            await ProducerLoopAsync(copy, [worker], progress, skipMasks, expectedHashes, job,
+                                independentPools[index], deviceSchedulers.SharedSourceScheduler, options.KeepGoing,
+                                readAhead: false).ConfigureAwait(false);
                         }
-                        catch
+                        catch (Exception ex) when (ex is not OperationCanceledException)
                         {
+                            failure = ex;
+                            if (ex is SourceChangedException) sourceChanged = true;
                             job.RequestCancel();
                             throw;
                         }
+                        finally
+                        {
+                            // Close this destination's queue as soon as its own reader is done, so a fast
+                            // destination drains, commits and reports completion without waiting for the
+                            // slowest one. The shared path closes every queue together below.
+                            worker.Channel.Writer.TryComplete(failure);
+                        }
                     })).ToArray();
                     await Task.WhenAll(producers).ConfigureAwait(false);
-                    // Different readers must not silently commit divergent source contents.
-                    foreach (var file in copy.Files)
-                    {
-                        var key = PathKey(file.RelativePath);
-                        var first = hashes.Select(map => map.GetValueOrDefault(key)).FirstOrDefault(hash => hash is not null);
-                        if (first is null) continue;
-                        if (hashes.Any(map => map.TryGetValue(key, out var hash) && !hash.AsSpan().SequenceEqual(first)))
-                            throw new IOException($"El origen cambió entre lecturas independientes: {file.RelativePath}");
-                    }
                 }
                 else
                 {
                     await ProducerLoopAsync(copy, workers, progress, skipMasks, expectedHashes, job,
-                        bufferPool!, deviceSchedulers.SharedSourceScheduler).ConfigureAwait(false);
+                        bufferPool!, deviceSchedulers.SharedSourceScheduler, options.KeepGoing,
+                        sourceReadAhead).ConfigureAwait(false);
+                }
+
+                if (copy.SourceScan is not null)
+                {
+                    try { PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token); }
+                    catch (Exception) when (!token.IsCancellationRequested)
+                    {
+                        sourceChanged = true;
+                        throw;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 producerError = ex;
+                if (ex is SourceChangedException) sourceChanged = true;
             }
             finally
             {
@@ -486,7 +525,8 @@ public static class CopyEngine
 
             for (var i = 0; i < progress.Length; i++)
             {
-                if (token.IsCancellationRequested)
+                // A destination that already finished stays Done even if the job is cancelled afterwards.
+                if (token.IsCancellationRequested && progress[i].Snapshot().Phase is not DestinationPhase.Done)
                     progress[i].SetPhase(DestinationPhase.Cancelled, "Cancelado");
                 else if (progress[i].Snapshot().Phase is not DestinationPhase.Failed)
                     progress[i].SetPhase(DestinationPhase.Done);
@@ -494,12 +534,19 @@ public static class CopyEngine
         }
         catch (OperationCanceledException)
         {
-            foreach (var item in progress)
+            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Done))
                 item.SetPhase(DestinationPhase.Cancelled, "Cancelado");
         }
         catch (Exception ex)
         {
-            foreach (var item in progress.Where(p => p.Snapshot().Phase is not DestinationPhase.Failed))
+            // Another destination's failure does not undo one that already committed every file. A source
+            // that changed during the copy does: then no destination is a faithful copy.
+            foreach (var item in progress.Where(p => p.Snapshot().Phase switch
+                     {
+                         DestinationPhase.Failed => false,
+                         DestinationPhase.Done => sourceChanged,
+                         _ => true,
+                     }))
                 item.SetPhase(DestinationPhase.Failed, ex.Message);
         }
         finally
@@ -520,80 +567,76 @@ public static class CopyEngine
         DestinationWorker[] workers,
         DestinationProgress[] progress,
         bool[][] skipMasks,
-        Dictionary<string, byte[]> expectedHashes,
+        ConcurrentDictionary<string, byte[]> expectedHashes,
         CopyJob job,
         SharedFanoutBufferPool bufferPool,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        bool keepGoing,
+        bool readAhead)
     {
         var token = job.Token;
-        try
+        for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
         {
-            for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
+            token.ThrowIfCancellationRequested();
+            await job.WaitIfPausedAsync(token).ConfigureAwait(false);
+            var entry = copy.Files[fileIndex];
+            ValidateSourceSnapshot(entry);
+
+            var active = new List<DestinationWorker>();
+            for (var slot = 0; slot < workers.Length; slot++)
             {
-                token.ThrowIfCancellationRequested();
-                await job.WaitIfPausedAsync(token).ConfigureAwait(false);
-                var entry = copy.Files[fileIndex];
-                ValidateSourceSnapshot(entry);
-
-                var active = new List<DestinationWorker>();
-                for (var slot = 0; slot < workers.Length; slot++)
+                var destinationSlot = workers[slot].Slot;
+                if (!workers[slot].IsActive)
+                    continue; // a failed destination keeps its own error; nothing more is checked or counted
+                if (skipMasks[fileIndex][destinationSlot])
                 {
-                    var destinationSlot = workers[slot].Slot;
-                    if (skipMasks[fileIndex][destinationSlot])
+                    // Space was reserved excluding metadata matches. If one changed after preparation,
+                    // fail closed instead of skipping stale metadata or replacing without a reservation: that
+                    // file is an error (KeepGoing) or the destination fails. Other destinations are unaffected.
+                    if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
                     {
-                        // Space was reserved excluding metadata matches. If one changed after preparation,
-                        // fail closed instead of skipping stale metadata or replacing without a reservation.
-                        if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
+                        var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
+                        ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
+                        if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
                         {
-                            var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                            ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
-                            if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc))
-                                throw new IOException($"El archivo existente cambió después de comprobar tamaño y fecha: {destination}");
+                            var message = $"El archivo existente cambió después de comprobar tamaño y fecha: {destination}";
+                            if (keepGoing) progress[destinationSlot].MarkError(message);
+                            else workers[slot].Fail(message);
+                            continue;
                         }
-                        progress[destinationSlot].MarkSkipped((ulong)entry.Size);
-                        continue;
                     }
-                    if (workers[slot].IsActive) active.Add(workers[slot]);
-                }
-                if (active.Count == 0) continue;
-
-                await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
-
-                var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
-                var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
-                job.Telemetry.RecordTransferSize(readBufferSize);
-
-                var sourceResult = await ReadAndFanOutSequentialAsync(
-                    entry,
-                    copy.SourceDevice,
-                    active,
-                    readBufferSize,
-                    transferAlignment,
-                    bufferPool,
-                    job,
-                    sharedSourceScheduler).ConfigureAwait(false);
-                if (sourceResult is null)
+                    progress[destinationSlot].MarkSkipped((ulong)entry.Size);
                     continue;
-
-                var hash = sourceResult.Hash;
-                var key = PathKey(entry.RelativePath);
-                if (expectedHashes.TryGetValue(key, out var preflightHash) && !hash.AsSpan().SequenceEqual(preflightHash))
-                    throw new IOException($"El origen cambió durante la copia: {entry.RelativePath}");
-                expectedHashes[key] = hash;
-                active.RemoveAll(worker => !worker.IsActive);
-                await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
+                }
+                active.Add(workers[slot]);
             }
+            if (active.Count == 0) continue;
 
-            if (copy.SourceScan is not null)
-                PreflightSafety.ValidateSourceTreeSnapshot(copy.SourceRoot, copy.SourceScan, token);
-        }
-        finally
-        {
-            // SharedBlock instances can outlive the producer while destination writers
-            // drain their channels. Disposing the semaphore here races with the
-            // final SharedBlock.Release() calls and can abort otherwise valid copies.
-            // The semaphore is intentionally left for GC once the last shared block and
-            // this producer scope release their references.
+            await DeliverAsync(active, new BeginMessage(entry), job).ConfigureAwait(false);
+
+            var transferAlignment = TransferAlignmentFor(copy.SourceDevice, active);
+            var readBufferSize = SelectSharedFanoutBlockSize(entry.Size, transferAlignment);
+            job.Telemetry.RecordTransferSize(readBufferSize);
+
+            var sourceResult = await ReadAndFanOutSequentialAsync(
+                entry,
+                copy.SourceDevice,
+                active,
+                readBufferSize,
+                transferAlignment,
+                bufferPool,
+                job,
+                sharedSourceScheduler,
+                readAhead).ConfigureAwait(false);
+            if (sourceResult is null)
+                continue;
+
+            var hash = sourceResult.Hash;
+            var agreed = expectedHashes.GetOrAdd(PathKey(entry.RelativePath), hash);
+            if (!ReferenceEquals(agreed, hash) && !hash.AsSpan().SequenceEqual(agreed))
+                throw new SourceChangedException($"El origen cambió durante la copia: {entry.RelativePath}");
+            active.RemoveAll(worker => !worker.IsActive);
+            await DeliverAsync(active, new EndMessage(hash), job).ConfigureAwait(false);
         }
     }
 
@@ -605,11 +648,17 @@ public static class CopyEngine
         int transferAlignment,
         SharedFanoutBufferPool bufferPool,
         CopyJob job,
-        DeviceScheduler? sharedSourceScheduler)
+        DeviceScheduler? sharedSourceScheduler,
+        bool readAhead)
     {
         using var hasher = Hasher.New();
         DirectIoSourceReader.OverlappedSession? direct = null;
         FileStream? buffered = null;
+        // At most one source read is ever in flight. With readAhead the next block is requested as soon as the
+        // current read completes and overlaps its hashing and delivery. Renting its buffer runs in the
+        // background: with a full pool the block already in memory is still delivered instead of waiting.
+        using var readAheadCancel = CancellationTokenSource.CreateLinkedTokenSource(job.Token);
+        Task<PendingSourceBlock>? next = null;
         try
         {
             if (!DirectIoSourceReader.TryOpenOverlapped(entry.SourcePath, sourceDevice, readBufferSize, out direct))
@@ -624,65 +673,24 @@ public static class CopyEngine
                 if (active.Count == 0)
                     return null;
 
-                var reservedReferences = active.Count;
-                var poolStarted = Stopwatch.GetTimestamp();
-                SharedFanoutBufferPool.Lease? lease = await bufferPool.RentAsync(
-                    readBufferSize,
-                    transferAlignment,
-                    reservedReferences,
-                    job.Token).ConfigureAwait(false);
-                job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
-                job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
-
-                int read;
+                var block = await (next ?? BeginSourceBlockAsync(totalRead, job.Token)).ConfigureAwait(false);
+                next = null;
+                SharedFanoutBufferPool.Lease? lease = block.Lease;
                 try
                 {
-                    var remaining = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
-                    var readStarted = Stopwatch.GetTimestamp();
-                    DeviceScheduler.IoLease? sourceIo = null;
-                    try
-                    {
-                        if (sharedSourceScheduler is not null)
-                            sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, job.Token).ConfigureAwait(false);
-
-                        if (direct is not null)
-                        {
-                            try
-                            {
-                                read = await direct.ReadAsync(lease.Buffer, readBufferSize, totalRead, job.Token).ConfigureAwait(false);
-                                job.Telemetry.RecordDirectSourceRead(read);
-                            }
-                            catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
-                            {
-                                direct.Dispose();
-                                direct = null;
-                                job.Telemetry.RecordDirectSourceFallback();
-                                buffered = OpenSourceStream(entry.SourcePath);
-                                buffered.Position = totalRead;
-                                read = await buffered.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                            }
-                        }
-                        else
-                        {
-                            read = await buffered!.ReadAsync(lease.Memory[..remaining], job.Token).ConfigureAwait(false);
-                        }
-                    }
-                    finally
-                    {
-                        sourceIo?.Dispose();
-                    }
-                    var readElapsed = Stopwatch.GetElapsedTime(readStarted);
-                    job.Telemetry.RecordSourceRead(read, readElapsed);
-
+                    var read = await block.Read.ConfigureAwait(false);
                     if (read == 0)
                         throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
 
                     totalRead += read;
+                    if (readAhead && totalRead < entry.Size)
+                        next = BeginSourceBlockAsync(totalRead, readAheadCancel.Token);
+
                     var hashStarted = Stopwatch.GetTimestamp();
                     hasher.UpdateWithJoin(lease.Memory.Span[..read]);
                     job.Telemetry.RecordSourceHash(read, Stopwatch.GetElapsedTime(hashStarted));
                     active.RemoveAll(worker => !worker.IsActive);
-                    var releasedBeforeDelivery = reservedReferences - active.Count;
+                    var releasedBeforeDelivery = block.ReservedReferences - active.Count;
                     for (var released = 0; released < releasedBeforeDelivery; released++)
                         lease.ReleaseReference();
                     if (active.Count == 0)
@@ -691,12 +699,11 @@ public static class CopyEngine
                         return null;
                     }
 
-                    var block = new SharedBlock(lease, read);
+                    var sharedBlock = new SharedBlock(lease, read);
                     lease = null;
                     var deliveryStarted = Stopwatch.GetTimestamp();
-                    await DeliverAsync(active, new DataMessage(block), job).ConfigureAwait(false);
-                    var deliveryElapsed = Stopwatch.GetElapsedTime(deliveryStarted);
-                    job.Telemetry.RecordFanoutWait(deliveryElapsed);
+                    await DeliverAsync(active, new DataMessage(sharedBlock), job).ConfigureAwait(false);
+                    job.Telemetry.RecordFanoutWait(Stopwatch.GetElapsedTime(deliveryStarted));
                     active.RemoveAll(worker => !worker.IsActive);
                     if (active.Count == 0)
                         return null;
@@ -712,11 +719,85 @@ public static class CopyEngine
         }
         finally
         {
+            // Never release a buffer or close the file under a read that is still running. A rent still waiting
+            // for pool space is cancelled first, so leaving can never hang on a full pool.
+            if (next is not null)
+            {
+                readAheadCancel.Cancel();
+                try
+                {
+                    var pending = await next.ConfigureAwait(false);
+                    try { await pending.Read.ConfigureAwait(false); } catch { }
+                    pending.Lease.Dispose();
+                }
+                catch { }
+            }
             direct?.Dispose();
             if (buffered is not null)
                 await buffered.DisposeAsync().ConfigureAwait(false);
         }
+
+        async Task<PendingSourceBlock> BeginSourceBlockAsync(long offset, CancellationToken token)
+        {
+            var reservedReferences = active.Count;
+            var poolStarted = Stopwatch.GetTimestamp();
+            var lease = await bufferPool.RentAsync(
+                readBufferSize,
+                transferAlignment,
+                reservedReferences,
+                token).ConfigureAwait(false);
+            job.Telemetry.RecordBufferWait(Stopwatch.GetElapsedTime(poolStarted));
+            job.Telemetry.ObserveBuffer(bufferPool.UsedBytes, bufferPool.CapacityBytes);
+            return new PendingSourceBlock(lease, reservedReferences, ReadSourceBlockAsync(lease, offset, token));
+        }
+
+        async Task<int> ReadSourceBlockAsync(SharedFanoutBufferPool.Lease lease, long offset, CancellationToken token)
+        {
+            var remaining = checked((int)Math.Min(readBufferSize, entry.Size - offset));
+            var readStarted = Stopwatch.GetTimestamp();
+            DeviceScheduler.IoLease? sourceIo = null;
+            int read;
+            try
+            {
+                if (sharedSourceScheduler is not null)
+                    sourceIo = await sharedSourceScheduler.AcquireIoAsync(remaining, token).ConfigureAwait(false);
+
+                if (direct is not null)
+                {
+                    try
+                    {
+                        read = await direct.ReadAsync(lease.Buffer, readBufferSize, offset, token).ConfigureAwait(false);
+                        job.Telemetry.RecordDirectSourceRead(read);
+                    }
+                    catch (Exception ex) when (DirectIoSourceReader.IsFallbackable(ex))
+                    {
+                        direct.Dispose();
+                        direct = null;
+                        job.Telemetry.RecordDirectSourceFallback();
+                        buffered = OpenSourceStream(entry.SourcePath);
+                        buffered.Position = offset;
+                        read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    buffered!.Position = offset;
+                    read = await buffered.ReadAsync(lease.Memory[..remaining], token).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                sourceIo?.Dispose();
+            }
+            job.Telemetry.RecordSourceRead(read, Stopwatch.GetElapsedTime(readStarted));
+            return read;
+        }
     }
+
+    /// <summary>The source differed from its snapshot or between reads: no copy of it can be trusted.</summary>
+    internal sealed class SourceChangedException(string message) : IOException(message);
+
+    private sealed record PendingSourceBlock(SharedFanoutBufferPool.Lease Lease, int ReservedReferences, Task<int> Read);
 
     private static FileStream OpenSourceStream(string path) =>
         new(path, new FileStreamOptions
@@ -731,7 +812,7 @@ public static class CopyEngine
     private static void ValidateCompletedSourceRead(FileEntry entry, long totalRead)
     {
         if (totalRead != entry.Size)
-            throw new IOException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
+            throw new SourceChangedException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
         ValidateSourceSnapshot(entry);
     }
 
@@ -976,8 +1057,14 @@ public static class CopyEngine
             }
 
             // The channel drained normally: record the end of COPY only for work that really finished.
-            if (current is null && !job.Token.IsCancellationRequested)
+            // Without final verification that is this destination's completion; report it now instead
+            // of when the slowest destination finishes.
+            if (current is null && !job.Token.IsCancellationRequested && worker.IsActive)
+            {
                 worker.Progress.MarkCopyFinished();
+                if (!options.Verify && worker.Progress.Snapshot().CopyFinishedAt is not null)
+                    worker.Progress.SetPhase(DestinationPhase.Done);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1886,7 +1973,7 @@ public static class CopyEngine
         WindowsPath.EnsureRegularFile(entry.SourcePath, "El origen");
         var info = new FileInfo(entry.SourcePath);
         if (info.Length != entry.Size || ToUnixNanoseconds(info.LastWriteTimeUtc) != entry.ModifiedUnixNanoseconds)
-            throw new IOException($"El origen cambió: {entry.SourcePath}");
+            throw new SourceChangedException($"El origen cambió: {entry.SourcePath}");
     }
 
     private static void RejectReparse(string path, string label)
@@ -1908,16 +1995,6 @@ public static class CopyEngine
         return remainder == 0 ? desired : checked(desired + alignment - remainder);
     }
 
-    private static int BufferAlignmentFor(StorageDeviceInfo device)
-    {
-        var alignment = Math.Max(1, Environment.SystemPageSize);
-        if (!device.HasKnownSectorAlignment)
-            return alignment;
-        var required = DirectIoSourceReader.RequiredAlignment(device);
-        return required > 0 && (required & (required - 1)) == 0
-            ? Math.Max(alignment, required)
-            : alignment;
-    }
     private static int TransferAlignmentFor(
         StorageDeviceInfo source,
         IReadOnlyList<DestinationWorker> active)
