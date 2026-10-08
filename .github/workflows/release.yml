@@ -7,6 +7,12 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  # Manual start from a main commit: the release step then creates the tag on exactly that commit.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión a publicar, sin la v (por ejemplo 2.2.2)'
+        required: true
 
 permissions:
   contents: write
@@ -14,7 +20,7 @@ permissions:
   attestations: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -32,13 +38,19 @@ jobs:
         id: meta
         shell: pwsh
         run: |
-          $version = '${{ github.ref_name }}'.Substring(1)
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}'.Substring(1) }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            git fetch --tags --quiet
+            if (git tag --list "v$version") { throw "Tag v$version already exists." }
+          }
           [xml]$project = Get-Content 'dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj'
           $projectVersion = @($project.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ })[0]
           if ($projectVersion -ne $version) { throw "Tag v$version does not match project version $projectVersion." }
           $notes = ".github/release-notes/v$version.md"
           if (-not (Test-Path $notes)) { throw "Missing release notes: $notes" }
           "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
           "notes=$notes" >> $env:GITHUB_OUTPUT
 
       - name: Restore core tests
@@ -110,7 +122,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create '${{ github.ref_name }}' '${{ steps.package.outputs.zip }}' 'SHA256SUMS.txt' `
-            --title 'RepartoCopier ${{ github.ref_name }}' `
+          $tagArguments = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { @('--target', '${{ github.sha }}') } else { @('--verify-tag') }
+          gh release create '${{ steps.meta.outputs.tag }}' '${{ steps.package.outputs.zip }}' 'SHA256SUMS.txt' `
+            --title 'RepartoCopier ${{ steps.meta.outputs.tag }}' `
             --notes-file '${{ steps.meta.outputs.notes }}' `
-            --verify-tag
+            @tagArguments
