@@ -107,6 +107,14 @@ public static class StateLayout
             Path.Combine(temp, $"{id}.bak"));
     }
 
+    /// <summary><see cref="TransientPaths"/> for a temp directory already resolved by <see cref="PrepareTempDirectory"/>:
+    /// the per-destination state id is hashed once per copy instead of once per file.</summary>
+    internal static (string PartPath, string BackupPath) TransientPathsIn(string tempDirectory, string destinationFile)
+    {
+        var id = TransientId(destinationFile);
+        return (Path.Combine(tempDirectory, $"{id}.part"), Path.Combine(tempDirectory, $"{id}.bak"));
+    }
+
     public static string PartPath(string destinationRoot, string destinationFile) =>
         Path.Combine(StateDirectoryFor(destinationRoot), "tmp", $"{TransientId(destinationFile)}.part");
 

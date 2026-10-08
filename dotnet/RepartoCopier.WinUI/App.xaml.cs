@@ -67,6 +67,7 @@ public partial class App : Application
         }
         var window = new MainWindow();
         window.Activate();
+        ExtractionCleanup.StartInBackground();
         if (commandLine.Length == 3 && commandLine[1] == "--layout-check")
         {
             try { await window.RunLayoutCheckAsync(commandLine[2]); }

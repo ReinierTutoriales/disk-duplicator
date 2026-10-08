@@ -36,10 +36,16 @@ internal sealed class AdaptiveControlByteBudget
         get { lock (_gate) return _peakBytes; }
     }
 
+    // 1 MiB of control envelopes (16k queued Begin/End deliveries on x64) is negligible next to one 8 MiB data
+    // block. Below it, admission never consults the memory-load signal: under OS memory pressure that signal
+    // shrank capacity to a single delivery and serialized every file handoff across all destinations, and
+    // reading it (GC.GetGCMemoryInfo) allocated on every Begin/End.
+    internal const long SystemFloorBytes = 1024 * 1024;
+
     internal static AdaptiveControlByteBudget CreateForSystem() =>
-        new(usedBytes => MemoryPressureCapacity.GetSafeTotalBytes(
-            usedBytes,
-            EstimatedDeliveryBytes));
+        new(usedBytes => usedBytes + EstimatedDeliveryBytes <= SystemFloorBytes
+            ? SystemFloorBytes
+            : Math.Max(SystemFloorBytes, MemoryPressureCapacity.GetSafeTotalBytes(usedBytes, EstimatedDeliveryBytes)));
 
     internal ValueTask AcquireAsync(int bytes, CancellationToken token)
     {

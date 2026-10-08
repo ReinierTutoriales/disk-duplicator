@@ -22,6 +22,8 @@ internal sealed class SharedFanoutBufferPool : IDisposable
     private int _usedPages;
     private bool _disposed;
     private bool _virtualLocked;
+    private bool _workingSetRaised;
+    private static readonly object WorkingSetGate = new();
     private TaskCompletionSource _spaceAvailable = NewSignal();
 
     internal SharedFanoutBufferPool(int capacityBytes = DefaultCapacityBytes)
@@ -47,8 +49,31 @@ internal sealed class SharedFanoutBufferPool : IDisposable
 
         if (OperatingSystem.IsWindows())
         {
+            // VirtualLock can only lock what fits in the process's minimum working set (a few hundred KiB by
+            // default), so without raising it first the lock of a 256 MiB pool always failed silently. The
+            // minimum is raised by exactly this pool and only when the machine has ample memory for it.
+            _workingSetRaised = TryAdjustWorkingSet(_capacityBytes);
             var pointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, _baseOffset);
             _virtualLocked = NativeMethods.VirtualLock(pointer, (nuint)_capacityBytes);
+            if (!_virtualLocked && _workingSetRaised)
+                _workingSetRaised = !TryAdjustWorkingSet(-_capacityBytes);
+        }
+    }
+
+    private static bool TryAdjustWorkingSet(long deltaBytes)
+    {
+        if (deltaBytes > 0 && GC.GetGCMemoryInfo().TotalAvailableMemoryBytes < 16 * deltaBytes)
+            return false;
+        lock (WorkingSetGate)
+        {
+            var process = NativeMethods.GetCurrentProcess();
+            if (!NativeMethods.GetProcessWorkingSetSize(process, out var minimum, out var maximum))
+                return false;
+            var newMinimum = (long)minimum + deltaBytes;
+            var newMaximum = (long)maximum + deltaBytes;
+            if (newMinimum <= 0 || newMaximum < newMinimum)
+                return false;
+            return NativeMethods.SetProcessWorkingSetSize(process, (nuint)newMinimum, (nuint)newMaximum);
         }
     }
 
@@ -241,6 +266,11 @@ internal sealed class SharedFanoutBufferPool : IDisposable
             NativeMethods.VirtualUnlock(pointer, (nuint)_capacityBytes);
             _virtualLocked = false;
         }
+        if (_workingSetRaised && OperatingSystem.IsWindows())
+        {
+            TryAdjustWorkingSet(-_capacityBytes);
+            _workingSetRaised = false;
+        }
         GC.KeepAlive(storage);
     }
 
@@ -307,5 +337,19 @@ internal sealed class SharedFanoutBufferPool : IDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool VirtualUnlock(IntPtr address, nuint size);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll")]
+        internal static extern IntPtr GetCurrentProcess();
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetProcessWorkingSetSize(IntPtr process, out nuint minimum, out nuint maximum);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetProcessWorkingSetSize(IntPtr process, nuint minimum, nuint maximum);
     }
 }

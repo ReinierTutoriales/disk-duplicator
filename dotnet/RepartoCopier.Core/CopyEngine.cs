@@ -264,7 +264,11 @@ public static class CopyEngine
             // Read-only: look for files that already exist before leases, recovery or any write touch a
             // destination. Existence only; content is compared later and only when the user asked for it.
             var relativePaths = files.Select(file => file.RelativePath).ToArray();
-            var existingFiles = PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token);
+            // Without a policy, conflicts are reported before any lease, recovery or write. With one (the app always
+            // passes one), existence is read once, from each destination's index after recovery.
+            var existingFiles = plan.ExistingFiles is null
+                ? PreflightSafety.FindExistingFiles(destinationRoots, relativePaths, token)
+                : CreateEmptySkipMasks(files.Count, destinationRoots.Length);
             if (plan.ExistingFiles is null)
                 PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
             var replaceAllowed = CreateEmptySkipMasks(files.Count, destinationRoots.Length);
@@ -291,18 +295,23 @@ public static class CopyEngine
                 {
                     token.ThrowIfCancellationRequested();
                     var root = destinationRoots[slot];
-                    PreflightSafety.ValidateDestinationLayout(root, directories, scan.Files, token);
+                    var index = DestinationIndex.Build(root, directories, token);
+                    index.ValidateFiles(scan.Files, token);
+                    // Recovery only changes the destination when an interrupted run left transient files behind.
+                    var hadTransientFiles = HasTransientFiles(root);
                     // Journal checkpoints no longer decide what is skipped: the explicit policy does, and
                     // content is compared once, in the visible comparison phase, never during preparation.
                     _ = RecoveryManager.PrepareAndNormalize(
                         sourceRoot, root, recoveryFiles, token, reuseCompleted: false);
                     // Recovery may have restored an interrupted replacement: re-read what really exists now.
-                    var existingNow = PreflightSafety.FindExistingFiles([root], relativePaths, token);
+                    if (hadTransientFiles)
+                        index = DestinationIndex.Build(root, directories, token);
                     var skippedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     for (var fileIndex = 0; fileIndex < files.Count; fileIndex++)
                     {
                         token.ThrowIfCancellationRequested();
-                        var exists = existingNow[fileIndex][0];
+                        var existing = index.ExistingFile(files[fileIndex].RelativePath);
+                        var exists = existing is not null;
                         existingFiles[fileIndex][slot] = exists;
                         if (plan.ExistingFiles is null)
                             continue; // reported below, before anything is written
@@ -316,7 +325,7 @@ public static class CopyEngine
                             case PreflightSafety.ExistingFileAction.ReplaceAllowed:
                                 if (plan.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent &&
                                     PreflightSafety.MatchesMetadata(
-                                        Path.Combine(root, files[fileIndex].RelativePath),
+                                        existing!,
                                         files[fileIndex].Size, files[fileIndex].LastWriteTimeUtc,
                                         PreflightSafety.TimestampTolerance(destinationDevices[slot].FileSystem)))
                                 {
@@ -330,7 +339,7 @@ public static class CopyEngine
                         }
                     }
                     if (scan.Files.Count > 0)
-                        spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token));
+                        spaceRequirements.Add(PreflightSafety.EstimateDestinationSpace(root, scan.Files, skippedPaths, token, index));
                 }
                 if (plan.ExistingFiles is null)
                     PreflightSafety.ThrowIfExistingFiles(destinationRoots, relativePaths, existingFiles);
@@ -380,6 +389,7 @@ public static class CopyEngine
         CopyJob job)
     {
         var token = job.Token;
+        EnsureThreadPoolHeadroom(copy.DestinationRoots.Length);
         var expectedHashes = new ConcurrentDictionary<string, byte[]>(StringComparer.Ordinal);
         DestinationWorker[] workers = [];
         SharedFanoutBufferPool? bufferPool = null;
@@ -587,6 +597,21 @@ public static class CopyEngine
         }
     }
 
+    /// <summary>
+    /// Direct destination writes, flushes and commits are synchronous by design (one physical write at a time
+    /// per destination). Each one occupies a pool thread for the whole operation (an 8 MiB write to a slow USB
+    /// stick takes hundreds of milliseconds), so with more destinations than cores source-read and hash
+    /// continuations would queue behind them until the pool injects threads (~2 per second). Reserving one
+    /// thread per destination up front, plus the producers, keeps the pipeline moving from the first block.
+    /// </summary>
+    private static void EnsureThreadPoolHeadroom(int destinations)
+    {
+        ThreadPool.GetMinThreads(out var workers, out var completionPorts);
+        var wanted = Math.Min(512, Environment.ProcessorCount + (2 * destinations) + 4);
+        if (workers < wanted)
+            ThreadPool.SetMinThreads(wanted, completionPorts);
+    }
+
     private static async Task ProducerLoopAsync(
         PreparedCopy copy,
         DestinationWorker[] workers,
@@ -603,6 +628,9 @@ public static class CopyEngine
         for (var fileIndex = 0; fileIndex < copy.Files.Count; fileIndex++)
         {
             token.ThrowIfCancellationRequested();
+            // Every destination of this reader already failed: nothing left to read for.
+            if (!Array.Exists(workers, static worker => worker.IsActive))
+                return;
             await job.WaitIfPausedAsync(token).ConfigureAwait(false);
             var entry = copy.Files[fileIndex];
             ValidateSourceSnapshot(entry);
@@ -620,8 +648,8 @@ public static class CopyEngine
                     // file is an error (KeepGoing) or the destination fails. Other destinations are unaffected.
                     if (copy.ExistingFiles == ExistingFilePolicy.ReplaceMetadataDifferent)
                     {
+                        // Only metadata is read and nothing is written here, so the path walk is not needed.
                         var destination = Path.Combine(workers[slot].Root, entry.RelativePath);
-                        ValidateRuntimeDestinationPath(workers[slot].Root, entry.RelativePath);
                         if (!PreflightSafety.MatchesMetadata(destination, entry.Size, entry.LastWriteTimeUtc,
                                 PreflightSafety.TimestampTolerance(workers[slot].Device.FileSystem)))
                         {
@@ -1146,33 +1174,69 @@ public static class CopyEngine
     private static CurrentFile BeginFile(DestinationWorker worker, FileEntry entry)
     {
         worker.Progress.SetLastFile(entry.RelativePath);
-        ValidateRuntimeDestinationPath(worker.Root, entry.RelativePath);
-        StateLayout.PrepareTempDirectory(worker.Root);
         var destination = Path.Combine(worker.Root, entry.RelativePath);
         var parent = Path.GetDirectoryName(destination)
             ?? throw new IOException($"Destino inválido: {destination}");
-        Directory.CreateDirectory(parent);
-        WindowsPath.EnsureNormalDirectory(parent, "La carpeta de destino");
-        var transient = StateLayout.TransientPaths(worker.Root, destination);
+        if (worker.ValidatedDirectories.Contains(parent))
+        {
+            // The full path was validated for an earlier file in this folder: re-check only what can change
+            // per file, the folder itself and the final name.
+            ValidateKnownParentAndName(parent, destination);
+        }
+        else
+        {
+            ValidateRuntimeDestinationPath(worker.Root, entry.RelativePath);
+            Directory.CreateDirectory(parent);
+            WindowsPath.EnsureNormalDirectory(parent, "La carpeta de destino");
+            worker.ValidatedDirectories.Add(parent);
+        }
+        worker.TempDirectory ??= StateLayout.PrepareTempDirectory(worker.Root);
+        var transient = StateLayout.TransientPathsIn(worker.TempDirectory, destination);
         var part = transient.PartPath;
-        TryDelete(part);
         var directRequested = DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
         var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size);
         FileStream? stream = null;
         DirectIoDestinationWriter.Session? directSession = null;
         try
         {
-            if (directRequested)
-            {
-                using (OpenPartStream(part, FileMode.CreateNew, preallocationSize)) { }
-                if (!DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, out directSession))
-                    stream = ReopenPart(part);
-            }
-            else
-            {
-                stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
-            }
+            CreatePart();
             return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
+        }
+        catch (IOException ex) when (IsAlreadyExists(ex))
+        {
+            // A stale part from an interrupted run (recovery normally removes it): replace it once.
+            TryDelete(part);
+            try
+            {
+                CreatePart();
+                return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
+            }
+            catch
+            {
+                stream?.Dispose();
+                directSession?.Dispose();
+                TryDelete(part);
+                throw;
+            }
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // The state folder was removed during the copy: prepare it again and retry once.
+            worker.TempDirectory = StateLayout.PrepareTempDirectory(worker.Root);
+            transient = StateLayout.TransientPathsIn(worker.TempDirectory, destination);
+            part = transient.PartPath;
+            try
+            {
+                CreatePart();
+                return new CurrentFile(entry, destination, part, transient.BackupPath, stream, directSession, directRequested);
+            }
+            catch
+            {
+                stream?.Dispose();
+                directSession?.Dispose();
+                TryDelete(part);
+                throw;
+            }
         }
         catch
         {
@@ -1181,6 +1245,39 @@ public static class CopyEngine
             TryDelete(part);
             throw;
         }
+
+        void CreatePart()
+        {
+            // One create per file: the unbuffered handle when the volume allows it, else a buffered stream.
+            if (!directRequested ||
+                !DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, preallocationSize, out directSession))
+                stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
+        }
+    }
+
+    private static bool IsAlreadyExists(IOException error) =>
+        error.HResult is unchecked((int)0x80070050) or unchecked((int)0x800700B7);
+
+    private static void ValidateKnownParentAndName(string parent, string destination)
+    {
+        FileAttributes parentAttributes;
+        try { parentAttributes = File.GetAttributes(parent); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException($"La carpeta de destino ya no está disponible: {parent}", ex);
+        }
+        if ((parentAttributes & FileAttributes.Directory) == 0)
+            throw new IOException($"Componente de destino ya no es carpeta: {parent}");
+        if (WindowsPath.IsLink(parent, parentAttributes))
+            throw new IOException($"La ruta de destino cambió a symlink/junction/reparse point: {parent}");
+
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(destination); }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return; }
+        if ((attributes & FileAttributes.Directory) != 0)
+            throw new IOException($"El destino final cambió a carpeta: {destination}");
+        if (WindowsPath.IsLink(destination, attributes))
+            throw new IOException($"La ruta de destino cambió a symlink/junction/reparse point: {destination}");
     }
 
     /// <summary>A cancelled write is the job's cancellation, never a file error (KeepGoing would count it).</summary>
@@ -1517,43 +1614,58 @@ public static class CopyEngine
             return;
         }
 
+        // The source time is set on the open handle before the flush, so a single flush makes size, data and
+        // time durable together, and the length is read from the same handle instead of reopening by path.
+        long actualSize;
+        var timeOnHandle = false;
         if (current.DirectSession is not null)
         {
             var flushStarted = Stopwatch.GetTimestamp();
             current.DirectSession.FinalizeLength(current.Entry.Size);
+            timeOnHandle = TrySetTimeOnHandle(() => current.DirectSession.SetLastWriteTimeUtc(current.Entry.LastWriteTimeUtc));
             current.DirectSession.FlushToDisk();
             var flushElapsed = Stopwatch.GetElapsedTime(flushStarted);
             job.Telemetry.RecordFlush(flushElapsed);
             worker.Progress.AddDurableFlush(flushElapsed);
+            actualSize = current.DirectSession.Length();
             current.DirectSession.Dispose();
             current.DirectSession = null;
         }
         else if (current.Stream is not null)
         {
             var flushStarted = Stopwatch.GetTimestamp();
-            current.Stream.Flush(flushToDisk: true);
+            var stream = current.Stream;
+            timeOnHandle = TrySetTimeOnHandle(() => File.SetLastWriteTimeUtc(stream.SafeFileHandle, current.Entry.LastWriteTimeUtc));
+            stream.Flush(flushToDisk: true);
             var flushElapsed = Stopwatch.GetElapsedTime(flushStarted);
             job.Telemetry.RecordFlush(flushElapsed);
             worker.Progress.AddDurableFlush(flushElapsed);
-            current.Stream.Dispose();
+            actualSize = RandomAccess.GetLength(stream.SafeFileHandle);
+            stream.Dispose();
             current.Stream = null;
         }
+        else
+        {
+            actualSize = new FileInfo(current.PartPath).Length;
+        }
 
-        var actualSize = new FileInfo(current.PartPath).Length;
         if (actualSize != current.Entry.Size)
             throw new IOException($"Tamaño físico incorrecto en {current.PartPath}: esperado {current.Entry.Size}, obtenido {actualSize}.");
 
-        ValidateRuntimeDestinationPath(worker.Root, current.Entry.RelativePath);
+        ValidateKnownParentAndName(Path.GetDirectoryName(current.DestinationPath)!, current.DestinationPath);
         var commitStarted = Stopwatch.GetTimestamp();
+        var replacing = worker.ReplaceAllowedPaths.Contains(PathKey(current.Entry.RelativePath));
         AtomicFileCommit.Commit(
             current.PartPath,
             current.DestinationPath,
             current.BackupPath,
-            worker.ReplaceAllowedPaths.Contains(PathKey(current.Entry.RelativePath)));
+            replacing);
         current.Committed = true;
         worker.CompletedFiles.Add(PathKey(current.Entry.RelativePath));
         job.Telemetry.RecordCommit(Stopwatch.GetElapsedTime(commitStarted));
-        File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
+        // A rename keeps the time set on the handle. ReplaceFile and a handle that refused the time get it by path.
+        if (!timeOnHandle || replacing)
+            File.SetLastWriteTimeUtc(current.DestinationPath, current.Entry.LastWriteTimeUtc);
         var recoveryStarted = Stopwatch.GetTimestamp();
         recovery.Append(
             new RecoveryFile(
@@ -1564,6 +1676,19 @@ public static class CopyEngine
             expectedHash);
         job.Telemetry.RecordRecovery(Stopwatch.GetElapsedTime(recoveryStarted));
         worker.Progress.MarkDone();
+    }
+
+    private static bool TrySetTimeOnHandle(Action set)
+    {
+        try
+        {
+            set();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false; // set by path after the commit, as before
+        }
     }
 
     private static async Task VerifyDestinationsAsync(
@@ -1586,6 +1711,9 @@ public static class CopyEngine
                 progress[slot].SetPhase(DestinationPhase.Verifying);
         }
 
+        // One pinned 8 MiB workspace for the whole pass: files are verified one at a time, so allocating it per
+        // file only churned the pinned heap (100k small files = 100k pinned 8 MiB arrays and gen2 collections).
+        var workspaceBuffer = new VerificationWorkspaceBuffer();
         foreach (var entry in copy.Files)
         {
             job.Token.ThrowIfCancellationRequested();
@@ -1642,7 +1770,7 @@ public static class CopyEngine
                 if (targets.Count <= 1)
                     continue;
 
-                using var workspace = new VerificationWorkspace(targets);
+                using var workspace = new VerificationWorkspace(targets, workspaceBuffer);
                 var perStreamBytes = workspace.PerStreamBytes;
                 for (var index = 0; index < targets.Count; index++)
                 {
@@ -1832,6 +1960,19 @@ public static class CopyEngine
         return remainder == 0 ? value : checked(value + alignment - remainder);
     }
 
+    /// <summary>The pinned array behind every <see cref="VerificationWorkspace"/> of one verify pass.</summary>
+    private sealed class VerificationWorkspaceBuffer
+    {
+        private byte[]? _array;
+
+        internal byte[] Rent(int bytes)
+        {
+            if (_array is null || _array.Length < bytes)
+                _array = GC.AllocateUninitializedArray<byte>(bytes, pinned: true);
+            return _array;
+        }
+    }
+
     private sealed class VerificationWorkspace : IDisposable
     {
         private readonly byte[] _buffer;
@@ -1839,8 +1980,9 @@ public static class CopyEngine
         private readonly int _streamCount;
         private int _disposed;
 
-        internal VerificationWorkspace(IReadOnlyList<CoordinatedVerifyTarget> targets)
+        internal VerificationWorkspace(IReadOnlyList<CoordinatedVerifyTarget> targets, VerificationWorkspaceBuffer storage)
         {
+            ArgumentNullException.ThrowIfNull(storage);
             ArgumentNullException.ThrowIfNull(targets);
             if (targets.Count <= 1)
                 throw new ArgumentOutOfRangeException(nameof(targets));
@@ -1854,7 +1996,7 @@ public static class CopyEngine
                 throw new IOException("Demasiados destinos para el workspace fijo de verificación.");
 
             _streamCount = targets.Count;
-            _buffer = GC.AllocateUninitializedArray<byte>(checked(VerificationWorkspaceBytes + alignment), pinned: true);
+            _buffer = storage.Rent(checked(VerificationWorkspaceBytes + alignment));
             var rawPointer = Marshal.UnsafeAddrOfPinnedArrayElement(_buffer, 0).ToInt64();
             var remainder = rawPointer % alignment;
             var alignedPointer = remainder == 0 ? rawPointer : checked(rawPointer + alignment - remainder);
@@ -1994,6 +2136,13 @@ public static class CopyEngine
             }
         }
         return masks;
+    }
+
+    private static bool HasTransientFiles(string destinationRoot)
+    {
+        var tmp = Path.Combine(StateLayout.StateDirectoryFor(destinationRoot), "tmp");
+        try { return Directory.Exists(tmp) && Directory.EnumerateFileSystemEntries(tmp).Any(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
     }
 
     private static bool[][] CreateEmptySkipMasks(int files, int destinations) =>
@@ -2384,6 +2533,10 @@ public static class CopyEngine
     private sealed class DestinationWorker
     {
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
+        // Folders whose whole path was validated (and created) for an earlier file of this copy.
+        public HashSet<string> ValidatedDirectories { get; } = new(StringComparer.OrdinalIgnoreCase);
+        // This destination's state temp folder, prepared on the first file.
+        public string? TempDirectory { get; set; }
         // Destination files that existed when the copy was prepared and the user allowed to replace.
         public HashSet<string> ReplaceAllowedPaths { get; } = new(StringComparer.Ordinal);
         private int _active = 1;

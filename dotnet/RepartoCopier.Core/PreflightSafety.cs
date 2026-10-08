@@ -169,39 +169,40 @@ internal static class PreflightSafety
         {
             token.ThrowIfCancellationRequested();
             var directory = pending.Pop();
+            // Type and attributes come with the directory listing itself; a file then costs one metadata query
+            // (instead of three) for its exact size and time. Directory entries of hard-linked files can lag
+            // behind the file, so size and time are not taken from the listing. Only entries carrying the
+            // reparse attribute cost one more lookup (their tag).
             foreach (var entry in EnumerateDirectoryEntries(directory))
             {
                 token.ThrowIfCancellationRequested();
-                FileAttributes attributes;
-                try
-                {
-                    attributes = File.GetAttributes(entry);
-                }
-                catch (Exception ex)
-                {
-                    throw new IOException($"No se pudo inspeccionar {entry}: {ex.Message}", ex);
-                }
-
-                if (WindowsPath.IsLink(entry, attributes))
+                if (WindowsPath.IsLink(entry.FullName, entry.Attributes))
                     throw new IOException(
-                        $"No se permite copiar un symlink, junction o acceso directo de aplicación: {entry}");
+                        $"No se permite copiar un symlink, junction o acceso directo de aplicación: {entry.FullName}");
 
-                if ((attributes & FileAttributes.Directory) != 0)
+                if (entry is DirectoryInfo)
                 {
-                    directories.Add(Path.GetRelativePath(sourceRoot, entry));
-                    pending.Push(entry);
+                    directories.Add(Path.GetRelativePath(sourceRoot, entry.FullName));
+                    pending.Push(entry.FullName);
                     continue;
                 }
 
-                if (!File.Exists(entry))
-                    throw new IOException($"Entrada de origen no soportada: {entry}");
-
-                var info = new FileInfo(entry);
+                var file = (FileInfo)entry;
+                try
+                {
+                    file.Refresh();
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException($"No se pudo inspeccionar {file.FullName}: {ex.Message}", ex);
+                }
+                if (!file.Exists)
+                    throw new IOException($"Entrada de origen no soportada: {file.FullName}");
                 files.Add(new ScannedFile(
-                    entry,
-                    Path.GetRelativePath(sourceRoot, entry),
-                    info.Length,
-                    info.LastWriteTimeUtc));
+                    file.FullName,
+                    Path.GetRelativePath(sourceRoot, file.FullName),
+                    file.Length,
+                    file.LastWriteTimeUtc));
             }
         }
 
@@ -211,12 +212,12 @@ internal static class PreflightSafety
         return new SourceTreeScan(files, directories);
     }
 
-    private static IEnumerable<string> EnumerateDirectoryEntries(string directory)
+    private static IEnumerable<FileSystemInfo> EnumerateDirectoryEntries(string directory)
     {
-        IEnumerator<string> enumerator;
+        IEnumerator<FileSystemInfo> enumerator;
         try
         {
-            enumerator = Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+            enumerator = new DirectoryInfo(directory).EnumerateFileSystemInfos().GetEnumerator();
         }
         catch (Exception ex)
         {
@@ -321,11 +322,24 @@ internal static class PreflightSafety
     internal static bool MatchesMetadata(string destination, long sourceSize, DateTime sourceLastWriteTimeUtc,
         TimeSpan tolerance = default)
     {
-        WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
+        // One metadata query: existence, type, size and time arrive together.
         var info = new FileInfo(destination);
-        return info.Exists && info.Length == sourceSize &&
-               (info.LastWriteTimeUtc - sourceLastWriteTimeUtc).Duration() <= tolerance;
+        if (!info.Exists)
+        {
+            if (Directory.Exists(destination))
+                throw new IOException($"El archivo de destino no es un archivo regular seguro: {destination}");
+            return false;
+        }
+        if (WindowsPath.IsLink(destination, info.Attributes))
+            throw new IOException($"El archivo de destino es un enlace/junction/reparse point: {destination}");
+        return MatchesMetadata(info, sourceSize, sourceLastWriteTimeUtc, tolerance);
     }
+
+    /// <summary><see cref="MatchesMetadata(string, long, DateTime, TimeSpan)"/> for a file already listed and
+    /// checked by a <see cref="DestinationIndex"/>.</summary>
+    internal static bool MatchesMetadata(FileInfo existing, long sourceSize, DateTime sourceLastWriteTimeUtc,
+        TimeSpan tolerance) =>
+        existing.Length == sourceSize && (existing.LastWriteTimeUtc - sourceLastWriteTimeUtc).Duration() <= tolerance;
 
     /// <summary>Write-time precision of a file system: 2 s on FAT, 10 ms on exFAT, exact elsewhere
     /// (NTFS and ReFS keep 100 ns, the same unit as the source). This is what robocopy /FFT allows.</summary>
@@ -386,43 +400,10 @@ internal static class PreflightSafety
 
     internal static void ValidateDestinationLayout(
         string destinationRoot,
-        IEnumerable<string> directories,
+        IReadOnlyList<string> directories,
         IEnumerable<ScannedFile> files,
-        CancellationToken token = default)
-    {
-        foreach (var relative in directories)
-        {
-            token.ThrowIfCancellationRequested();
-            var target = Path.Combine(destinationRoot, relative);
-            if (File.Exists(target))
-                throw new IOException(
-                    $"Conflicto en {target}: el origen requiere una carpeta, pero el destino contiene un archivo.");
-            if (Directory.Exists(target) && WindowsPath.IsLink(target))
-                throw new IOException($"La carpeta de destino es un reparse point: {target}");
-        }
-
-        foreach (var file in files)
-        {
-            token.ThrowIfCancellationRequested();
-            var current = destinationRoot;
-            var parts = file.RelativePath.Split(
-                Path.DirectorySeparatorChar,
-                StringSplitOptions.RemoveEmptyEntries);
-            for (var index = 0; index < parts.Length; index++)
-            {
-                current = Path.Combine(current, parts[index]);
-                if (!File.Exists(current) && !Directory.Exists(current))
-                    continue;
-                if (WindowsPath.IsLink(current))
-                    throw new IOException($"La ruta de destino contiene un reparse point: {current}");
-                if (index < parts.Length - 1 && !Directory.Exists(current))
-                    throw new IOException($"Componente de destino ya no es carpeta: {current}");
-                if (index == parts.Length - 1 && Directory.Exists(current))
-                    throw new IOException(
-                        $"Conflicto en {current}: el origen requiere un archivo, pero el destino contiene una carpeta.");
-            }
-        }
-    }
+        CancellationToken token = default) =>
+        DestinationIndex.Build(destinationRoot, directories, token).ValidateFiles(files, token);
 
     internal static void EnsureFreeSpace(
         string destinationRoot,
@@ -438,7 +419,8 @@ internal static class PreflightSafety
         string destinationRoot,
         IReadOnlyList<ScannedFile> files,
         IReadOnlySet<string>? skippedRelativePaths = null,
-        CancellationToken token = default)
+        CancellationToken token = default,
+        DestinationIndex? index = null)
     {
 
         var volume = WindowsNative.GetVolumeMetrics(destinationRoot);
@@ -454,7 +436,13 @@ internal static class PreflightSafety
                 continue;
             var destination = Path.Combine(destinationRoot, file.RelativePath);
             ulong oldAllocation = 0;
-            if (File.Exists(destination))
+            if (index is not null)
+            {
+                // Already listed and validated: no per-file probing.
+                if (index.ExistingFile(file.RelativePath) is { } existing)
+                    oldAllocation = RoundUp((ulong)existing.Length, granularity);
+            }
+            else if (File.Exists(destination))
             {
                 WindowsPath.EnsureRegularFile(destination, "El archivo de destino");
                 oldAllocation = RoundUp((ulong)new FileInfo(destination).Length, granularity);
@@ -591,6 +579,95 @@ internal static class PreflightSafety
 
     private static ulong SaturatingAdd(ulong left, ulong right) =>
         ulong.MaxValue - left < right ? ulong.MaxValue : left + right;
+}
+
+/// <summary>
+/// What a destination already holds under the folders a copy touches, read with one directory listing per
+/// folder instead of several existence and attribute queries per file. A listed folder that is a file or a
+/// link is reported before anything below it is read, so a junction is never followed.
+/// </summary>
+internal sealed class DestinationIndex
+{
+    private readonly string _root;
+    private readonly Dictionary<string, FileSystemInfo> _entries = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _refreshed = new(StringComparer.OrdinalIgnoreCase);
+
+    private DestinationIndex(string root) => _root = root;
+
+    internal static DestinationIndex Build(string root, IReadOnlyList<string> directories, CancellationToken token)
+    {
+        var index = new DestinationIndex(root);
+        if (!Directory.Exists(root))
+            return index;
+        index.List(string.Empty);
+        // Sorted so a folder is always validated before its children are listed.
+        foreach (var relative in directories.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            token.ThrowIfCancellationRequested();
+            var target = Path.Combine(root, relative);
+            if (!index._entries.TryGetValue(relative, out var entry))
+                continue; // missing: nothing below it exists either
+            if (entry is not DirectoryInfo)
+                throw new IOException(
+                    $"Conflicto en {target}: el origen requiere una carpeta, pero el destino contiene un archivo.");
+            if (WindowsPath.IsLink(entry.FullName, entry.Attributes))
+                throw new IOException($"La carpeta de destino es un reparse point: {target}");
+            index.List(relative);
+        }
+        return index;
+    }
+
+    internal void ValidateFiles(IEnumerable<ScannedFile> files, CancellationToken token)
+    {
+        foreach (var file in files)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!_entries.TryGetValue(file.RelativePath, out var entry))
+                continue;
+            var current = Path.Combine(_root, file.RelativePath);
+            if (WindowsPath.IsLink(entry.FullName, entry.Attributes))
+                throw new IOException($"La ruta de destino contiene un reparse point: {current}");
+            if (entry is DirectoryInfo)
+                throw new IOException(
+                    $"Conflicto en {current}: el origen requiere un archivo, pero el destino contiene una carpeta.");
+        }
+    }
+
+    /// <summary>The existing regular file at <paramref name="relative"/> with exact, current size and time,
+    /// or null. Directory listings of hard-linked files can lag, so a hit is re-read once.</summary>
+    internal FileInfo? ExistingFile(string relative)
+    {
+        if (!_entries.TryGetValue(relative, out var entry) || entry is not FileInfo file)
+            return null;
+        if (_refreshed.Add(relative))
+        {
+            file.Refresh();
+            if (!file.Exists)
+            {
+                _entries.Remove(relative);
+                return null;
+            }
+        }
+        return file;
+    }
+
+    private void List(string relative)
+    {
+        var directory = relative.Length == 0 ? _root : Path.Combine(_root, relative);
+        try
+        {
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+                _entries[relative.Length == 0 ? entry.Name : Path.Combine(relative, entry.Name)] = entry;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // Removed between listings: treated as missing, like the per-path checks did.
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException($"No se pudo enumerar {directory}: {ex.Message}", ex);
+        }
+    }
 }
 
 internal static class WindowsNative

@@ -3,9 +3,9 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
-    <Version>2.2.1</Version>
-    <AssemblyVersion>2.2.1.0</AssemblyVersion>
-    <FileVersion>2.2.1.0</FileVersion>
+    <Version>2.2.2</Version>
+    <AssemblyVersion>2.2.2.0</AssemblyVersion>
+    <FileVersion>2.2.2.0</FileVersion>
     <RootNamespace>RepartoCopier.WinUI</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AppLogo.ico</ApplicationIcon>
@@ -18,9 +18,16 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <SatelliteResourceLanguages>en;es</SatelliteResourceLanguages>
-    <!-- Portable folder, not a self-extracting single file: WinUI needs its .pri/.xbf on disk, so a single
-         file would unpack ~200 MB into %TEMP% on every new version. ReadyToRun precompiles for a faster start. -->
+    <!-- One portable executable with nothing beside it. WinUI needs its .pri/.xbf files on disk, so the bundle
+         extracts itself once per version under %TEMP%\.net; the app removes older versions' extractions on start
+         (ExtractionCleanup). Compression roughly halves the download; ReadyToRun keeps startup fast; symbols are
+         embedded so no .pdb ships next to the .exe. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <PublishReadyToRun>true</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>14.0</LangVersion>
