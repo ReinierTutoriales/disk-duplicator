@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes a GitHub release for a version tag (vX.Y.Z) pushed on an already validated commit.
+# Publishes a GitHub release for a version tag (vX.Y.Z) pushed on an already validated commit:
+# one self-contained executable, zipped, with its checksum and build provenance.
 # The binary is built from the tagged commit itself, so its embedded revision is the tag's commit,
 # and nothing is committed back to main.
 on:
@@ -49,22 +50,27 @@ jobs:
       - name: Restore WinUI x64
         run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
 
-      - name: Publish portable self-contained win-x64
+      - name: Publish single-file self-contained win-x64
         run: dotnet publish dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --self-contained true --no-restore -o artifact/RepartoCopier -p:SourceRevisionId=${{ github.sha }}
 
       - name: Verify version and embedded revision
         shell: pwsh
         run: |
-          $dll = 'artifact/RepartoCopier/RepartoCopier.WinUI.dll'
-          if (-not (Test-Path 'artifact/RepartoCopier/RepartoCopier.WinUI.exe')) { throw 'Published executable missing.' }
-          if (-not (Test-Path $dll)) { throw 'Published assembly missing.' }
-          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $dll))
-          if ($info.FileVersion -ne '${{ steps.meta.outputs.version }}.0') { throw "Unexpected file version: $($info.FileVersion)" }
-          if (-not $info.ProductVersion.EndsWith('+${{ github.sha }}', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Unexpected product version: $($info.ProductVersion)"
+          $published = @(Get-ChildItem 'artifact/RepartoCopier' -Recurse -File)
+          if ($published.Count -ne 1 -or $published[0].Name -ne 'RepartoCopier.WinUI.exe') {
+            throw "Publish must contain only RepartoCopier.WinUI.exe: $($published.Name -join ', ')"
+          }
+          $assemblies = @(Get-ChildItem 'dotnet/RepartoCopier.WinUI/bin/Release' -Recurse -Filter 'RepartoCopier.WinUI.dll')
+          if ($assemblies.Count -eq 0) { throw 'Built WinUI assembly not found.' }
+          foreach ($assembly in $assemblies) {
+            $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($assembly.FullName)
+            if ($info.FileVersion -ne '${{ steps.meta.outputs.version }}.0') { throw "Unexpected file version: $($info.FileVersion)" }
+            if (-not $info.ProductVersion.EndsWith('+${{ github.sha }}', [StringComparison]::OrdinalIgnoreCase)) {
+              throw "Unexpected product version: $($info.ProductVersion)"
+            }
           }
 
-      - name: Smoke-test the portable folder
+      - name: Smoke-test the executable
         shell: pwsh
         run: |
           $app = Start-Process -FilePath 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' -PassThru
@@ -89,7 +95,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $zip = 'RepartoCopier-v${{ steps.meta.outputs.version }}-win-x64.zip'
-          Compress-Archive -Path 'artifact/RepartoCopier/*' -DestinationPath $zip -CompressionLevel Optimal
+          Compress-Archive -Path 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' -DestinationPath $zip -CompressionLevel Optimal
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $zip" | Set-Content SHA256SUMS.txt -Encoding ascii
           "zip=$zip" >> $env:GITHUB_OUTPUT

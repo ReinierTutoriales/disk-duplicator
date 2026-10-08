@@ -107,7 +107,12 @@ jobs:
           $smokeDirectory = Join-Path $env:RUNNER_TEMP "RepartoCopier-smoke-$env:GITHUB_RUN_ID"
           New-Item -ItemType Directory -Path $smokeDirectory -Force | Out-Null
           $smokeExe = Join-Path $smokeDirectory 'RepartoCopier.WinUI.exe'
-          Copy-Item 'artifact/RepartoCopier/*' $smokeDirectory -Recurse
+          # The release is one executable with nothing beside it: publish must produce exactly that file.
+          $published = @(Get-ChildItem 'artifact/RepartoCopier' -Recurse -File)
+          if ($published.Count -ne 1 -or $published[0].Name -ne 'RepartoCopier.WinUI.exe') {
+            throw "Publish must contain only RepartoCopier.WinUI.exe: $($published.Name -join ', ')"
+          }
+          Copy-Item 'artifact/RepartoCopier/RepartoCopier.WinUI.exe' $smokeExe
           $appProcess = $null
           try {
             $appProcess = Start-Process -FilePath $smokeExe -WorkingDirectory $smokeDirectory -PassThru
@@ -123,7 +128,6 @@ jobs:
             if (-not $appProcess.CloseMainWindow()) { throw 'Standalone app did not accept a normal close request.' }
             if (-not $appProcess.WaitForExit(10000)) { throw 'Standalone app did not finish normal close.' }
             if ($appProcess.ExitCode -ne 0) { throw "Standalone app failed on close: $($appProcess.ExitCode)" }
-            if (Test-Path (Join-Path $env:TEMP '.net/RepartoCopier.WinUI')) { throw 'The portable build must not self-extract into %TEMP%.' }
           }
           finally {
             if ($null -ne $appProcess -and -not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
@@ -203,6 +207,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: RepartoCopier-main-win-x64
-          path: artifact/RepartoCopier/
+          path: artifact/RepartoCopier/RepartoCopier.WinUI.exe
           if-no-files-found: error
           retention-days: 14
