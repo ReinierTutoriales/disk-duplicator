@@ -164,22 +164,22 @@ public static class CopyEngine
 
     /// <summary>
     /// Independent readers (one per destination, each with its own pool) are used only when the source can
-    /// serve several sequential streams at once: a local NVMe/SATA SSD with 2-16 destinations. Measured on real
+    /// serve several sequential streams at once: a local NVMe SSD with 2-16 destinations. Measured on real
     /// hardware, fast destinations then finish at their own speed instead of waiting for the slowest one.
-    /// A rotational, USB, network or unidentified source delivers one stream at its full rate; splitting it
-    /// between N readers gives each destination 1/N of it (HDD at 108 MB/s to three NVMe: ~35 MB/s each),
-    /// so those sources use the single shared reader and every destination gets the source's full speed.
+    /// Any other source (SATA SSD or HDD, USB, network, unidentified) has a total read rate that N readers
+    /// split between them (USB HDD at 108 MB/s to three NVMe: ~35 MB/s each; a ~550 MB/s SATA SSD would give
+    /// ~180 MB/s each), so it uses the single shared reader and every destination gets the source's full rate.
     /// </summary>
     internal static bool UseIndependentSourceReads(CopyOptions options, StorageDeviceInfo source, int destinations) =>
         options.IndependentSourceReads &&
         destinations is >= 2 and <= MaximumIndependentReaders &&
         IsParallelReadSource(source);
 
-    /// <summary>Only a local NVMe/SATA SSD serves concurrent sequential streams without dividing its rate.</summary>
+    /// <summary>Only a local NVMe SSD has read bandwidth to spare for several concurrent sequential streams.</summary>
     internal static bool IsParallelReadSource(StorageDeviceInfo source) =>
         !source.IsNetwork &&
         source.MediaKind == StorageMediaKind.SolidState &&
-        source.BusType is "NVMe" or "SATA";
+        source.BusType == "NVMe";
 
     internal static int IndependentPoolCapacity(int destinations)
     {

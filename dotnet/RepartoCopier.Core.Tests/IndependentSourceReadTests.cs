@@ -120,13 +120,12 @@ public sealed class IndependentSourceReadTests
         Assert.IsTrue(options.IndependentSourceReads, "Independent reads stay the default where they apply.");
         Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options, nvme, 2));
         Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options, nvme, 16));
-        Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options,
-            Device("D:\\", 1, "SATA", StorageMediaKind.SolidState), 3));
 
         // Single-stream sources and out-of-range destination counts use the shared reader, never an error.
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options with { IndependentSourceReads = false }, nvme, 2));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme, 1));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme, 17));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("D:\\", 1, "SATA", StorageMediaKind.SolidState), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("E:\\", 2, "SATA", StorageMediaKind.Rotational), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("F:\\", 3, "USB", StorageMediaKind.Rotational), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("G:\\", 4, "USB", StorageMediaKind.SolidState), 3));
