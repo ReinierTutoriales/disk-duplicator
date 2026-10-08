@@ -14,10 +14,7 @@ public static class AtomicStorage
             WindowsPath.EnsureRegularFile(path, label);
 
         var token = $"{Environment.ProcessId}.{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}.{Guid.NewGuid():N}";
-        var fileName = Path.GetFileName(path);
-        var tmp = Path.Combine(parent, $".{fileName}.{token}.tmp");
-        var backup = Path.Combine(parent, $".{fileName}.{token}.bak");
-        var preserveBackup = false;
+        var tmp = Path.Combine(parent, $".{Path.GetFileName(path)}.{token}.tmp");
 
         try
         {
@@ -33,45 +30,22 @@ public static class AtomicStorage
                 stream.Flush(flushToDisk: true);
             }
 
-            var hadOld = File.Exists(path);
-            if (hadOld)
-            {
+            if (File.Exists(path))
                 WindowsPath.EnsureRegularFile(path, label);
-                File.Move(path, backup);
-            }
-
             try
             {
-                File.Move(tmp, path);
-                if (hadOld)
-                    TryDelete(backup);
+                // One MoveFileEx(REPLACE_EXISTING) on the same volume: the old or the new file is always in
+                // place, never neither, even if the process ends between steps.
+                File.Move(tmp, path, overwrite: true);
             }
             catch (Exception commitError)
             {
-                if (!hadOld)
-                    throw new IOException($"No se pudo finalizar {label}: {commitError.Message}", commitError);
-
-                try
-                {
-                    File.Move(backup, path);
-                    throw new IOException(
-                        $"No se pudo reemplazar {label}: {commitError.Message}; se restauró la versión anterior",
-                        commitError);
-                }
-                catch (IOException restoreError) when (File.Exists(backup))
-                {
-                    preserveBackup = true;
-                    throw new IOException(
-                        $"CRÍTICO: no se pudo reemplazar {label}: {commitError.Message}; tampoco restaurar {backup}: {restoreError.Message}",
-                        new AggregateException(commitError, restoreError));
-                }
+                throw new IOException($"No se pudo guardar {label}: {commitError.Message}", commitError);
             }
         }
         finally
         {
             TryDelete(tmp);
-            if (!preserveBackup && File.Exists(path))
-                TryDelete(backup);
         }
     }
 

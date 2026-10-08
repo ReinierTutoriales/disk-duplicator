@@ -1,5 +1,23 @@
 # Changelog
 
+## Sin publicar — correcciones de la auditoría de v2.2.1
+
+- Archivos de OneDrive, comprimidos con `compact`/CompactOS y deduplicados: ya no se rechazan como «reparse point». Solo se rechazan los enlaces reales (symlink, junction, punto de montaje, alias de aplicación).
+- FAT32/exFAT: la omisión por tamaño y fecha tolera la precisión del sistema de archivos del destino (2 s en FAT, 10 ms en exFAT, exacta en NTFS/ReFS), como robocopy `/FFT`; antes, una memoria USB se recopiaba entera cada vez.
+- FAT32: un archivo de 4 GiB o más se rechaza antes de copiar, con un mensaje claro, en lugar de fallar a mitad de la copia.
+- Espacio libre: el disco de Windows conserva su reserva (1 %, 1–16 GiB); los demás discos solo 0,1 % (64 MiB–1 GiB), así una memoria USB se puede llenar.
+- «Continuar si falla un archivo»: un archivo de origen bloqueado o ilegible es un error de ese archivo, no de toda la copia. Un origen que cambia durante la lectura o una unidad de origen que desaparece siguen deteniendo todo.
+- Un destino que falló conserva su error al cancelar (antes pasaba a «Cancelado»); cancelar ya no suma errores de archivo falsos.
+- Rutas de más de 260 caracteres conservan la E/S directa sin depender de la directiva de rutas largas de Windows.
+- Un volumen montado en una carpeta se identifica como su propio disco.
+- Una preparación fallida o cancelada no deja carpetas destino vacías. Los ajustes se guardan con un único reemplazo atómico.
+- «Apagar al terminar» funciona sin nadie delante: cuenta atrás de 60 s que se puede cancelar.
+- Windows 11: progreso en la barra de tareas (normal, en pausa, error), notificación al terminar si la ventana no está en primer plano, icono de la app en Alt+Tab, botones de la barra de título con el color del tema (y colores del sistema en alto contraste), los diálogos siguen un cambio de tema y se centran aunque la ventana esté minimizada.
+- Accesibilidad: nombres para Narrador en Pausar/Continuar, Cancelar, Detalles, Nueva copia, la barra de progreso y cada botón «Quitar destino»; el resultado final se anuncia.
+- Menos trabajo por refresco: textos solo se actualizan si cambian, el detalle de cada tarjeta cada 2 s, la velocidad de verificación sin crear un diagnóstico completo, el diálogo de resultados interpreta su plantilla una sola vez y agregar destinos ya no reconstruye la lista.
+- Distribución: carpeta portable con ReadyToRun en lugar de un ejecutable que se autoextraía (~200 MB por versión) en %TEMP%. Windows App SDK 2.5.1, MSTest 4.5.1, `global.json`, manifiesto con DPI por monitor y montón segmentado, registro de fallos en `%LOCALAPPDATA%\RepartoCopier\errores.log`.
+- Publicación: flujo permanente por etiqueta `vX.Y.Z` que compila el commit etiquetado, comprueba versión y revisión, prueba el arranque, adjunta la atestación de procedencia y no escribe en `main`.
+
 ## v2.2.1 — motor adaptativo por origen, interfaz Windows 11 y diálogos con tema
 
 - Motor: el modo de lectura se elige por el origen. SSD NVMe local con 2–16 destinos → lectores independientes en paralelo. SSD o HDD SATA, USB, red o desconocido → un lector compartido que lee el origen una vez para todos los destinos, con el bloque siguiente ya en lectura mientras se hashea y entrega el actual (como máximo una lectura en curso). Medido en hardware real: leer un HDD USB por turnos para 3 NVMe daba ~35 MB/s por destino (el HDD a 108 MB/s repartido entre 3); el lector compartido entrega la velocidad completa del HDD a cada uno. Se elimina la lectura por turnos.

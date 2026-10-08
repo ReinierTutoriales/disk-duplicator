@@ -6,9 +6,27 @@ namespace RepartoCopier.WinUI;
 
 public partial class App : Application
 {
-    public static MainWindow? MainWindow { get; private set; }
+    public App()
+    {
+        InitializeComponent();
+        // A crash leaves a trace the user can send: the window itself has no console.
+        UnhandledException += (_, args) => WriteCrashLog(args.Exception);
+    }
 
-    public App() => InitializeComponent();
+    internal static void WriteCrashLog(Exception error)
+    {
+        try
+        {
+            var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RepartoCopier");
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(Path.Combine(folder, "errores.log"),
+                $"{DateTimeOffset.Now:O} {BuildInfo.InformationalVersion(typeof(App).Assembly)}{Environment.NewLine}{error}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging must never turn into a second failure.
+        }
+    }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -35,22 +53,30 @@ public partial class App : Application
             catch (Exception ex)
             {
                 status = 1;
-                Console.Error.WriteLine(ex);
+                // A WinExe has no console: keep the reason next to the requested report.
+                try
+                {
+                    var report = commandLine.Length > 3 ? commandLine[3] : null;
+                    if (report is not null) await File.WriteAllTextAsync(report + ".error.txt", ex.ToString());
+                }
+                catch { }
+                WriteCrashLog(ex);
             }
             Environment.Exit(status);
             return;
         }
-        MainWindow = new MainWindow();
-        MainWindow.Activate();
+        var window = new MainWindow();
+        window.Activate();
         if (commandLine.Length == 3 && commandLine[1] == "--layout-check")
         {
-            try { await MainWindow.RunLayoutCheckAsync(commandLine[2]); }
+            try { await window.RunLayoutCheckAsync(commandLine[2]); }
             catch (Exception ex)
             {
                 Environment.ExitCode = 1;
-                await File.WriteAllTextAsync(commandLine[2], ex.ToString());
+                try { await File.WriteAllTextAsync(commandLine[2], ex.ToString()); }
+                catch (Exception writeError) { WriteCrashLog(new AggregateException(ex, writeError)); }
             }
-            finally { MainWindow.Close(); }
+            finally { window.Close(); }
         }
     }
 }
