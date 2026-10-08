@@ -72,15 +72,15 @@ internal static class AppDialogs
 
     private static FrameworkElement ResultRow(DestinationSnapshot item, bool verifyRequested)
     {
-        var (glyph, brush) = item.Phase switch
+        var icon = item.Phase switch
         {
-            DestinationPhase.Failed => ("EB90", "SystemFillColorCriticalBrush"),
-            DestinationPhase.Cancelled => ("E711", "SystemFillColorCautionBrush"),
-            _ when item.FilesErrored > 0 => ("E7BA", "SystemFillColorCautionBrush"),
-            _ => ("EC61", "SystemFillColorSuccessBrush"),
+            DestinationPhase.Failed => AppDialogIcon.Error,
+            DestinationPhase.Cancelled => AppDialogIcon.Warning,
+            _ when item.FilesErrored > 0 => AppDialogIcon.Warning,
+            _ => AppDialogIcon.Success,
         };
         // Theme brushes come from XAML; user-controlled text is assigned afterwards, never parsed.
-        var row = (Grid)XamlReader.Load($$"""
+        var row = (Grid)XamlReader.Load("""
             <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                   Padding="12" ColumnSpacing="12" CornerRadius="{ThemeResource ControlCornerRadius}"
@@ -90,8 +90,7 @@ internal static class AppDialogs
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <FontIcon Glyph="&#x{{glyph}};" FontSize="16" VerticalAlignment="Top" Margin="0,2,0,0"
-                          Foreground="{ThemeResource {{brush}}}"/>
+                <Grid x:Name="IconHost" VerticalAlignment="Top" Margin="0,2,0,0"/>
                 <StackPanel Grid.Column="1" Spacing="2">
                     <TextBlock x:Name="Label" Style="{StaticResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis"/>
                     <TextBlock x:Name="Summary" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
@@ -101,6 +100,7 @@ internal static class AppDialogs
                 </StackPanel>
             </Grid>
             """);
+        if (AppDialog.CreateIcon(icon, 16) is { } glyph) ((Grid)row.FindName("IconHost")).Children.Add(glyph);
         var label = (TextBlock)row.FindName("Label");
         label.Text = item.Label;
         ToolTipService.SetToolTip(label, item.Label);

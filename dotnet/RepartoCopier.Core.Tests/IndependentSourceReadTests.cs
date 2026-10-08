@@ -93,23 +93,34 @@ public sealed class IndependentSourceReadTests
         var root = Path.Combine(Path.GetTempPath(), $"RepartoCopier-independent-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         void Cleanup() { try { Directory.Delete(root, recursive: true); } catch { } }
-        var source = Directory.CreateDirectory(Path.Combine(root, "Source")).FullName;
-        var destinations = new[] { "Fast", "Slow" }.Select(name =>
-            Directory.CreateDirectory(Path.Combine(root, name)).FullName).ToArray();
-        await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
-        var plan = CopyPlan.Create(source, destinations, ExistingFilePolicy.ReplaceAll, keepGoing: false);
-        var prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.NonPublic | BindingFlags.Static)!
-            .Invoke(null, [plan, CancellationToken.None])!;
-        var sourceProperty = prepared.GetType().GetProperty("SourceDevice")!;
-        sourceProperty.SetValue(prepared, classify((StorageDeviceInfo)sourceProperty.GetValue(prepared)!));
-        var effective = (string[])prepared.GetType().GetProperty("DestinationRoots")!.GetValue(prepared)!;
-        var progress = effective.Select(path => new DestinationProgress(path, (ulong)payload.Length, 1)).ToArray();
-        var job = new CopyJob(progress);
-        var run = (Task)typeof(CopyEngine).GetMethod("RunAsync", BindingFlags.NonPublic | BindingFlags.Static)!
-            .Invoke(null, [prepared, progress, new CopyOptions(), job])!;
-        job.Attach(run);
-        await job.Completion.WaitAsync(TimeSpan.FromSeconds(120));
-        return (job, destinations, Cleanup);
+        CopyJob? job = null;
+        try
+        {
+            var source = Directory.CreateDirectory(Path.Combine(root, "Source")).FullName;
+            var destinations = new[] { "Fast", "Slow" }.Select(name =>
+                Directory.CreateDirectory(Path.Combine(root, name)).FullName).ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(source, "payload.bin"), payload);
+            var plan = CopyPlan.Create(source, destinations, ExistingFilePolicy.ReplaceAll, keepGoing: false);
+            var prepared = typeof(CopyEngine).GetMethod("Preflight", BindingFlags.NonPublic | BindingFlags.Static)!
+                .Invoke(null, [plan, CancellationToken.None])!;
+            var sourceProperty = prepared.GetType().GetProperty("SourceDevice")!;
+            sourceProperty.SetValue(prepared, classify((StorageDeviceInfo)sourceProperty.GetValue(prepared)!));
+            var effective = (string[])prepared.GetType().GetProperty("DestinationRoots")!.GetValue(prepared)!;
+            var progress = effective.Select(path => new DestinationProgress(path, (ulong)payload.Length, 1)).ToArray();
+            job = new CopyJob(progress);
+            var run = (Task)typeof(CopyEngine).GetMethod("RunAsync", BindingFlags.NonPublic | BindingFlags.Static)!
+                .Invoke(null, [prepared, progress, new CopyOptions(), job])!;
+            job.Attach(run);
+            await job.Completion.WaitAsync(TimeSpan.FromSeconds(120));
+            return (job, destinations, Cleanup);
+        }
+        catch
+        {
+            // A failed or timed-out run must not leave a job running or its temporary files behind.
+            if (job is not null) await job.DisposeAsync();
+            Cleanup();
+            throw;
+        }
     }
 
     [TestMethod]

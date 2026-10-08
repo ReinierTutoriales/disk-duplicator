@@ -52,19 +52,9 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
             _ => (State.Active, "", CautionGlyph),
         };
 
-        if (Progress != progress)
-        {
-            Progress = progress;
-            Raise(nameof(Progress));
-            // The multi-line tooltip only changes with the visible progress text or an error.
-            Detail = BuildDetail(snapshot, progress);
-            Raise(nameof(Detail));
-        }
-        else if (!string.IsNullOrWhiteSpace(snapshot.Error) && !Detail.EndsWith(snapshot.Error, StringComparison.Ordinal))
-        {
-            Detail = BuildDetail(snapshot, progress);
-            Raise(nameof(Detail));
-        }
+        if (Progress != progress) { Progress = progress; Raise(nameof(Progress)); }
+        var detail = BuildDetail(snapshot, progress);
+        if (Detail != detail) { Detail = detail; Raise(nameof(Detail)); }
         if (Math.Abs(Percent - percent) >= 0.1) { Percent = percent; Raise(nameof(Percent)); }
         if (ActiveGlyph != activeGlyph) { ActiveGlyph = activeGlyph; Raise(nameof(ActiveGlyph)); }
         if (CautionGlyph != cautionGlyph) { CautionGlyph = cautionGlyph; Raise(nameof(CautionGlyph)); }

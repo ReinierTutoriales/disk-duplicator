@@ -39,14 +39,12 @@ internal sealed class AppDialog
     private readonly TaskCompletionSource<int> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly int _cancelButton;
     private ElementTheme _theme;
-    private readonly Func<int, bool>? _keepOpen;
     private bool _closing;
 
-    private AppDialog(nint owner, int cancelButton, Func<int, bool>? keepOpen)
+    private AppDialog(nint owner, int cancelButton)
     {
         _owner = owner;
         _cancelButton = cancelButton;
-        _keepOpen = keepOpen;
     }
 
     internal FrameworkElement Root { get; private set; } = null!;
@@ -56,11 +54,11 @@ internal sealed class AppDialog
 
     /// <summary>Shows the dialog and returns the clicked button index, or the cancel index when dismissed.</summary>
     internal static Task<int> ShowAsync(Window owner, AppDialogSpec spec, CancellationToken token,
-        Action<AppDialog>? onShown = null, Func<int, bool>? keepOpen = null)
+        Action<AppDialog>? onShown = null)
     {
         if (token.IsCancellationRequested) return Task.FromResult(spec.CancelButton);
         var ownerHandle = WinRT.Interop.WindowNative.GetWindowHandle(owner);
-        var dialog = new AppDialog(ownerHandle, spec.CancelButton, keepOpen);
+        var dialog = new AppDialog(ownerHandle, spec.CancelButton);
         var theme = (owner.Content as FrameworkElement)?.ActualTheme ?? ElementTheme.Default;
         dialog.Build(spec, theme);
         dialog.Open(owner, spec.WidthDip, onShown);
@@ -137,7 +135,7 @@ internal sealed class AppDialog
         var extra = (ContentPresenter)root.FindName("ExtraHost");
         extra.Content = spec.Extra;
         extra.Visibility = spec.Extra is null ? Visibility.Collapsed : Visibility.Visible;
-        var icon = CreateIcon(spec.Icon);
+        var icon = CreateIcon(spec.Icon, 32);
         if (icon is not null) ((Grid)root.FindName("IconHost")).Children.Add(icon);
 
         // Equal-width buttons, default one in accent, as in a Windows 11 ContentDialog command area.
@@ -159,7 +157,7 @@ internal sealed class AppDialog
             }
             Grid.SetColumn(button, index);
             var result = index;
-            button.Click += (_, _) => OnButton(result);
+            button.Click += (_, _) => Close(result);
             buttons.Children.Add(button);
         }
 
@@ -196,6 +194,8 @@ internal sealed class AppDialog
         };
         _window.Closed += (_, _) =>
         {
+            // Closed without Close() (e.g. the owner was destroyed): later Close() calls must not touch it.
+            _closing = true;
             EnableWindow(_owner, true);
             _result.TrySetResult(_cancelButton);
         };
@@ -214,12 +214,6 @@ internal sealed class AppDialog
         };
         EnableWindow(_owner, false);
         _window.Activate();
-    }
-
-    private void OnButton(int index)
-    {
-        if (_keepOpen?.Invoke(index) == true) return;
-        Close(index);
     }
 
     private static void Place(AppWindow dialog, AppWindow owner, RectInt32 area, int width, int height)
@@ -249,7 +243,8 @@ internal sealed class AppDialog
         catch { }
     }
 
-    private static FrameworkElement? CreateIcon(AppDialogIcon icon)
+    /// <summary>The one mapping of status icons to Segoe Fluent glyphs and theme brushes.</summary>
+    internal static FrameworkElement? CreateIcon(AppDialogIcon icon, double size)
     {
         if (icon == AppDialogIcon.None) return null;
         if (icon == AppDialogIcon.Logo)
@@ -257,6 +252,7 @@ internal sealed class AppDialog
                 <Image xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                        Width="48" Height="48" Source="ms-appx:///Assets/AppLogo.png"/>
                 """);
+        var fontSize = size.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var (glyph, brush) = icon switch
         {
             AppDialogIcon.Warning => ("E7BA", "SystemFillColorCautionBrush"),
@@ -267,7 +263,7 @@ internal sealed class AppDialog
         };
         return (FrameworkElement)XamlReader.Load($$"""
             <FontIcon xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                      Glyph="&#x{{glyph}};" FontSize="32" Foreground="{ThemeResource {{brush}}}"/>
+                      Glyph="&#x{{glyph}};" FontSize="{{fontSize}}" Foreground="{ThemeResource {{brush}}}"/>
             """);
     }
 
