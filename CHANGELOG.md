@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2.3 — estabilidad con discos que fallan, impacto en el sistema y rendimiento por tipo de disco
+
+Enfocado en HDD, SSD y NVMe, internos o en caja USB.
+
+- Desconectar un destino con «Verificar» activado ya no marca como fallidos a los destinos sanos: el diario de recuperación de un destino caído no se puede escribir y eso ya no tumba la copia entera.
+- Errores transitorios (disco ocupado, reinicio breve del puente USB, `ERROR_SEM_TIMEOUT`) se reintentan como máximo 90 s por bloque; después solo falla ese destino. Antes se reintentaban sin límite y un disco moribundo podía detener a todos.
+- Vigilancia de destinos colgados: una escritura o un vaciado que no termina en 120 s marca ese destino como fallido y cancela la operación bloqueada; los demás siguen. Cerrar la ventana dos veces mientras cierra fuerza la salida.
+- Con «Continuar si falla un archivo», un destino desconectado se marca una vez como «no disponible» en lugar de acumular un error por archivo.
+- El renombrado final espera hasta unos 5 s si el antivirus retiene el temporal recién cerrado.
+- Se pueden copiar archivos que otro programa mantiene abiertos para escritura (registros, correo, bases de datos); cualquier cambio durante la lectura sigue detectándose por hash.
+- En carpetas destino cifradas (EFS) o comprimidas (NTFS), los archivos quedan cifrados o comprimidos como la carpeta.
+- Nombres que solo difieren en mayúsculas en un origen sensible a mayúsculas se avisan antes de copiar.
+- Rendimiento: un NVMe de origen con un destino (o más de 16) ya lee el bloque siguiente mientras se calcula el hash del actual; un NVMe cuya sonda de tipo de medio no responde conserva su perfil NVMe; el vaciado y la confirmación de cada archivo respetan el turno del disco (origen y destino en el mismo HDD sin saltos de cabezal); la reserva de espacio usa el volumen real del destino.
+- Sistema: Windows no se suspende durante una copia (visible en `powercfg /requests`; la pantalla sí puede apagarse) y no limita la velocidad del proceso al minimizarlo; ambos se liberan al terminar. Minimizada, la ventana refresca cada 2 s. La memoria del búfer se devuelve al terminar. Se pueden arrastrar desde el Explorador el origen y las carpetas de destino.
+
 ## v2.2.2 — compatibilidad FAT/OneDrive, motor más ágil con archivos pequeños e integración con Windows 11
 
 - Archivos de OneDrive, comprimidos con `compact`/CompactOS y deduplicados: ya no se rechazan como «reparse point». Solo se rechazan los enlaces reales (symlink, junction, punto de montaje, alias de aplicación).
@@ -15,7 +30,7 @@
 - Windows 11: progreso en la barra de tareas (normal, en pausa, error), notificación al terminar si la ventana no está en primer plano, icono de la app en Alt+Tab, botones de la barra de título con el color del tema (y colores del sistema en alto contraste), los diálogos siguen un cambio de tema y se centran aunque la ventana esté minimizada.
 - Accesibilidad: nombres para Narrador en Pausar/Continuar, Cancelar, Detalles, Nueva copia, la barra de progreso y cada botón «Quitar destino»; el resultado final se anuncia.
 - Menos trabajo por refresco: textos solo se actualizan si cambian, el detalle de cada tarjeta cada 2 s, la velocidad de verificación sin crear un diagnóstico completo, el diálogo de resultados interpreta su plantilla una sola vez y agregar destinos ya no reconstruye la lista.
-- Distribución: sigue siendo un único ejecutable sin nada al lado, ahora comprimido (descarga ~50 % menor), precompilado (ReadyToRun) y con símbolos incrustados; al arrancar borra las extracciones de versiones anteriores en %TEMP% que .NET dejaba acumuladas (~200 MB por versión), nunca la de una versión en ejecución. Windows App SDK 2.5.1, MSTest 4.5.1, `global.json`, manifiesto con DPI por monitor y montón segmentado, registro de fallos en `%LOCALAPPDATA%\RepartoCopier\errores.log`.
+- Distribución: sigue siendo un único ejecutable sin nada al lado, ahora comprimido por dentro y precompilado (ReadyToRun): el `.exe` ocupa menos en disco, pero la descarga pesa más que en v2.2.1 (107,6 MB frente a 88,8 MB) porque el código precompilado es mayor y el zip ya no puede comprimirlo más y con símbolos incrustados; al arrancar borra las extracciones de versiones anteriores en %TEMP% que .NET dejaba acumuladas (~200 MB por versión), nunca la de una versión en ejecución. Windows App SDK 2.5.1, MSTest 4.5.1, `global.json`, manifiesto con DPI por monitor y montón segmentado, registro de fallos en `%LOCALAPPDATA%\RepartoCopier\errores.log`.
 - Publicación: flujo permanente por etiqueta `vX.Y.Z` que compila el commit etiquetado, comprueba versión y revisión, prueba el arranque, adjunta la atestación de procedencia y no escribe en `main`.
 - Motor, muchos archivos pequeños:
   - Preparación: el origen se lista una vez por carpeta, con una consulta de metadatos por archivo en lugar de tres. Cada destino se lee con un listado por carpeta que la copia toca, en lugar de dos recorridos de existencia, la validación ruta a ruta y el cálculo de espacio archivo a archivo. La recuperación solo examina la carpeta temporal si contiene algo.

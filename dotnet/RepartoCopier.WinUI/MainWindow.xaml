@@ -115,8 +115,9 @@
                         </Button>
                     </Grid>
 
-                    <!-- Source -->
-                    <Border Style="{StaticResource SurfaceCardStyle}">
+                    <!-- Source (also a drop target for a file or folder from Explorer) -->
+                    <Border x:Name="SourceCard" Style="{StaticResource SurfaceCardStyle}"
+                            AllowDrop="True" DragOver="DropCard_DragOver" Drop="SourceCard_Drop">
                         <StackPanel Spacing="8">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xE8B7;" FontSize="16" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
@@ -144,8 +145,9 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Destinations -->
-                    <Border Style="{StaticResource SurfaceCardStyle}">
+                    <!-- Destinations (folders can be dropped from Explorer) -->
+                    <Border x:Name="DestinationsCard" Style="{StaticResource SurfaceCardStyle}"
+                            AllowDrop="True" DragOver="DropCard_DragOver" Drop="DestinationsCard_Drop">
                         <StackPanel Spacing="8">
                             <Grid ColumnSpacing="8">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

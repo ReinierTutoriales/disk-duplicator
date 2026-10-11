@@ -140,7 +140,10 @@ public sealed class IndependentSourceReadTests
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("E:\\", 2, "SATA", StorageMediaKind.Rotational), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("F:\\", 3, "USB", StorageMediaKind.Rotational), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("G:\\", 4, "USB", StorageMediaKind.SolidState), 3));
-        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("H:\\", 5, "NVMe", StorageMediaKind.Unknown), 3));
+        // An NVMe drive whose seek-penalty query does not answer is still an NVMe SSD; only a rotational
+        // answer would demote it.
+        Assert.IsTrue(CopyEngine.UseIndependentSourceReads(options, Device("H:\\", 5, "NVMe", StorageMediaKind.Unknown), 3));
+        Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, Device("I:\\", 6, "NVMe", StorageMediaKind.Rotational), 3));
         Assert.IsFalse(CopyEngine.UseIndependentSourceReads(options, nvme with { IsNetwork = true }, 3));
     }
 

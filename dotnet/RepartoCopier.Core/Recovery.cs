@@ -65,6 +65,11 @@ internal sealed class RecoveryCheckpointWriter : IDisposable
         {
             FlushCheckpoint();
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The journal is best effort. A destination that was unplugged must fail alone: its last
+            // checkpoint cannot be written, and that must never surface as a failure of the whole job.
+        }
         finally
         {
             _journal?.Dispose();

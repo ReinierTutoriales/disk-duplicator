@@ -44,7 +44,9 @@ public sealed record StorageIoProfile(
         }
         if (device.MediaKind == StorageMediaKind.SolidState && string.Equals(device.BusType, "SATA", StringComparison.OrdinalIgnoreCase))
             return new(StorageProfileKind.SataSsd, 1, SataSsdBacklog);
-        if (device.MediaKind == StorageMediaKind.SolidState && string.Equals(device.BusType, "NVMe", StringComparison.OrdinalIgnoreCase))
+        // NVMe is solid state by definition; the seek-penalty query is optional and some drivers do not
+        // answer it, which must not demote a local NVMe SSD. Rotational was already excluded above.
+        if (string.Equals(device.BusType, "NVMe", StringComparison.OrdinalIgnoreCase))
             return new(StorageProfileKind.Nvme, 1, NvmeBacklog);
         if (string.Equals(device.BusType, "StorageSpaces", StringComparison.OrdinalIgnoreCase))
             return new(StorageProfileKind.StorageSpaces, 1, ConservativeBacklog);
