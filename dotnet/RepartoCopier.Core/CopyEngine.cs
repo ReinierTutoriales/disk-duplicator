@@ -1315,9 +1315,16 @@ public static class CopyEngine
             if (directRequested &&
                 DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, preallocationSize, out directSession))
                 return;
-            stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize, encrypt);
             if (compress)
-                NtfsCompression.TryEnable(stream.SafeFileHandle);
+            {
+                // FSCTL_SET_COMPRESSION needs a synchronous handle and an empty file: set it on creation, then
+                // open the part for the asynchronous writes like any other.
+                using (var created = File.OpenHandle(part, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                    NtfsCompression.TryEnable(created);
+                stream = OpenPartStream(part, FileMode.Open, preallocationSize: 0);
+                return;
+            }
+            stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize, encrypt);
         }
     }
 

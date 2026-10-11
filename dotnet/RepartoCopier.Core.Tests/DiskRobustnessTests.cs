@@ -39,9 +39,24 @@ public sealed class DiskRobustnessTests
         StateLayout.PrepareTempDirectory(root);
         var writer = new RecoveryCheckpointWriter(root);
         writer.Append(new RecoveryFile(Path.Combine(temp.Path, "a.bin"), "a.bin", 1, 0), new byte[32]);
-        // The destination disappears (unplugged) with a checkpoint still pending.
-        Directory.Delete(Path.Combine(temp.Path, "dest"), recursive: true);
+        // The destination disappears (unplugged) with a checkpoint still pending: its manifest can no longer be
+        // flushed. Simulated with a stream that fails like a removed device does.
+        var manifestField = typeof(RecoveryCheckpointWriter).GetField("_manifest",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var real = (FileStream)manifestField.GetValue(writer)!;
+        manifestField.SetValue(writer, new UnpluggedStream(Path.Combine(temp.Path, "unplugged.bin")));
+        real.Dispose();
+
         writer.Dispose();
+    }
+
+    private sealed class UnpluggedStream(string path) : FileStream(path, FileMode.Create)
+    {
+        public override void Flush(bool flushToDisk)
+        {
+            if (flushToDisk)
+                throw new IOException("El dispositivo no está conectado.", unchecked((int)0x8007048F));
+        }
     }
 
     [TestMethod]
