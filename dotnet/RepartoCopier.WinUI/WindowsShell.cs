@@ -124,3 +124,128 @@ internal sealed class CompletionNotifier(Window window)
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint GetForegroundWindow();
 }
+
+/// <summary>
+/// Held for the duration of one copy. It keeps Windows from sleeping on its idle timer (the display may still
+/// turn off; closing a laptop lid still sleeps) and visible in <c>powercfg /requests</c> with its reason. It also
+/// asks Windows not to slow the process down while it runs minimized: on hybrid CPUs EcoQoS would move the
+/// BLAKE3 hashing of a fast NVMe copy to efficiency cores. Disposing restores both. Every call is best effort.
+/// </summary>
+internal sealed class CopyPowerRequest : IDisposable
+{
+    private IntPtr _request;
+    private bool _throttlingOverridden;
+
+    private CopyPowerRequest() { }
+
+    internal static CopyPowerRequest Begin()
+    {
+        var power = new CopyPowerRequest();
+        try
+        {
+            var reason = new ReasonContext
+            {
+                Version = 0, // POWER_REQUEST_CONTEXT_VERSION
+                Flags = 0x1, // POWER_REQUEST_CONTEXT_SIMPLE_STRING
+                SimpleReasonString = "RepartoCopier está copiando archivos",
+            };
+            var request = PowerCreateRequest(ref reason);
+            if (request != IntPtr.Zero && request != new IntPtr(-1))
+            {
+                if (PowerSetRequest(request, PowerRequestSystemRequired))
+                    power._request = request;
+                else
+                    CloseHandle(request);
+            }
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { }
+
+        power._throttlingOverridden = SetExecutionSpeedThrottling(controlled: true);
+        return power;
+    }
+
+    public void Dispose()
+    {
+        var request = Interlocked.Exchange(ref _request, IntPtr.Zero);
+        if (request != IntPtr.Zero)
+        {
+            PowerClearRequest(request, PowerRequestSystemRequired);
+            CloseHandle(request);
+        }
+        if (_throttlingOverridden)
+        {
+            SetExecutionSpeedThrottling(controlled: false);
+            _throttlingOverridden = false;
+        }
+    }
+
+    // controlled = true opts out of execution-speed throttling (EcoQoS); false hands the decision back to Windows.
+    private static bool SetExecutionSpeedThrottling(bool controlled)
+    {
+        try
+        {
+            var state = new PowerThrottlingState
+            {
+                Version = 1, // PROCESS_POWER_THROTTLING_CURRENT_VERSION
+                ControlMask = controlled ? 0x1u : 0u, // PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                StateMask = 0,
+            };
+            return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, ref state,
+                (uint)Marshal.SizeOf<PowerThrottlingState>());
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private const int PowerRequestSystemRequired = 1;
+    private const int ProcessPowerThrottling = 4;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ReasonContext
+    {
+        public uint Version;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.LPWStr)] public string SimpleReasonString;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PowerThrottlingState
+    {
+        public uint Version;
+        public uint ControlMask;
+        public uint StateMask;
+    }
+
+#pragma warning disable SYSLIB1054 // A few one-shot calls per copy; DllImport keeps them readable.
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr PowerCreateRequest(ref ReasonContext context);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PowerSetRequest(IntPtr request, int requestType);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PowerClearRequest(IntPtr request, int requestType);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetProcessInformation(IntPtr process, int informationClass,
+        ref PowerThrottlingState information, uint size);
+#pragma warning restore SYSLIB1054
+}

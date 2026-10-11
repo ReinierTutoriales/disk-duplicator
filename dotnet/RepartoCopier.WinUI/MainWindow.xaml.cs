@@ -29,6 +29,7 @@ public sealed partial class MainWindow : Window
     private readonly LogicalProgressRate _copyProgressRate = new();
     private readonly TaskbarProgress _taskbar;
     private readonly CompletionNotifier _notifier;
+    private CopyPowerRequest? _power;
 
     public MainWindow()
     {
@@ -174,14 +175,52 @@ public sealed partial class MainWindow : Window
                 CommitButtonText = "Agregar",
             };
             var results = await picker.PickMultipleFoldersAsync();
-            var paths = results.Select(result => result.Path).ToArray();
-            var existing = _destinations.Select(item => item.Path).ToList();
-            var previous = existing.Count;
-            CopyPlan.AppendUniqueDestinations(SourcePathBox.Text, existing, paths);
-            // Only the new folders are added; existing chips are not rebuilt.
-            for (var index = previous; index < existing.Count; index++) _destinations.Add(new DestinationRow(existing[index]));
-            if (existing.Count >= CopyPlan.MaxDestinations && paths.Length > existing.Count - previous)
-                ShowWarning("Límite de destinos", $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos; las demás carpetas no se agregaron.");
+            AddDestinationPaths(results.Select(result => result.Path).ToArray());
+        }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private void AddDestinationPaths(string[] paths)
+    {
+        var existing = _destinations.Select(item => item.Path).ToList();
+        var previous = existing.Count;
+        CopyPlan.AppendUniqueDestinations(SourcePathBox.Text, existing, paths);
+        // Only the new folders are added; existing chips are not rebuilt.
+        for (var index = previous; index < existing.Count; index++) _destinations.Add(new DestinationRow(existing[index]));
+        if (existing.Count >= CopyPlan.MaxDestinations && paths.Length > existing.Count - previous)
+            ShowWarning("Límite de destinos", $"Se alcanzó el máximo de {CopyPlan.MaxDestinations} destinos; las demás carpetas no se agregaron.");
+    }
+
+    // Drag and drop from Explorer: a file or folder onto the source card, folders onto the destinations card.
+    private void DropCard_DragOver(object sender, DragEventArgs e)
+    {
+        var accepts = _job is null && _preparationCancel is null &&
+                      e.DataView.Contains(Windows.ApplicationModel.DataTransfer.StandardDataFormats.StorageItems);
+        e.AcceptedOperation = accepts
+            ? Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy
+            : Windows.ApplicationModel.DataTransfer.DataPackageOperation.None;
+        if (accepts && e.DragUIOverride is { } overlay)
+            overlay.Caption = ReferenceEquals(sender, SourceCard) ? "Usar como origen" : "Agregar como destino";
+    }
+
+    private async void SourceCard_Drop(object sender, DragEventArgs e)
+    {
+        if (_job is not null || _preparationCancel is not null) return;
+        try
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            if (items.Count > 0) SourcePathBox.Text = items[0].Path;
+        }
+        catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private async void DestinationsCard_Drop(object sender, DragEventArgs e)
+    {
+        if (_job is not null || _preparationCancel is not null) return;
+        try
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            AddDestinationPaths(items.OfType<Windows.Storage.StorageFolder>().Select(folder => folder.Path).ToArray());
         }
         catch (Exception ex) { ShowError(ex.Message); }
     }
@@ -242,6 +281,7 @@ public sealed partial class MainWindow : Window
                 : "Preparando copia sin verificación final…";
             SetPauseButton(paused: false);
             _taskbar.Set(TaskbarState.Indeterminate);
+            _power ??= CopyPowerRequest.Begin();
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
 
@@ -263,6 +303,7 @@ public sealed partial class MainWindow : Window
             _job = null;
             _copyStartedAt = null;
             _taskbar.Set(TaskbarState.None);
+            ReleasePower();
             ShowPreparationView();
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
@@ -274,6 +315,7 @@ public sealed partial class MainWindow : Window
             _job = null;
             _copyStartedAt = null;
             _taskbar.Set(TaskbarState.None);
+            ReleasePower();
             ShowPreparationView();
             SetEditingEnabled(true);
             StartButton.IsEnabled = true;
@@ -384,6 +426,9 @@ public sealed partial class MainWindow : Window
                 // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
                 try { await observed.DisposeAsync(); }
                 catch (Exception ex) { ShowError(ex.Message); }
+                // The copy's pinned buffers are garbage now; return their memory to Windows without waiting
+                // for the next natural full collection.
+                GC.Collect(2, GCCollectionMode.Forced, blocking: false);
                 SetEditingEnabled(true);
                 StartButton.IsEnabled = true;
                 NewCopyButton.Visibility = Visibility.Visible;
@@ -391,18 +436,42 @@ public sealed partial class MainWindow : Window
 
                 if (_closeRequested)
                 {
+                    ReleasePower();
                     Close();
                 }
                 else if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
                 {
+                    // Keep the system awake through the shutdown countdown, then let it go.
                     try { await OfferShutdownAsync(); }
                     catch (Exception ex) { ShowError(ex.Message); }
+                    finally { ReleasePower(); }
+                }
+                else
+                {
+                    ReleasePower();
                 }
             }
         }
     }
 
-    private void ProgressTimer_Tick(object? sender, object e) => RefreshProgress();
+    private static readonly TimeSpan ForegroundRefresh = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MinimizedRefresh = TimeSpan.FromSeconds(2);
+
+    private void ProgressTimer_Tick(object? sender, object e)
+    {
+        // Minimized, only the taskbar button shows progress: refresh it every 2 s instead of 4 times a second.
+        var minimized = AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter
+            { State: Microsoft.UI.Windowing.OverlappedPresenterState.Minimized };
+        var interval = minimized ? MinimizedRefresh : ForegroundRefresh;
+        if (_progressTimer.Interval != interval) _progressTimer.Interval = interval;
+        RefreshProgress();
+    }
+
+    private void ReleasePower()
+    {
+        _power?.Dispose();
+        _power = null;
+    }
 
     private void RefreshProgress()
     {
@@ -682,11 +751,19 @@ public sealed partial class MainWindow : Window
         _progressTimer.Stop();
         _job?.RequestCancel();
         _notifier.Unregister();
+        ReleasePower();
     }
 
     private void MainWindow_Closing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
     {
         if (_job is null && _preparationCancel is null) return;
+        if (_closeRequested)
+        {
+            // Second close while a safe close is still waiting (for example on a disk that stopped
+            // responding): leave now. State is crash-safe: unfinished files stay as removable .part files.
+            Environment.Exit(0);
+            return;
+        }
         args.Cancel = true;
         BeginSafeClose();
     }
@@ -700,7 +777,7 @@ public sealed partial class MainWindow : Window
         PauseButton.IsEnabled = false;
         CancelButton.IsEnabled = false;
         AppMenuButton.IsEnabled = false;
-        StatusText.Text = "Cerrando de forma segura…";
+        StatusText.Text = "Cerrando de forma segura… (cierra de nuevo para forzar)";
     }
 
     private void NewCopy_Click(object sender, RoutedEventArgs e)
