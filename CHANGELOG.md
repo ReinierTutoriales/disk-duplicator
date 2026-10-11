@@ -55,11 +55,11 @@ Enfocado en HDD, SSD y NVMe, internos o en caja USB.
 - Coherencia: si el origen cambia durante la copia (contenido, tamaño, fecha o árbol), ningún destino queda como terminado; un destino ya caído conserva su error real; un diálogo nunca se cierra dos veces; la lectura anticipada no retiene un bloque ya leído si el búfer está lleno.
 - Limpieza: se eliminan código y parámetros sin uso.
 
-## Unreleased — independent source reads prototype
+## Desarrollo entre v2.1.1 y v2.2.1 (publicado en v2.2.1)
+
+Historial de los cambios intermedios. Varias decisiones de esta etapa se sustituyeron dentro de la propia v2.2.1: los diálogos Task Dialog Win32 pasaron a ventanas WinUI con tema, desapareció el diálogo de conflictos (política fija de omitir por tamaño y fecha) y la lectura independiente dejó de ser un modo de prueba.
 
 - Motor: modo de prueba explícito de lectura y pool independientes por destino para origen NVMe/SATA sólido, de 2 a 16 destinos. Presupuesto conjunto máximo de 256 MiB; la ruta compartida continúa por defecto. La telemetría JSON distingue modos y contabiliza las relecturas físicas; VERIFY continúa conjunto.
-
-## Unreleased — main
 
 - UI: Ajustes, Acerca de, confirmación de apagado y resultados dejan de usar ContentDialog dentro de la ventana compacta. Comparten TaskDialogIndirect con conflictos, propietario explícito, cierre/cancelación seguros y marshalling de callbacks protegido. Acerca de conserva enlaces; Ajustes conserva tema y persistencia; resultados recorren todos los destinos en páginas de tres y exportan el JSON completo. Apagado exige elegir Apagar y conserva No apagar por defecto.
 - Ventana principal: tamaño inicial en área cliente (720×320 DIP), mínimo de área cliente (540×320 DIP) limitado al área de trabajo del monitor y actualizado al mover/cambiar DPI. El contenido deja de tener un máximo fijo de 720; las métricas y el detalle pueden envolver texto. No se fija un máximo que impida ampliar la ventana.
