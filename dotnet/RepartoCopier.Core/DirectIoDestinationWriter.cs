@@ -112,6 +112,59 @@ internal static class DirectIoDestinationWriter
 
         internal int Alignment { get; }
 
+        // Synchronous writes and flushes cannot take a cancellation token. The thread doing one is recorded so
+        // a destination that stops responding (a hung USB bridge or dying disk) can be cancelled from outside.
+        private readonly object _ioGate = new();
+        private uint _ioThreadId;
+        private long _ioStarted;
+
+        /// <summary>How long the current synchronous write or flush has been running, or null when idle.</summary>
+        internal TimeSpan? InFlightFor
+        {
+            get
+            {
+                lock (_ioGate)
+                    return _ioThreadId == 0 ? null : System.Diagnostics.Stopwatch.GetElapsedTime(_ioStarted);
+            }
+        }
+
+        /// <summary>
+        /// Aborts the synchronous write or flush in progress (it then fails with ERROR_OPERATION_ABORTED). The
+        /// gate guarantees the recorded thread is still inside that operation, never in unrelated work.
+        /// </summary>
+        internal bool CancelInFlight()
+        {
+            lock (_ioGate)
+            {
+                if (_ioThreadId == 0)
+                    return false;
+                var thread = NativeMethods.OpenThread(ThreadTerminate, false, _ioThreadId);
+                if (thread == IntPtr.Zero)
+                    return false;
+                try { return NativeMethods.CancelSynchronousIo(thread); }
+                finally { NativeMethods.CloseHandle(thread); }
+            }
+        }
+
+        private void TrackedIo(Action io)
+        {
+            lock (_ioGate)
+            {
+                _ioThreadId = NativeMethods.GetCurrentThreadId();
+                _ioStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+            try
+            {
+                io();
+            }
+            finally
+            {
+                // Waits for a CancelInFlight call in progress, so it can never reach this thread's next work.
+                lock (_ioGate)
+                    _ioThreadId = 0;
+            }
+        }
+
         internal async Task<int> WriteAsync(
             ReadOnlyMemory<byte> data,
             long fileOffset,
@@ -138,7 +191,7 @@ internal static class DirectIoDestinationWriter
                 {
                     using var io = await scheduler.AcquireIoAsync(alignedLength, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, data[..alignedLength], fileOffset);
+                    TrackedIo(() => WriteSynchronous(handle, data[..alignedLength], fileOffset));
                     operations++;
                 }
 
@@ -153,7 +206,8 @@ internal static class DirectIoDestinationWriter
                     data.Span[alignedLength..].CopyTo(tail.Memory.Span);
                     using var io = await scheduler.AcquireIoAsync(Alignment, token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
-                    WriteSynchronous(handle, tail.Memory, checked(fileOffset + alignedLength));
+                    var tailMemory = tail.Memory;
+                    TrackedIo(() => WriteSynchronous(handle, tailMemory, checked(fileOffset + alignedLength)));
                     operations++;
                 }
 
@@ -211,7 +265,7 @@ internal static class DirectIoDestinationWriter
         internal void FlushToDisk()
         {
             var handle = _handle ?? throw new ObjectDisposedException(nameof(Session));
-            try { RandomAccess.FlushToDisk(handle); }
+            try { TrackedIo(() => RandomAccess.FlushToDisk(handle)); }
             catch (IOException ex)
             {
                 throw new DirectIoWriteException(TransientIoErrorClassifier.GetNativeCodeOrZero(ex), ex.Message);
@@ -228,8 +282,28 @@ internal static class DirectIoDestinationWriter
         internal int NativeErrorCode { get; }
     }
 
+    private const uint ThreadTerminate = 0x0001;
+
     private static class NativeMethods
     {
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr OpenThread(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint threadId);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CancelSynchronousIo(IntPtr thread);
+
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CloseHandle(IntPtr handle);
+
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

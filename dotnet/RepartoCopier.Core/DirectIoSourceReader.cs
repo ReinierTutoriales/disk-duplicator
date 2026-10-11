@@ -68,7 +68,7 @@ internal static class DirectIoSourceReader
         var handle = NativeMethods.CreateFileW(
             WindowsPath.Extended(Path.GetFullPath(path)),
             GenericRead,
-            FileShare.Read,
+            FileShare.ReadWrite | FileShare.Delete, // readable while another program holds it open; changes are caught by hash and snapshot
             IntPtr.Zero,
             OpenExisting,
             FileFlagNoBuffering | FileFlagSequentialScan | FileFlagOverlapped,

@@ -209,7 +209,24 @@ internal static class PreflightSafety
         directories.Sort(StringComparer.OrdinalIgnoreCase);
         files.Sort((left, right) =>
             StringComparer.OrdinalIgnoreCase.Compare(left.RelativePath, right.RelativePath));
+        // A case-sensitive source folder can hold "a.txt" and "A.txt". A normal destination cannot: the second
+        // one would fail its commit hours into the copy. Report it before anything is written.
+        RejectCaseOnlyDuplicates(directories, static entry => entry);
+        RejectCaseOnlyDuplicates(files, static entry => entry.RelativePath);
         return new SourceTreeScan(files, directories);
+    }
+
+    private static void RejectCaseOnlyDuplicates<T>(List<T> sorted, Func<T, string> path)
+    {
+        for (var index = 1; index < sorted.Count; index++)
+        {
+            var previous = path(sorted[index - 1]);
+            var current = path(sorted[index]);
+            if (string.Equals(previous, current, StringComparison.OrdinalIgnoreCase))
+                throw new IOException(
+                    $"El origen tiene dos nombres que solo se diferencian en mayúsculas: {previous} y {current}. " +
+                    "Los destinos de Windows no pueden guardar ambos; renombra uno antes de copiar.");
+        }
     }
 
     private static IEnumerable<FileSystemInfo> EnumerateDirectoryEntries(string directory)
