@@ -18,7 +18,7 @@ internal static class AtomicFileCommit
         {
             try
             {
-                File.Move(part, destination);
+                RetryWhileShared(() => File.Move(part, destination));
             }
             catch (IOException) when (File.Exists(destination))
             {
@@ -36,7 +36,7 @@ internal static class AtomicFileCommit
 
         try
         {
-            File.Replace(part, destination, backup, ignoreMetadataErrors: false);
+            RetryWhileShared(() => File.Replace(part, destination, backup, ignoreMetadataErrors: false));
         }
         catch (Exception commitError)
         {
@@ -64,6 +64,26 @@ internal static class AtomicFileCommit
         }
 
         PostCommitCleanup.TryDeleteRegularFile(backup, "El backup de reemplazo");
+    }
+
+    /// <summary>
+    /// Antivirus and indexers often open a file for a moment right after it is closed. A sharing or lock
+    /// violation (32/33) at that moment is retried for up to about 5 seconds instead of failing the file.
+    /// </summary>
+    private static void RetryWhileShared(Action commit)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                commit();
+                return;
+            }
+            catch (IOException ex) when (attempt < 20 && (ex.HResult & 0xFFFF) is 32 or 33)
+            {
+                Thread.Sleep(250);
+            }
+        }
     }
 
     private static void DeleteBackupIfPresent(string backup)

@@ -398,12 +398,14 @@ public static class CopyEngine
         using var deviceSchedulers = DeviceSchedulerMap.Create(copy.SourceDevice, copy.DestinationDevices);
         job.Telemetry.AttachDeviceSchedulers(deviceSchedulers.Schedulers);
         var independent = UseIndependentSourceReads(options, copy.SourceDevice, copy.DestinationRoots.Length);
-        // The shared reader of a single-stream source (HDD, USB, network) keeps the next block in flight while
-        // the current one is hashed and handed out, so the device never idles between requests.
-        var sourceReadAhead = !independent && !IsParallelReadSource(copy.SourceDevice);
+        // The shared reader keeps the next block in flight while the current one is hashed and handed out, so
+        // the source never idles between requests. That includes an NVMe source with one destination (or more
+        // than 16), which otherwise waited for every BLAKE3 hash before asking for the next block.
+        var sourceReadAhead = !independent;
         // Set when the source itself proved different between reads (content, size, date or tree). Then no
         // destination is a faithful copy, including one that already finished.
         var sourceChanged = false;
+        CancellationTokenSource? stallWatchdogStop = null;
         try
         {
             var skipMasks = copy.ExistingFiles == ExistingFilePolicy.ReplaceDifferent
@@ -447,6 +449,8 @@ public static class CopyEngine
             var writerTasks = workers
                 .Select(worker => WriterLoopAsync(worker, options, job))
                 .ToArray();
+            stallWatchdogStop = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _ = WatchStalledDestinationsAsync(workers, stallWatchdogStop.Token);
 
             Exception? producerError = null;
             try
@@ -520,6 +524,7 @@ public static class CopyEngine
             {
                 writerError = ex;
             }
+            stallWatchdogStop.Cancel();
 
             job.Telemetry.RecordCopyPhase(Stopwatch.GetElapsedTime(copyPhaseStarted));
 
@@ -579,6 +584,8 @@ public static class CopyEngine
         }
         finally
         {
+            stallWatchdogStop?.Cancel();
+            stallWatchdogStop?.Dispose();
             foreach (var worker in workers)
             {
                 worker.Channel.Writer.TryComplete();
@@ -594,6 +601,45 @@ public static class CopyEngine
                 // The destination locks are released even if a pool reports a reference still held.
                 copy.ReleaseStateLeases();
             }
+        }
+    }
+
+    /// <summary>
+    /// A single unbuffered write of at most 8 MiB, or a flush, that has not finished after two minutes means the
+    /// device stopped answering (a hung USB-SATA bridge, a dying disk). Waiting longer only holds the shared
+    /// buffers and, with them, every healthy destination. That destination fails on its own and its blocked
+    /// operation is cancelled; the others keep copying.
+    /// </summary>
+    private static readonly TimeSpan StalledIoLimit = TimeSpan.FromSeconds(120);
+
+    private static async Task WatchStalledDestinationsAsync(DestinationWorker[] workers, CancellationToken token)
+    {
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
+                foreach (var worker in workers)
+                {
+                    if (!worker.IsActive)
+                        continue;
+                    var session = worker.ActiveFile?.DirectSession;
+                    if (session?.InFlightFor is not { } elapsed || elapsed < StalledIoLimit)
+                        continue;
+                    worker.Fail(
+                        $"El destino dejó de responder: una escritura lleva más de {StalledIoLimit.TotalSeconds:0} s " +
+                        $"sin terminar ({worker.Root}). Revisa el disco y su cable o caja USB.");
+                    session.CancelInFlight();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Copy phase ended.
+        }
+        catch (ObjectDisposedException)
+        {
+            // A session closed while being inspected: nothing is stalled.
         }
     }
 
@@ -873,7 +919,9 @@ public static class CopyEngine
         {
             Mode = FileMode.Open,
             Access = FileAccess.Read,
-            Share = FileShare.Read,
+            // Files another program keeps open for writing (logs, mail stores, databases) can still be read.
+            // Any change while reading is caught by the snapshot check and by the per-file hash agreement.
+            Share = FileShare.ReadWrite | FileShare.Delete,
             Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
             BufferSize = 1,
         });
@@ -1050,7 +1098,7 @@ public static class CopyEngine
                             {
                                 current = BeginFile(worker, begin.Entry);
                             }
-                            catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex))
+                            catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex) && !DestinationLost(worker))
                             {
                                 worker.Progress.MarkError($"{begin.Entry.RelativePath}: {ex.Message}");
                                 skippingFailedFile = true;
@@ -1118,9 +1166,13 @@ public static class CopyEngine
                             {
                                 try
                                 {
-                                    FinishFile(worker, current, end.Hash, options, recovery, job);
+                                    // Flush, size check and commit take this disk's turn like any write: with the
+                                    // source or another destination on the same physical disk, a flush no longer
+                                    // runs in the middle of their I/O (head thrash on HDDs).
+                                    using (await worker.DeviceScheduler.AcquireIoAsync(1, job.Token).ConfigureAwait(false))
+                                        FinishFile(worker, current, end.Hash, options, recovery, job);
                                 }
-                                catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex))
+                                catch (Exception ex) when (options.KeepGoing && IsFileIoError(ex) && !DestinationLost(worker))
                                 {
                                     FailCurrentFile(worker, current, options, $"{current.Entry.RelativePath}: {ex.Message}");
                                 }
@@ -1129,6 +1181,7 @@ public static class CopyEngine
                             break;
                     }
                     worker.NoteProgress();
+                    worker.ActiveFile = current;
                 }
                 finally
                 {
@@ -1167,6 +1220,7 @@ public static class CopyEngine
                 if (current.Copied > 0 && !current.Failed && !current.Committed)
                     worker.Progress.RollbackWritten((ulong)current.Copied);
             }
+            worker.ActiveFile = null;
             DrainAndRelease(worker.Channel.Reader, worker);
         }
     }
@@ -1189,12 +1243,21 @@ public static class CopyEngine
             Directory.CreateDirectory(parent);
             WindowsPath.EnsureNormalDirectory(parent, "La carpeta de destino");
             worker.ValidatedDirectories.Add(parent);
+            worker.FolderStorageAttributes[parent] =
+                File.GetAttributes(parent) & (FileAttributes.Encrypted | FileAttributes.Compressed);
         }
+        // The part is written in the state folder and renamed into place, and a rename keeps the file's own
+        // attributes. In an EFS-encrypted or NTFS-compressed destination folder the part must therefore be
+        // created encrypted or compressed itself, or the final file would land as plaintext or uncompressed.
+        worker.FolderStorageAttributes.TryGetValue(parent, out var folderAttributes);
+        var encrypt = (folderAttributes & FileAttributes.Encrypted) != 0;
+        var compress = (folderAttributes & FileAttributes.Compressed) != 0;
         worker.TempDirectory ??= StateLayout.PrepareTempDirectory(worker.Root);
         var transient = StateLayout.TransientPathsIn(worker.TempDirectory, destination);
         var part = transient.PartPath;
-        var directRequested = DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
-        var preallocationSize = StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size);
+        // Encrypted and compressed files go through the cache: their on-disk layout is not the logical one.
+        var directRequested = !encrypt && !compress && DirectIoDestinationWriter.IsEligible(worker.Device, entry.Size);
+        var preallocationSize = compress ? 0 : StoragePreallocationPolicy.GetPreallocationSize(part, entry.Size);
         FileStream? stream = null;
         DirectIoDestinationWriter.Session? directSession = null;
         try
@@ -1249,9 +1312,19 @@ public static class CopyEngine
         void CreatePart()
         {
             // One create per file: the unbuffered handle when the volume allows it, else a buffered stream.
-            if (!directRequested ||
-                !DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, preallocationSize, out directSession))
-                stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize);
+            if (directRequested &&
+                DirectIoDestinationWriter.TryOpen(part, worker.Device, entry.Size, preallocationSize, out directSession))
+                return;
+            if (compress)
+            {
+                // FSCTL_SET_COMPRESSION needs a synchronous handle and an empty file: set it on creation, then
+                // open the part for the asynchronous writes like any other.
+                using (var created = File.OpenHandle(part, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                    NtfsCompression.TryEnable(created);
+                stream = OpenPartStream(part, FileMode.Open, preallocationSize: 0);
+                return;
+            }
+            stream = OpenPartStream(part, FileMode.CreateNew, preallocationSize, encrypt);
         }
     }
 
@@ -1318,6 +1391,7 @@ public static class CopyEngine
                 var started = Stopwatch.GetTimestamp();
                 var directRetryCount = 0;
                 var lastTransientCode = 0;
+                long firstDirectFailure = 0;
                 int operations;
                 while (true)
                 {
@@ -1336,7 +1410,8 @@ public static class CopyEngine
                                 worker.DeviceScheduler.CurrentQueueDepth, directRetryCount, offset, recovered: true);
                         break;
                     }
-                    catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+                    catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex) &&
+                                               WithinTransientRetryWindow(ref firstDirectFailure))
                     {
                         var failedQueueDepth = worker.DeviceScheduler.CurrentQueueDepth;
                         lastTransientCode = TransientIoErrorClassifier.GetNativeCodeOrZero(ex);
@@ -1375,6 +1450,7 @@ public static class CopyEngine
 
         var bufferedRetryCount = 0;
         var lastBufferedTransientCode = 0;
+        long firstBufferedFailure = 0;
         while (true)
         {
             try
@@ -1408,7 +1484,7 @@ public static class CopyEngine
             catch (Exception ex)
             {
                 last = ex;
-                if (!TransientIoErrorClassifier.IsTransient(ex))
+                if (!TransientIoErrorClassifier.IsTransient(ex) || !WithinTransientRetryWindow(ref firstBufferedFailure))
                     break;
 
                 var failedQueueDepth = worker.DeviceScheduler.CurrentQueueDepth;
@@ -1583,10 +1659,23 @@ public static class CopyEngine
         TryDelete(current.PartPath);
         if (current.Copied > 0 && !current.Committed)
             worker.Progress.RollbackWritten((ulong)current.Copied);
-        if (options.KeepGoing)
+        if (options.KeepGoing && !DestinationLost(worker))
             worker.Progress.MarkError(error);
+        else if (DestinationLost(worker))
+            worker.Fail($"El destino ya no está disponible (¿disco desconectado?): {worker.Root}. {error}");
         else
             worker.Fail(error);
+    }
+
+    /// <summary>
+    /// A destination whose root folder no longer exists was unplugged or went offline. Even with KeepGoing
+    /// that is not a file error: the destination fails once, with a clear reason, instead of collecting one
+    /// error per remaining file.
+    /// </summary>
+    private static bool DestinationLost(DestinationWorker worker)
+    {
+        try { return !Directory.Exists(worker.Root); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
     }
 
 
@@ -1879,6 +1968,7 @@ public static class CopyEngine
         CopyJob job)
     {
         var retryCount = 0;
+        long firstFailure = 0;
         while (true)
         {
             job.Token.ThrowIfCancellationRequested();
@@ -1925,7 +2015,8 @@ public static class CopyEngine
                     }
                     return read;
                 }
-                catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex))
+                catch (Exception ex) when (TransientIoErrorClassifier.IsTransient(ex) &&
+                                           WithinTransientRetryWindow(ref firstFailure))
                 {
                     retryCount++;
                     target.Progress?.AddRetry();
@@ -1945,11 +2036,25 @@ public static class CopyEngine
         }
     }
 
+    /// <summary>
+    /// Transient errors (sharing violations, a busy or briefly reset device, SEM_TIMEOUT) are retried for at
+    /// most this long per block. A disk that is dying or gone keeps returning them: past the window the error
+    /// becomes final, so that destination fails alone instead of holding the whole job forever.
+    /// </summary>
+    private static readonly TimeSpan TransientRetryWindow = TimeSpan.FromSeconds(90);
+
+    private static bool WithinTransientRetryWindow(ref long firstFailureTimestamp)
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (firstFailureTimestamp == 0)
+            firstFailureTimestamp = now;
+        return Stopwatch.GetElapsedTime(firstFailureTimestamp, now) < TransientRetryWindow;
+    }
+
     private static Task DelayTransientRetryAsync(int retryCount, CancellationToken token)
     {
-        // No arbitrary retry-count cutoff: recoverable USB/storage faults can settle.
-        // A short capped delay prevents a disconnected device from becoming a hot spin;
-        // the user can always cancel the job.
+        // A short capped delay prevents a disconnected device from becoming a hot spin; the retry window
+        // (TransientRetryWindow) bounds how long a block keeps retrying.
         var milliseconds = Math.Min(250, 10 * Math.Min(Math.Max(1, retryCount), 25));
         return Task.Delay(milliseconds, token);
     }
@@ -2235,9 +2340,12 @@ public static class CopyEngine
     private static FileStream OpenPartStream(
         string path,
         FileMode mode,
-        long preallocationSize)
+        long preallocationSize,
+        bool encrypted = false)
     {
         var options = FileOptions.Asynchronous | FileOptions.SequentialScan;
+        if (encrypted)
+            options |= FileOptions.Encrypted;
         return new FileStream(path, new FileStreamOptions
         {
             Mode = mode,
@@ -2535,8 +2643,17 @@ public static class CopyEngine
         public HashSet<string> CompletedFiles { get; } = new(StringComparer.Ordinal);
         // Folders whose whole path was validated (and created) for an earlier file of this copy.
         public HashSet<string> ValidatedDirectories { get; } = new(StringComparer.OrdinalIgnoreCase);
+        // Encrypted/Compressed attributes of those folders, which new files in them must inherit.
+        public Dictionary<string, FileAttributes> FolderStorageAttributes { get; } = new(StringComparer.OrdinalIgnoreCase);
         // This destination's state temp folder, prepared on the first file.
         public string? TempDirectory { get; set; }
+        // The file being written, read by the stall watchdog from another thread.
+        private CurrentFile? _activeFile;
+        public CurrentFile? ActiveFile
+        {
+            get => Volatile.Read(ref _activeFile);
+            set => Volatile.Write(ref _activeFile, value);
+        }
         // Destination files that existed when the copy was prepared and the user allowed to replace.
         public HashSet<string> ReplaceAllowedPaths { get; } = new(StringComparer.Ordinal);
         private int _active = 1;
@@ -2705,4 +2822,29 @@ public static class CopyEngine
         public void RequestDirectFallback() => Interlocked.Exchange(ref _directFallbackRequested, 1);
         public void ClearDirectFallbackRequest() => Interlocked.Exchange(ref _directFallbackRequested, 0);
     }
+}
+
+/// <summary>Turns on NTFS compression for one open file, as Explorer does for files created in a compressed folder.</summary>
+internal static class NtfsCompression
+{
+    private const uint FsctlSetCompression = 0x0009C040;
+    private const ushort CompressionFormatDefault = 1;
+
+    internal static void TryEnable(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        var format = CompressionFormatDefault;
+        // Best effort: a volume that cannot compress still receives a correct, uncompressed copy.
+        _ = DeviceIoControl(handle, FsctlSetCompression, ref format, sizeof(ushort), IntPtr.Zero, 0, out _, IntPtr.Zero);
+    }
+
+#pragma warning disable SYSLIB1054 // One small fixed-size control call; DllImport keeps it readable.
+    [System.Runtime.InteropServices.DefaultDllImportSearchPaths(System.Runtime.InteropServices.DllImportSearchPath.System32)]
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(
+        Microsoft.Win32.SafeHandles.SafeFileHandle device, uint controlCode, ref ushort inBuffer, uint inBufferSize,
+        IntPtr outBuffer, uint outBufferSize, out uint bytesReturned, IntPtr overlapped);
+#pragma warning restore SYSLIB1054
 }
