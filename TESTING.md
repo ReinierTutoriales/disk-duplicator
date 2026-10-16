@@ -47,7 +47,7 @@ Ejecutar en Windows real. Para cada combinación origen/destino disponible (USB 
 - **Secuencial grande:** uno o varios archivos suficientemente grandes para superar ampliamente caché/prefetch y observar throughput sostenido.
 - **Mixto:** archivos pequeños, medianos y grandes con subdirectorios y carpetas vacías.
 - **Small-file:** miles de archivos pequeños para ejercer metadata, commit y recovery.
-- **Verificación:** la aplicación verifica automáticamente y relee el origen; medir por separado copia, verificación y tiempo total. Los tests internos pueden desactivar `Verify` solo para aislar la fase de copia.
+- **Verificación:** activar explícitamente «Verificar contenido al terminar» (la UI la deja desactivada por defecto). Medir por separado copia, verificación y tiempo total; registrar también una corrida sin verificación. La verificación relee el origen y los archivos copiados; los omitidos por tamaño/fecha no se verifican al finalizar.
 - **Contención:** cuando sea posible, destinos que compartan y que no compartan controlador/hub para distinguir límite del motor de límite del bus.
 
 Para cada ejecución conservar:

@@ -209,6 +209,11 @@
                         </StackPanel>
                     </Border>
 
+                    <TextBlock x:Name="ExistingFilesPolicyText"
+                               Text="Archivos existentes: se omiten si coinciden tamaño y fecha; los demás se reemplazan."
+                               Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
                     <!-- Options -->
                     <Expander x:Name="OptionsExpander" IsExpanded="False" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                         <Expander.Header>
@@ -381,7 +386,8 @@
                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center"/>
                                             </Grid>
                                             <ProgressBar Minimum="0" Maximum="100" Value="{x:Bind Percent, Mode=OneWay}"
-                                                         ShowError="{x:Bind IsFailed, Mode=OneWay}" ShowPaused="{x:Bind IsPaused, Mode=OneWay}" />
+                                                         ShowError="{x:Bind IsFailed, Mode=OneWay}" ShowPaused="{x:Bind IsPaused, Mode=OneWay}"
+                                                         AutomationProperties.Name="{x:Bind FullPath}" />
                                         </StackPanel>
                                     </Border>
                                 </DataTemplate>

@@ -23,6 +23,7 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
     private int _detailTicks;
     private DestinationPhase? _detailPhase;
 
+    public string FullPath => _fullPath;
     public string Label { get; } = ShortLabel(path);
     public string Progress { get; private set; } = "Preparando";
     public string Detail { get; private set; } = path;

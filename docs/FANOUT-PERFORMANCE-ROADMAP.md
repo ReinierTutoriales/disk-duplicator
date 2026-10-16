@@ -6,6 +6,8 @@ Una sola lectura física del origen entrega cada bloque a todos los destinos. El
 
 ## Estado comprobado en el código actual
 
+Esta sección y el simulador describen la **ruta compartida**. El modo independiente se solicita por defecto y se elige para un origen NVMe local con 2–16 destinos; cada destino relee el origen con su propio pool, con un presupuesto conjunto máximo de 256 MiB. Las demás combinaciones usan la ruta compartida. Consultar `IndependentSourceReads` en el diagnóstico exportado para saber qué modo se utilizó realmente: los resultados del simulador compartido no predicen el modo independiente. La verificación final es opcional y mantiene su planificación conjunta.
+
 - `CopyEngine.ReadAndFanOutSequentialAsync` lee una vez por bloque y lo entrega a las colas de los destinos activos.
 - El pool compartido está fijado en 256 MiB y los bloques tienen un máximo nominal de 8 MiB. `SharedFanoutBufferPool.Lease.ReleaseReference` libera páginas solo después de que **todos** los destinos entregados liberen su referencia.
 - `DeliverDataAsync` usa canales no acotados y `ReserveBacklog`/`ReservePendingPayload` solo contabilizan bytes; `BacklogTargetBytes` no es una barrera ni activa aislamiento de ramas.
