@@ -30,7 +30,7 @@ public sealed partial class MainWindow
             ShowPreparationView();
             await SettleLayoutAsync();
             foreach (var control in new FrameworkElement[] { StartButton, PickSourceFileButton, PickSourceFolderButton,
-                AddDestinationsButton, ClearDestinationsButton }) await CheckReachableAsync(control);
+                AddDestinationsButton, ClearDestinationsButton, ExistingFilesPolicyText }) await CheckReachableAsync(control);
             OptionsExpander.IsExpanded = true;
             await SettleLayoutAsync();
             await CheckReachableAsync(VerifyCheck);
