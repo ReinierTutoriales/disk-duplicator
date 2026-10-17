@@ -36,7 +36,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="28" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="RepartoCopier">
@@ -94,8 +94,9 @@
 
                 <StackPanel x:Name="PreparationPanel" Grid.Row="1" Visibility="Visible" Spacing="12">
 
-                    <Grid ColumnSpacing="12">
+                    <Grid x:Name="PreparationHeader" ColumnSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="Nueva copia" Style="{StaticResource SubtitleTextBlockStyle}" />
                             <TextBlock x:Name="SubtitleText" Text="Un origen, varios destinos a la vez"
@@ -310,8 +311,9 @@
                                 </Grid>
                             </Grid>
 
-                            <Grid ColumnSpacing="8" RowSpacing="8">
+                            <Grid x:Name="RunningActions" ColumnSpacing="8">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Button x:Name="PauseButton" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Pause_Click"
                                         AutomationProperties.Name="Pausar">
                                     <StackPanel Orientation="Horizontal" Spacing="8">
@@ -398,7 +400,7 @@
             </Grid>
         </ScrollViewer>
 
-        <Border Grid.Row="2" Padding="12,0" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+        <Border x:Name="StatusFooter" Grid.Row="2" MinHeight="28" Padding="12,2" BorderThickness="0,1,0,0" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
             <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
