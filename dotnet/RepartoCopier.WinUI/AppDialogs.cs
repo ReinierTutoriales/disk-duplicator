@@ -33,7 +33,7 @@ internal static class AppDialogs
         links.Children.Add(Link("Ver en GitHub", GitHubUrl, openUrl));
         links.Children.Add(Link("Licencia", LicenseUrl, openUrl));
         return AppDialog.ShowAsync(owner, new AppDialogSpec("RepartoCopier",
-            $"Versión {version}\n\nCopia un origen a varios destinos a la vez, cada uno a la velocidad de su disco.\n\nSi te resulta útil, apoya el proyecto con una estrella en GitHub.",
+            $"Versión {version}\n\nCopia de archivos a varios destinos, con verificación opcional y diagnóstico por destino.",
             ["Cerrar"], DefaultButton: 0, CancelButton: 0, AppDialogIcon.Logo,
             Footer: "© 2026 ReinierTutoriales. Todos los derechos reservados.", Extra: links), token, onShown);
     }

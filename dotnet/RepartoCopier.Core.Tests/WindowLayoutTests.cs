@@ -8,6 +8,20 @@ namespace RepartoCopier.Core.Tests;
 public sealed class WindowLayoutTests
 {
     [TestMethod]
+    [DataRow(96u)]
+    [DataRow(120u)]
+    [DataRow(144u)]
+    [DataRow(192u)]
+    public void DialogFitsSmallWorkAreaIncludingItsNonClientFrame(uint dpi)
+    {
+        var client = WindowGeometry.DialogClient(520, 1200, dpi, 640, 480, 16, 39);
+        Assert.IsTrue(client.Width + 16 <= 640);
+        Assert.IsTrue(client.Height + 39 <= (int)(480 * 0.85));
+        var measuredWidthDip = client.Width * 96d / dpi;
+        Assert.IsTrue(measuredWidthDip <= 520);
+    }
+
+    [TestMethod]
     [DataRow(96u, 540)]
     [DataRow(120u, 675)]
     [DataRow(144u, 810)]
