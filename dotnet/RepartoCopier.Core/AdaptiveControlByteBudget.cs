@@ -50,6 +50,7 @@ internal sealed class AdaptiveControlByteBudget
     internal ValueTask AcquireAsync(int bytes, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
+        token.ThrowIfCancellationRequested();
         lock (_gate)
         {
             if (_waiters.Count == 0 && TryAcquireLocked(bytes))

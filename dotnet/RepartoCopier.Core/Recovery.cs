@@ -72,9 +72,19 @@ internal sealed class RecoveryCheckpointWriter : IDisposable
         }
         finally
         {
-            _journal?.Dispose();
-            _manifest?.Dispose();
             _disposed = true;
+            try { CloseBestEffort(_journal); }
+            finally { CloseBestEffort(_manifest); }
+        }
+    }
+
+    private static void CloseBestEffort(FileStream? stream)
+    {
+        try { stream?.Dispose(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Closing may flush buffered data too. A lost device must not prevent closing the other stream
+            // or turn best-effort checkpoint cleanup into a failure of the other destinations.
         }
     }
 

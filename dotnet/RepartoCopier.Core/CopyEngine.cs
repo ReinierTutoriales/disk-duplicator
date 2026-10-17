@@ -1481,6 +1481,11 @@ public static class CopyEngine
                         worker.DeviceScheduler.CurrentQueueDepth, bufferedRetryCount, offset, recovered: true);
                 return PendingWriteResult.Success();
             }
+            catch (OperationCanceledException cancelled) when (job.Token.IsCancellationRequested)
+            {
+                ReleaseBranchBlock(worker, block);
+                return PendingWriteResult.Failed(cancelled);
+            }
             catch (Exception ex)
             {
                 last = ex;

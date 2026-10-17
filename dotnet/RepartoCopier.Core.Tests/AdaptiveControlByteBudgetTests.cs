@@ -7,6 +7,23 @@ namespace RepartoCopier.Core.Tests;
 public sealed class AdaptiveControlByteBudgetTests
 {
     [TestMethod]
+    public async Task AlreadyCancelledRequestDoesNotReserveBytesOrConsultCapacity()
+    {
+        var bytes = AdaptiveControlByteBudget.EstimatedDeliveryBytes;
+        var capacityCalls = 0;
+        var budget = new AdaptiveControlByteBudget(_ => { capacityCalls++; return bytes; });
+        using var cancel = new CancellationTokenSource();
+        cancel.Cancel();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () =>
+            await budget.AcquireAsync(bytes, cancel.Token));
+
+        Assert.AreEqual(0, capacityCalls);
+        Assert.AreEqual(0L, budget.UsedBytes);
+        Assert.AreEqual(0L, budget.PeakBytes);
+    }
+
+    [TestMethod]
     public async Task LargeControlBacklogDoesNotThrottleWhileByteHeadroomExists()
     {
         var bytes = AdaptiveControlByteBudget.EstimatedDeliveryBytes;
