@@ -173,7 +173,8 @@ internal sealed class AppDialog
             buttons.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var button = new Button
             {
-                Content = spec.Buttons[index],
+                Content = new TextBlock { Text = spec.Buttons[index], TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center },
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 MinHeight = 32,
             };
@@ -229,14 +230,34 @@ internal sealed class AppDialog
 
         var dpi = Math.Max(96u, GetDpiForWindow(_owner));
         var area = DisplayArea.GetFromWindowId(owner.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
-        var width = Math.Min(WindowGeometry.Pixels(widthDip, dpi), area.Width);
+        PixelSize Client(double height) => WindowGeometry.DialogClient(widthDip, height, dpi,
+            area.Width, area.Height, Math.Max(0, appWindow.Size.Width - appWindow.ClientSize.Width),
+            Math.Max(0, appWindow.Size.Height - appWindow.ClientSize.Height));
         // Provisional size; the real height is measured once the content is laid out (before first paint).
-        Place(appWindow, owner.AppWindow, area, width, Math.Min(WindowGeometry.Pixels(240, dpi), area.Height));
+        var initial = Client(240);
+        Place(appWindow, owner.AppWindow, area, initial.Width, initial.Height);
+        void SizeToContent()
+        {
+            var available = Client(240);
+            // Measure the width actually available on this monitor, including the window frame.
+            Root.Measure(new Size(available.Width * 96d / dpi, double.PositiveInfinity));
+            var fitted = Client(Root.DesiredSize.Height);
+            Place(appWindow, owner.AppWindow, area, fitted.Width, fitted.Height);
+        }
         Root.Loaded += (_, _) =>
         {
-            Root.Measure(new Size(widthDip, double.PositiveInfinity));
-            var height = Math.Min(WindowGeometry.Pixels(Root.DesiredSize.Height, dpi), (int)(area.Height * 0.85));
-            Place(appWindow, owner.AppWindow, area, width, height);
+            dpi = Math.Max(96u, GetDpiForWindow(Handle));
+            area = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+            SizeToContent();
+            Root.XamlRoot.Changed += (_, _) =>
+            {
+                if (_closing) return;
+                var currentDpi = Math.Max(96u, GetDpiForWindow(Handle));
+                if (dpi == currentDpi) return;
+                dpi = currentDpi;
+                area = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+                SizeToContent();
+            };
             onShown?.Invoke(this);
         };
         EnableWindow(_owner, false);
