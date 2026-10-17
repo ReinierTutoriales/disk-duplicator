@@ -26,8 +26,7 @@ internal sealed record AppDialogSpec(
 /// <summary>
 /// A real, separate WinUI window used as a modal dialog. It is owned by the main window and disables it while
 /// open, sizes itself to its content (scrolling only past 85% of the work area) and follows the app theme:
-/// every brush is a {ThemeResource}, so Light/Dark render like a Windows 11 ContentDialog. Win32 TaskDialog
-/// has no dark mode, which is why it is not used.
+/// the base is native Desktop Acrylic and content layers use theme resources, with the OS solid fallback.
 /// </summary>
 internal sealed class AppDialog
 {
@@ -50,6 +49,7 @@ internal sealed class AppDialog
     internal AppWindow AppWindow => _window.AppWindow;
     internal nint Handle => WinRT.Interop.WindowNative.GetWindowHandle(_window);
     internal nint Owner => _owner;
+    internal Microsoft.UI.Xaml.Media.SystemBackdrop? Backdrop => _window.SystemBackdrop;
 
     /// <summary>Shows the dialog and returns the clicked button index, or the cancel index when dismissed.</summary>
     internal static Task<int> ShowAsync(Window owner, AppDialogSpec spec, CancellationToken token,
@@ -123,7 +123,7 @@ internal sealed class AppDialog
                     </Grid.RowDefinitions>
                     <StackPanel x:Name="CaptionBar" Orientation="Horizontal" Spacing="8" Padding="12,0,0,0" VerticalAlignment="Stretch"
                                 Background="Transparent">
-                        <Image Width="16" Height="16" VerticalAlignment="Center" Source="ms-appx:///Assets/AppLogo.png"/>
+                        <Image Width="16" Height="16" VerticalAlignment="Center" Source="ms-appx:///Assets/AppIcon16.png"/>
                         <TextBlock Text="RepartoCopier" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center"/>
                     </StackPanel>
                     <ScrollViewer x:Name="BodyScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
@@ -145,7 +145,8 @@ internal sealed class AppDialog
                         </Grid>
                     </ScrollViewer>
                 </Grid>
-                <Border Grid.Row="1" Padding="24" BorderThickness="0,1,0,0"
+                <Border Grid.Row="1" Padding="24,16" BorderThickness="0,1,0,0"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
                     <Grid x:Name="ButtonGrid" ColumnSpacing="8"/>
                 </Border>
@@ -167,6 +168,7 @@ internal sealed class AppDialog
 
         // Equal-width buttons, default one in accent, as in a Windows 11 ContentDialog command area.
         var buttons = (Grid)root.FindName("ButtonGrid");
+        if (spec.Buttons.Length == 1) buttons.HorizontalAlignment = HorizontalAlignment.Right;
         Button? defaultButton = null;
         for (var index = 0; index < spec.Buttons.Length; index++)
         {
@@ -177,6 +179,7 @@ internal sealed class AppDialog
                     TextAlignment = TextAlignment.Center },
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 MinHeight = 32,
+                MinWidth = 104,
             };
             if (index == spec.DefaultButton)
             {
@@ -203,6 +206,7 @@ internal sealed class AppDialog
         _window.ExtendsContentIntoTitleBar = true;
         _window.SetTitleBar((UIElement)Root.FindName("CaptionBar"));
         var appWindow = _window.AppWindow;
+        NativeWindowMaterial.Apply(_window, (Panel)Root);
         try { appWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.ico")); } catch { }
         var presenter = OverlappedPresenter.CreateForDialog();
         presenter.IsResizable = false;
@@ -311,7 +315,7 @@ internal sealed class AppDialog
         if (icon == AppDialogIcon.Logo)
             return (FrameworkElement)XamlReader.Load("""
                 <Image xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                       Width="48" Height="48" Source="ms-appx:///Assets/AppLogo.png"/>
+                       Width="48" Height="48" Source="ms-appx:///Assets/AppIcon48.png"/>
                 """);
         var fontSize = size.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var (glyph, brush) = icon switch

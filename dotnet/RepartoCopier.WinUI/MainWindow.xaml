@@ -5,7 +5,7 @@
     xmlns:local="using:RepartoCopier.WinUI"
     Title="RepartoCopier">
 
-    <Grid x:Name="Root" Background="Transparent" SizeChanged="Root_SizeChanged">
+    <Grid x:Name="Root" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" SizeChanged="Root_SizeChanged">
         <Grid.Resources>
             <!-- Windows 11 spacing ramp: 4/8/12/16. Cards use the overlay radius, controls the control radius. -->
             <Style x:Key="SurfaceCardStyle" TargetType="Border">
@@ -41,7 +41,7 @@
 
         <TitleBar x:Name="AppTitleBar" Grid.Row="0" Title="RepartoCopier">
             <TitleBar.IconSource>
-                <ImageIconSource ImageSource="ms-appx:///Assets/AppLogo.png" />
+                <ImageIconSource ImageSource="ms-appx:///Assets/AppIcon16.png" />
             </TitleBar.IconSource>
             <TitleBar.RightHeader>
                 <Button x:Name="AppMenuButton" Width="36" Height="30" Padding="0"
@@ -81,8 +81,8 @@
 
         <ScrollViewer x:Name="MainContentScroll" Grid.Row="1" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled"
                       VerticalScrollBarVisibility="Auto" VerticalScrollMode="Enabled">
-            <!-- MaxWidth keeps line lengths readable on wide/maximized windows; content stays centered. -->
-            <Grid x:Name="ContentHost" Padding="16,8,16,16" MaxWidth="980" HorizontalAlignment="Stretch">
+            <!-- Use the available width so maximized windows can show more destination cards per row. -->
+            <Grid x:Name="ContentHost" Padding="16,8,16,16" HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
