@@ -44,7 +44,7 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         ResizeForCurrentDpi(new SizeInt32(DefaultWidth, DefaultHeight));
 
-        try { SystemBackdrop = new MicaBackdrop(); } catch { }
+        NativeWindowMaterial.Apply(this, Root);
         // Alt+Tab, the taskbar and the title bar show the app icon, not the default executable icon.
         try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.ico")); } catch { }
 
@@ -66,6 +66,7 @@ public sealed partial class MainWindow : Window
     private const int DefaultWidth = 760;
     private const int DefaultHeight = 540;
     private const double WideLayoutMinWidth = 640;
+    private bool? _wideLayout;
 
     // Responsive layout in code: AdaptiveTrigger is not evaluated reliably for Window content without a Page.
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e) => ApplyResponsiveLayout(e.NewSize.Width);
@@ -73,11 +74,24 @@ public sealed partial class MainWindow : Window
     private void ApplyResponsiveLayout(double width)
     {
         var wide = width >= WideLayoutMinWidth;
+        // Height-only changes and individual resize pixels do not change the layout mode.
+        if (_wideLayout == wide) return;
+        _wideLayout = wide;
+        PreparationHeader.RowSpacing = wide ? 0 : 8;
+        RunningActions.RowSpacing = wide ? 0 : 8;
         ContentHost.Padding = wide ? new Thickness(16, 8, 16, 16) : new Thickness(12, 8, 12, 12);
         var labels = wide ? Visibility.Visible : Visibility.Collapsed;
         PickSourceFileLabel.Visibility = labels;
         PickSourceFolderLabel.Visibility = labels;
         SubtitleText.Visibility = labels;
+        Microsoft.UI.Xaml.Controls.Grid.SetRow(StartButton, wide ? 0 : 1);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumn(StartButton, wide ? 1 : 0);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(StartButton, wide ? 1 : 2);
+        StartButton.HorizontalAlignment = wide ? HorizontalAlignment.Stretch : HorizontalAlignment.Left;
+        Microsoft.UI.Xaml.Controls.Grid.SetRow(ShutdownCheck, wide ? 0 : 1);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumn(ShutdownCheck, wide ? 2 : 0);
+        Microsoft.UI.Xaml.Controls.Grid.SetColumnSpan(ShutdownCheck, wide ? 1 : 3);
+        ShutdownCheck.HorizontalAlignment = wide ? HorizontalAlignment.Right : HorizontalAlignment.Left;
     }
 
     private void UpdateDestinationSummary()
@@ -421,7 +435,8 @@ public sealed partial class MainWindow : Window
                 // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
                 _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
                 Announce(StatusText.Text);
-                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text, StatusText.Text);
+                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text,
+                    $"{FormatDestinationCount(snapshots.Count)} · {FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}");
                 _job = null;
                 // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
                 try { await observed.DisposeAsync(); }

@@ -60,6 +60,41 @@ public sealed class DiskRobustnessTests
     }
 
     [TestMethod]
+    [DataRow("_journal")]
+    [DataRow("_manifest")]
+    public void RecoveryCloseFailureStillClosesBothStreamsAndDoesNotEscape(string fieldName)
+    {
+        using var temp = new TempScope();
+        var root = Directory.CreateDirectory(Path.Combine(temp.Path, "dest", "Source")).FullName;
+        var writer = new RecoveryCheckpointWriter(root);
+        writer.Append(new RecoveryFile(Path.Combine(temp.Path, "a.bin"), "a.bin", 1, 0), new byte[32]);
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var journalField = typeof(RecoveryCheckpointWriter).GetField("_journal", flags)!;
+        var manifestField = typeof(RecoveryCheckpointWriter).GetField("_manifest", flags)!;
+        using var journal = (FileStream)journalField.GetValue(writer)!;
+        using var manifest = (FileStream)manifestField.GetValue(writer)!;
+        var replacedField = typeof(RecoveryCheckpointWriter).GetField(fieldName, flags)!;
+        ((FileStream)replacedField.GetValue(writer)!).Dispose();
+        replacedField.SetValue(writer, new CloseFailureStream(Path.Combine(temp.Path, "unplugged.bin")));
+        var journalHandle = ((FileStream)journalField.GetValue(writer)!).SafeFileHandle;
+        var manifestHandle = ((FileStream)manifestField.GetValue(writer)!).SafeFileHandle;
+
+        writer.Dispose();
+        Assert.IsTrue(journalHandle.IsClosed);
+        Assert.IsTrue(manifestHandle.IsClosed);
+        writer.Dispose(); // Cleanup remains idempotent after an I/O failure.
+    }
+
+    private sealed class CloseFailureStream(string path) : FileStream(path, FileMode.Create)
+    {
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) throw new IOException("El dispositivo desapareció al cerrar.", unchecked((int)0x8007048F));
+        }
+    }
+
+    [TestMethod]
     public void ACommitWaitsOutABriefSharingLockFromAScanner()
     {
         if (!OperatingSystem.IsWindows())

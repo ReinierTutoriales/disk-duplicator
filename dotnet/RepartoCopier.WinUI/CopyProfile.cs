@@ -11,8 +11,8 @@ public sealed record CopyProfile(
     bool ShutdownWhenFinished,
     bool VerifyAfterCopy = true)
 {
-    // 2: no longer stores "skipExisting". Version 1 profiles still load, but a stored profile never
-    // authorises replacing files: the choice is asked on every copy that finds existing files.
+    // 2: no longer stores "skipExisting". Version 1 profiles still load; the UI applies its fixed
+    // ReplaceMetadataDifferent policy rather than restoring an existing-file policy from a profile.
     public const int CurrentVersion = 2;
     public const int OldestSupportedVersion = 1;
 }

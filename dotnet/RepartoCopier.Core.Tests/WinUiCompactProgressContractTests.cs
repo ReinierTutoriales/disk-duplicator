@@ -1,10 +1,28 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Xml.Linq;
 
 namespace RepartoCopier.Core.Tests;
 
 [TestClass]
 public sealed class WinUiCompactProgressContractTests
 {
+    [TestMethod]
+    public void PreparationDisclosesReplacementPolicyAndDestinationProgressHasAnAccessibleIdentity()
+    {
+        var document = XDocument.Load(Path.Combine(FindRepositoryRoot(), "dotnet", "RepartoCopier.WinUI", "MainWindow.xaml"));
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var policy = document.Descendants().Single(element => (string?)element.Attribute(x + "Name") == "ExistingFilesPolicyText");
+        Assert.IsNull(policy.Attribute("Visibility"));
+        Assert.IsFalse(policy.Ancestors().Any(element => element.Name.LocalName == "Expander"));
+        var text = (string?)policy.Attribute("Text") ?? string.Empty;
+        StringAssert.Contains(text, "tamaño y fecha");
+        StringAssert.Contains(text, "se reemplazan");
+
+        var destinationBar = document.Descendants().Single(element => element.Name.LocalName == "ProgressBar"
+            && (string?)element.Attribute("Value") == "{x:Bind Percent, Mode=OneWay}");
+        Assert.AreEqual("{x:Bind FullPath}", (string?)destinationBar.Attribute("AutomationProperties.Name"));
+    }
+
     [TestMethod]
     public void RunningViewUsesOneThickOverallProgressBarAndNoPerDiskRows()
     {
