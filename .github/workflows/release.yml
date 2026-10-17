@@ -122,7 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tagArguments = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { @('--target', '${{ github.sha }}') } else { @('--verify-tag') }
+          [string[]]$tagArguments = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { @('--target', '${{ github.sha }}') } else { @('--verify-tag') }
           gh release create '${{ steps.meta.outputs.tag }}' '${{ steps.package.outputs.zip }}' 'SHA256SUMS.txt' `
             --title 'RepartoCopier ${{ steps.meta.outputs.tag }}' `
             --notes-file '${{ steps.meta.outputs.notes }}' `
