@@ -103,7 +103,7 @@ internal sealed class CompletionNotifier(Window window)
                 manager.Register();
                 _registered = true;
             }
-            manager.Show(new AppNotificationBuilder().AddText(title).AddText(message).BuildNotification());
+            manager.Show(BuildNotification(title, message));
         }
         catch (Exception)
         {
@@ -111,6 +111,13 @@ internal sealed class CompletionNotifier(Window window)
             _unavailable = true;
         }
     }
+
+    internal static AppNotification BuildNotification(string title, string message) =>
+        new AppNotificationBuilder()
+            .AddText(title)
+            .AddText(message)
+            .SetAppLogoOverride(new Uri(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.png")))
+            .BuildNotification();
 
     internal void Unregister()
     {

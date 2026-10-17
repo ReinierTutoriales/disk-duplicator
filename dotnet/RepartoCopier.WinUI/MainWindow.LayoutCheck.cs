@@ -25,6 +25,24 @@ public sealed partial class MainWindow
         else Root.Loaded += (_, _) => loaded.TrySetResult();
         await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var nativeOwner = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (SystemBackdrop is not DesktopAcrylicBackdrop || Root.Background is not SolidColorBrush { Color.A: 0 })
+            throw new InvalidOperationException("Main window does not expose its native Acrylic backdrop.");
+        report.Add($"Desktop Acrylic attached; compositor support: {Microsoft.UI.Composition.SystemBackdrops.DesktopAcrylicController.IsSupported()}; " +
+            $"Windows effects enabled: {new Windows.UI.ViewManagement.UISettings().AdvancedEffectsEnabled}; " +
+            $"high contrast: {new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast}. OS fallback may still apply.");
+        if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.png")))
+            throw new InvalidOperationException("Notification logo is missing from the executable's assets.");
+        using (var icon = new BinaryReader(File.OpenRead(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.ico"))))
+        {
+            if (icon.ReadUInt16() != 0 || icon.ReadUInt16() != 1 || icon.ReadUInt16() != 10)
+                throw new InvalidOperationException("Shell ICO lost its ten native-size representations.");
+        }
+        report.Add("Executable assets include the notification PNG and ten-size shell ICO.");
+        var payload = System.Xml.Linq.XDocument.Parse(CompletionNotifier.BuildNotification("Copia & verificación", "Resultado <correcto>").Payload);
+        if (payload.Descendants("image").SingleOrDefault()?.Attribute("placement")?.Value != "appLogoOverride" ||
+            payload.Descendants("text").First().Value != "Copia & verificación")
+            throw new InvalidOperationException("Native notification lost its logo or text escaping.");
+        report.Add("Native notification payload: original high-resolution logo and escaped text; not sent.");
         report.Add($"Actual UI DPI: {GetDpiForWindow(nativeOwner)}. Other scale factors have geometry unit tests; not simulated render claims.");
         SourcePathBox.Text = @"H:\Una carpeta con nombres largos\ISOS";
         foreach (var drive in new[] { "D", "F", "G", "I", "J" }) _destinations.Add(new DestinationRow($"{drive}:\\ISOS"));
@@ -36,6 +54,8 @@ public sealed partial class MainWindow
             ResizeForCurrentDpi(size);
             ShowPreparationView();
             await SettleLayoutAsync();
+            if (size.Width >= 1200 && ContentHost.ActualWidth < Root.ActualWidth - 48)
+                throw new InvalidOperationException("Wide content is still artificially capped.");
             var expectedShutdownRow = Root.ActualWidth >= WideLayoutMinWidth ? 0 : 1;
             if (Grid.GetRow(ShutdownCheck) != expectedShutdownRow)
                 throw new InvalidOperationException("Shutdown action did not follow the responsive layout.");
@@ -91,6 +111,8 @@ public sealed partial class MainWindow
                 {
                     await SettleLayoutAsync();
                     dialog.Root.UpdateLayout();
+                    if (dialog.Backdrop is not DesktopAcrylicBackdrop || dialog.Root is not Panel { Background: SolidColorBrush { Color.A: 0 } })
+                        throw new InvalidOperationException("Dialog covers or lacks its native Acrylic backdrop.");
                     report.Add($"{name} {theme}: {CheckDialog(dialog)}");
                     foreach (var textName in new[] { "HeadingText", "BodyText", "FooterText" })
                     {
@@ -100,6 +122,7 @@ public sealed partial class MainWindow
                     }
                     report.Add($"{name}: heading/body/footer share main text font {CurrentFileText.FontFamily.Source}.");
                     CheckTextFits(dialog.Root);
+                    CheckImageResolution(dialog.Root);
                     if (capture) await CaptureLayoutAsync(dialog.Root, Path.Combine(captureDirectory, $"{name}-{theme}.png"));
                 }
                 catch (Exception ex) { inspectionError ??= new InvalidOperationException($"{name} {theme}: {ex.Message}", ex); }
@@ -134,8 +157,23 @@ public sealed partial class MainWindow
                 throw new InvalidOperationException("Responsive state was stale after resizing.");
         }
         report.Add("Resize sweep crossed 640 DIP in both directions without a stale action row.");
+        CheckImageResolution(Root);
+        report.Add("Raster logos have at least the physical pixels required by their rendered size; no bitmap upscaling.");
         await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(new { Passed = true, Checks = report },
             new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private static void CheckImageResolution(DependencyObject parent)
+    {
+        if (parent is Image { Source: BitmapImage bitmap, ActualWidth: > 0 } image)
+        {
+            var scale = image.XamlRoot.RasterizationScale;
+            if (bitmap.PixelWidth < Math.Ceiling(image.ActualWidth * scale) ||
+                bitmap.PixelHeight < Math.Ceiling(image.ActualHeight * scale))
+                throw new InvalidOperationException($"Logo is missing pixels: {bitmap.PixelWidth}×{bitmap.PixelHeight} for {image.ActualWidth}×{image.ActualHeight} DIP at {scale}.");
+        }
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            CheckImageResolution(VisualTreeHelper.GetChild(parent, index));
     }
 
     // Opt-in render of this app's XAML only; no desktop or other application is captured.

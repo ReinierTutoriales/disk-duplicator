@@ -44,7 +44,7 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         ResizeForCurrentDpi(new SizeInt32(DefaultWidth, DefaultHeight));
 
-        try { SystemBackdrop = new MicaBackdrop(); } catch { }
+        NativeWindowMaterial.Apply(this, Root);
         // Alt+Tab, the taskbar and the title bar show the app icon, not the default executable icon.
         try { AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppLogo.ico")); } catch { }
 
@@ -435,7 +435,8 @@ public sealed partial class MainWindow : Window
                 // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
                 _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
                 Announce(StatusText.Text);
-                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text, StatusText.Text);
+                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text,
+                    $"{FormatDestinationCount(snapshots.Count)} · {FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}");
                 _job = null;
                 // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
                 try { await observed.DisposeAsync(); }
