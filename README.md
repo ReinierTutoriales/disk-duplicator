@@ -4,7 +4,7 @@ RepartoCopier es una aplicación de escritorio para Windows que copia un origen 
 
 ## Versión actual
 
-**RepartoCopier v2.2.3** es la versión actual del producto C#/.NET/WinUI. La versión histórica v1.4.3 permanece publicada sin modificaciones.
+**RepartoCopier v2.2.4** reúne el pulido visual, las actualizaciones de dependencias y las correcciones de cancelación y cierre de recovery del producto C#/.NET/WinUI. La versión histórica v1.4.3 permanece publicada sin modificaciones.
 
 Se distribuye como un único ejecutable autocontenido (`RepartoCopier.WinUI.exe`, sin instalación ni archivos al lado) dentro de `RepartoCopier-vX.Y.Z-win-x64.zip`, con `SHA256SUMS.txt` y atestación de procedencia. La primera vez que se abre cada versión, .NET la extrae en `%TEMP%\.net`; al arrancar, la app borra las extracciones de versiones anteriores que no estén en uso.
 
