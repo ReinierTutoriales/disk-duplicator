@@ -18,6 +18,12 @@ El ICO tenía solo una entrada de 256×256. El mismo PNG de 256×256 se reutiliz
 
 No se modifican el motor ni las correcciones independientes del PR #27. Este trabajo continúa en el PR de UI #26.
 
+## Ajuste posterior de los símbolos pequeños
+
+Los FontIcon propios de botones y destinos que medían 12/14 DIP pasan a 16 DIP. Un estilo común usa SymbolThemeFontFamily y desactiva IsTextScaleFactorEnabled únicamente para los símbolos: el texto conserva su escalado accesible. Esto evita que aumentar el texto agrande también los glifos dentro de controles compactos. Los indicadores de 20 DIP y los de diálogo de 32 DIP conservan su tamaño.
+
+Validación repetida después del ajuste: build Release sin advertencias/errores, 286 tests correctos y uno omitido, y verificador de ventanas Passed=true a 96 DPI en claro/oscuro. Son cambios preventivos de consistencia y escalado; no se ha reproducido ni demostrado resuelto el defecto visual reportado por el usuario. El logo raster mantiene su detalle y suavizado original. Queda pendiente comprobar el resultado perceptual en el escritorio y escalas físicas adicionales.
+
 ## Comprobaciones
 
 - La compilación Release win-x64 termina sin errores ni advertencias.
