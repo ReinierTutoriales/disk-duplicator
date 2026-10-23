@@ -27,6 +27,9 @@ public sealed partial class MainWindow : Window
     private bool _verificationRequested;
     private bool? _independentSourceReadsUsed;
     private readonly LogicalProgressRate _copyProgressRate = new();
+    // Stopwatch tick of the last resume, 0 if none. The engine's verify rate averages over 5 s, pause included.
+    private long _resumedTick;
+    private static readonly TimeSpan VerifyRateSettle = TimeSpan.FromSeconds(5);
     private readonly TaskbarProgress _taskbar;
     private readonly CompletionNotifier _notifier;
     private CopyPowerRequest? _power;
@@ -307,7 +310,7 @@ public sealed partial class MainWindow : Window
             if (!_cancellationRequested)
             {
                 StatusText.Text = "Copiando…";
-                OperationTitleText.Text = "Copiando…";
+                OperationTitleText.Text = PhaseTitle(verifying: false);
             }
             _progressTimer.Start();
             _ = ObserveJobCompletionAsync(_job);
@@ -358,7 +361,9 @@ public sealed partial class MainWindow : Window
             // Restore the running state now; the next refresh only refines it.
             var verifying = _job.Snapshot().Any(item => item.Phase == DestinationPhase.Verifying);
             SetOperationState(OperationState.Active, verifying ? "\uE9D5" : "\uE8A5");
-            OperationTitleText.Text = verifying ? "Comprobando integridad…" : "Copiando…";
+            _resumedTick = Stopwatch.GetTimestamp();
+            _copyProgressRate.Reanchor();
+            OperationTitleText.Text = PhaseTitle(verifying);
             StatusText.Text = verifying ? "Verificando integridad de los destinos…" : "Copiando…";
         }
         RefreshProgress();
@@ -540,11 +545,12 @@ public sealed partial class MainWindow : Window
             // largest remaining branch rather than multiplying ETA by destinations.
             var speed = paused ? 0d : _job.VerifyBytesPerSecond;
             SetText(SpeedMetricText, Throughput.Format(speed));
-            SetText(RemainingMetricText, speed > 1 ? FormatDuration(TimeSpan.FromSeconds(verifyRemaining / speed)) : "--:--:--");
+            var settling = _resumedTick != 0 && Stopwatch.GetElapsedTime(_resumedTick) < VerifyRateSettle;
+            SetText(RemainingMetricText, speed > 1 && !settling ? FormatDuration(TimeSpan.FromSeconds(verifyRemaining / speed)) : "--:--:--");
             if (!paused && !_cancellationRequested)
             {
                 SetOperationState(OperationState.Active, "\uE9D5");
-                SetText(OperationTitleText, "Comprobando integridad…");
+                SetText(OperationTitleText, PhaseTitle(verifying: true));
                 SetText(StatusText, "Verificando integridad de los destinos…");
             }
         }
@@ -552,15 +558,15 @@ public sealed partial class MainWindow : Window
         {
             var speed = paused ? 0d : _copyProgressRate.Observe(written);
             percent = total == 0 ? 0 : Math.Clamp(written * 100.0 / total, 0, 100);
-            SetText(OverallDetailText, snapshots.Count >= 2
+            SetText(OverallDetailText, (snapshots.Count >= 2
                 ? $"Destino más lento: {FormatBytes(written)} de {FormatBytes(total)}"
-                : $"{FormatBytes(written)} de {FormatBytes(total)}");
+                : $"{FormatBytes(written)} de {FormatBytes(total)}") + ReadModeSuffix());
             SetText(SpeedMetricText, Throughput.Format(speed));
             SetText(RemainingMetricText, speed > 1 ? FormatDuration(TimeSpan.FromSeconds((total - Math.Min(total, written)) / speed)) : "--:--:--");
             if (!paused && !_cancellationRequested && anyCopying)
             {
                 SetOperationState(OperationState.Active, "\uE8A5");
-                SetText(OperationTitleText, "Copiando…");
+                SetText(OperationTitleText, PhaseTitle(verifying: false));
                 SetText(StatusText, $"Copiando a {snapshots.Count} destino{(snapshots.Count == 1 ? string.Empty : "s")}…");
             }
         }
@@ -579,6 +585,17 @@ public sealed partial class MainWindow : Window
             SetText(ElapsedText, $"Tiempo transcurrido: {FormatDuration(DateTimeOffset.Now - _copyStartedAt.Value)}");
         if (current is not null) SetText(CurrentFileText, Path.GetFileName(current));
     }
+
+    // Verification is one global pass after every copy, so the phase is global too.
+    private string PhaseTitle(bool verifying) =>
+        verifying ? "Verificación · 2/2" : _verificationRequested ? "Copia · 1/2" : "Copia";
+
+    private string ReadModeSuffix() => _job?.IndependentSourceReads switch
+    {
+        true => " · lectura independiente",
+        false => " · lectura conjunta",
+        null => string.Empty,
+    };
 
     // Four refreshes per second mostly repeat the same strings; skip the property change (and its layout).
     private static void SetText(Microsoft.UI.Xaml.Controls.TextBlock target, string value)
@@ -856,6 +873,10 @@ public sealed partial class MainWindow : Window
         private long _lastTimestamp;
         private ulong _lastBytes;
         private double _smoothedBytesPerSecond;
+        private bool _reanchor;
+
+        // Next sample starts a new time and byte base, keeping the average: pause time is not copy time.
+        internal void Reanchor() => _reanchor = true;
 
         internal void Reset()
         {
@@ -873,6 +894,13 @@ public sealed partial class MainWindow : Window
                 _lastBytes = bytes;
                 _smoothedBytesPerSecond = 0;
                 return 0;
+            }
+            if (_reanchor)
+            {
+                _reanchor = false;
+                _lastTimestamp = now;
+                _lastBytes = bytes;
+                return _smoothedBytesPerSecond;
             }
             var elapsed = Stopwatch.GetElapsedTime(_lastTimestamp, now).TotalSeconds;
             if (elapsed < 0.15) return _smoothedBytesPerSecond;
