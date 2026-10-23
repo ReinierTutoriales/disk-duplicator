@@ -140,13 +140,39 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    // Order matters: profile, then --source (overrides the profile's source), then --dest (appended to the profile's destinations).
     private void TryLoadLaunchSource()
     {
         var args = Environment.GetCommandLineArgs();
         if (args.Length == 2 && !args[1].StartsWith("-", StringComparison.Ordinal))
+        {
             SourcePathBox.Text = args[1];
-        else if (args.Length == 3 && string.Equals(args[1], "--source", StringComparison.Ordinal))
-            SourcePathBox.Text = args[2];
+            return;
+        }
+
+        string? profilePath = null;
+        string? source = null;
+        var destinations = new List<string>();
+        for (var index = 1; index < args.Length - 1; index++)
+        {
+            switch (args[index])
+            {
+                case "--profile": profilePath = args[++index]; break;
+                case "--source": source = args[++index]; break;
+                case "--dest": destinations.Add(args[++index]); break;
+            }
+        }
+
+        if (profilePath is not null)
+        {
+            try { ApplyProfile(CopyProfileSerializer.Deserialize(File.ReadAllText(profilePath))); }
+            catch (Exception ex) { ShowError(ex.Message); }
+        }
+        if (source is not null) SourcePathBox.Text = source;
+        var missing = destinations.Where(path => !Directory.Exists(path)).ToArray();
+        AddDestinationPaths(destinations.Except(missing).ToArray());
+        if (missing.Length > 0)
+            ShowWarning("Destinos no encontrados", $"Se omitieron: {string.Join(", ", missing)}");
     }
 
     private async void PickSourceFile_Click(object sender, RoutedEventArgs e)
@@ -610,17 +636,21 @@ public sealed partial class MainWindow : Window
             };
             var result = await picker.PickSingleFileAsync();
             if (result is null) return;
-            var profile = CopyProfileSerializer.Deserialize(await File.ReadAllTextAsync(result.Path));
-            SourcePathBox.Text = profile.Source;
-            _destinations.Clear();
-            foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
-            KeepGoingCheck.IsChecked = profile.ContinueOnError;
-            VerifyCheck.IsChecked = profile.VerifyAfterCopy;
-            ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
-            StatusText.Text = "Configuración cargada";
-            ShowPreparationView();
+            ApplyProfile(CopyProfileSerializer.Deserialize(await File.ReadAllTextAsync(result.Path)));
         }
         catch (Exception ex) { ShowError(ex.Message); }
+    }
+
+    private void ApplyProfile(CopyProfile profile)
+    {
+        SourcePathBox.Text = profile.Source;
+        _destinations.Clear();
+        foreach (var path in profile.Destinations) _destinations.Add(new DestinationRow(path));
+        KeepGoingCheck.IsChecked = profile.ContinueOnError;
+        VerifyCheck.IsChecked = profile.VerifyAfterCopy;
+        ShutdownCheck.IsChecked = profile.ShutdownWhenFinished;
+        StatusText.Text = "Configuración cargada";
+        ShowPreparationView();
     }
 
     private async void SaveProfile_Click(object sender, RoutedEventArgs e)
