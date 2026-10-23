@@ -64,6 +64,17 @@ public sealed class DestinationProgressTextTests
     }
 
     [TestMethod]
+    public void DeviceShowsBusAndMediaOnlyWhenEachIsIdentified()
+    {
+        var known = Snapshot(0, 0, DestinationPhase.Copying) with { BusType = "USB", MediaKind = StorageMediaKind.Rotational };
+        Assert.AreEqual("USB · HDD", DestinationProgressText.Device(known));
+        Assert.AreEqual("NVMe · SSD", DestinationProgressText.Device(known with { BusType = "NVMe", MediaKind = StorageMediaKind.SolidState }));
+        Assert.AreEqual("USB", DestinationProgressText.Device(known with { MediaKind = StorageMediaKind.Unknown }));
+        Assert.AreEqual("No identificado", DestinationProgressText.Device(known with { BusType = "Unknown" }));
+        Assert.AreEqual("No identificado", DestinationProgressText.Device(known with { BusType = string.Empty }));
+    }
+
+    [TestMethod]
     public void EmptyAndOutOfRangeCountersDoNotProduceInvalidPercentages()
     {
         Assert.AreEqual("Copia 0%", DestinationProgressText.Format(Snapshot(0, 0, DestinationPhase.Copying)));
