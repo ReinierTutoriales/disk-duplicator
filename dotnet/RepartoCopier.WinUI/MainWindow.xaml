@@ -316,6 +316,9 @@
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Button x:Name="PauseButton" MinHeight="32" MinWidth="104" IsEnabled="False" Click="Pause_Click"
                                         AutomationProperties.Name="Pausar">
+                                    <Button.KeyboardAccelerators>
+                                        <KeyboardAccelerator Modifiers="Control" Key="P" />
+                                    </Button.KeyboardAccelerators>
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon x:Name="PauseIcon" Glyph="&#xE769;" FontSize="16"/>
                                         <TextBlock x:Name="PauseButtonText" Text="Pausar"/>
@@ -344,6 +347,9 @@
                                 </Button>
                                 <Button x:Name="NewCopyButton" MinHeight="32" Visibility="Collapsed" Click="NewCopy_Click"
                                         Style="{StaticResource AccentButtonStyle}" AutomationProperties.Name="Nueva copia">
+                                    <Button.KeyboardAccelerators>
+                                        <KeyboardAccelerator Modifiers="Control" Key="N" />
+                                    </Button.KeyboardAccelerators>
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <FontIcon Glyph="&#xE710;" FontSize="16"/>
                                         <TextBlock Text="Nueva copia"/>
@@ -390,6 +396,9 @@
                                             <ProgressBar Minimum="0" Maximum="100" Value="{x:Bind Percent, Mode=OneWay}"
                                                          ShowError="{x:Bind IsFailed, Mode=OneWay}" ShowPaused="{x:Bind IsPaused, Mode=OneWay}"
                                                          AutomationProperties.Name="{x:Bind FullPath}" />
+                                            <TextBlock Text="{x:Bind DeviceLine, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}"
+                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" MaxLines="1"/>
                                         </StackPanel>
                                     </Border>
                                 </DataTemplate>

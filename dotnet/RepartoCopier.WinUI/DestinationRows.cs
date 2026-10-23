@@ -29,6 +29,7 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
     public string Detail { get; private set; } = path;
     public string ActiveGlyph { get; private set; } = "";
     public string CautionGlyph { get; private set; } = "";
+    public string DeviceLine { get; private set; } = "";
     public double Percent { get; private set; }
     public bool IsFailed { get; private set; }
     public bool IsPaused { get; private set; }
@@ -73,6 +74,11 @@ public sealed class RunningDestinationRow(string path) : INotifyPropertyChanged
         if (Math.Abs(Percent - percent) >= 0.1) { Percent = percent; Raise(nameof(Percent)); }
         if (ActiveGlyph != activeGlyph) { ActiveGlyph = activeGlyph; Raise(nameof(ActiveGlyph)); }
         if (CautionGlyph != cautionGlyph) { CautionGlyph = cautionGlyph; Raise(nameof(CautionGlyph)); }
+        var device = DestinationProgressText.Device(snapshot);
+        var deviceLine = working && paused ? "En pausa"
+            : snapshot.Phase == DestinationPhase.Copying ? $"{device} · {Throughput.Format(snapshot.BytesPerSecond)}"
+            : device;
+        if (DeviceLine != deviceLine) { DeviceLine = deviceLine; Raise(nameof(DeviceLine)); }
         if (_state != state)
         {
             _state = state;
