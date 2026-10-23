@@ -301,6 +301,7 @@ public sealed partial class MainWindow : Window
             _power ??= CopyPowerRequest.Begin();
             _copyStartedAt = DateTimeOffset.Now;
             _copyProgressRate.Reset();
+            _resumedTick = 0;
 
             _job = await CopyEngine.StartAsync(plan, options, _preparationCancel.Token);
             RefreshProgress();
