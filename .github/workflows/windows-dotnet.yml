@@ -74,6 +74,9 @@ jobs:
       - name: Restore WinUI x64
         run: dotnet restore dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -r win-x64
 
+      - name: Report outdated packages including transitives
+        run: dotnet list RepartoCopier.sln package --outdated --include-transitive
+
       - name: Build WinUI Release x64
         run: dotnet build dotnet/RepartoCopier.WinUI/RepartoCopier.WinUI.csproj -c Release -r win-x64 --no-restore -p:SourceRevisionId=${{ github.sha }}
 
