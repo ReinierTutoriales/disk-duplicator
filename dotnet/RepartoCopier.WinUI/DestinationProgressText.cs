@@ -22,6 +22,24 @@ internal static class DestinationProgressText
             ? "Completada para los copiados; omitidos sin verificar" : "Completada"
         : snapshot.VerifyStartedAt is not null ? "Incompleta" : "No realizada";
 
+    // Bus and media are independent engine fields; each is shown only when identified.
+    internal static string Device(DestinationSnapshot snapshot)
+    {
+        var bus = snapshot.BusType is "" or "Unknown" ? null : snapshot.BusType;
+        var media = snapshot.MediaKind switch
+        {
+            StorageMediaKind.SolidState => "SSD",
+            StorageMediaKind.Rotational => "HDD",
+            _ => null,
+        };
+        return (bus, media) switch
+        {
+            (null, _) => "No identificado",
+            (_, null) => bus,
+            _ => $"{bus} · {media}",
+        };
+    }
+
     internal static int FloorPercent(double percent) => (int)Math.Clamp(Math.Floor(percent), 0, 100);
 
     private static int Percent(ulong bytes, ulong total) => total == 0
