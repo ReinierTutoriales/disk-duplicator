@@ -94,15 +94,21 @@ internal static class AppDialogs
         var failed = destinations.Count(item => item.Phase == DestinationPhase.Failed);
         var withErrors = destinations.Count(item => item.Phase != DestinationPhase.Failed && item.FilesErrored > 0);
         var cancelled = destinations.Any(item => item.Phase == DestinationPhase.Cancelled);
-        // One parsed template for every row instead of two XAML parses per destination (up to 256). Every row is
-        // realized up front so the dialog can size itself to the real content height.
+        var rows = destinations.Select(item => new ResultRow(item, verifyRequested)).ToArray();
         UIElement list = destinations.Count == 0
             ? new TextBlock { Text = "No hay resultados.", TextWrapping = TextWrapping.Wrap }
-            : new ItemsControl
+            : destinations.Count <= 16 ? new ItemsControl
             {
-                ItemsSource = destinations.Select(item => new ResultRow(item, verifyRequested)).ToArray(),
+                ItemsSource = rows,
                 ItemTemplate = ResultRowTemplate.Value,
                 IsTabStop = false,
+            } : new ScrollViewer
+            {
+                Height = 320,
+                HorizontalScrollMode = ScrollMode.Disabled,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = new ItemsRepeater { ItemsSource = rows, ItemTemplate = ResultRowTemplate.Value },
             };
         var (heading, icon) = failed > 0 || withErrors > 0
             ? ("Terminó con errores", AppDialogIcon.Error)
