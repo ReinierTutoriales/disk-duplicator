@@ -110,6 +110,7 @@ internal static class AppDialogs
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 Content = new ItemsRepeater { ItemsSource = rows, ItemTemplate = ResultRowTemplate.Value },
             };
+        AutomationProperties.SetName(list, "Resultados por destino");
         var (heading, icon) = failed > 0 || withErrors > 0
             ? ("Terminó con errores", AppDialogIcon.Error)
             : cancelled ? ("Copia cancelada", AppDialogIcon.Warning) : ("Copia completada", AppDialogIcon.Success);
