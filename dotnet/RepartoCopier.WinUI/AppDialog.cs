@@ -116,7 +116,7 @@ internal sealed class AppDialog
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <Grid Background="{ThemeResource LayerFillColorAltBrush}">
+                <Grid Background="Transparent">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="32"/>
                         <RowDefinition Height="*"/>
