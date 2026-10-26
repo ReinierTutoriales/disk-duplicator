@@ -127,10 +127,15 @@ public sealed partial class MainWindow
                     if (name == "LargeResults")
                     {
                         var host = (ContentPresenter)dialog.Root.FindName("ExtraHost");
-                        if (host.Content is not ScrollViewer { Content: ItemsRepeater repeater } ||
+                        if (host.Content is not ScrollViewer { Content: ItemsRepeater repeater } scroll ||
                             repeater.TryGetElement(127) is not null)
                             throw new InvalidOperationException("Large results are not virtualized.");
-                        report.Add("Large results: offscreen destination 128 was not realized.");
+                        if (scroll.ScrollableHeight <= 0 || !scroll.ChangeView(null, scroll.ScrollableHeight, null, true))
+                            throw new InvalidOperationException("Large results cannot scroll to the last destination.");
+                        await SettleLayoutAsync();
+                        if (repeater.TryGetElement(127) is null)
+                            throw new InvalidOperationException("Last destination was not realized after scrolling.");
+                        report.Add("Large results: destination 128 is virtualized until scrolled into view.");
                     }
                     CheckTextFits(dialog.Root);
                     CheckImageResolution(dialog.Root);
@@ -139,7 +144,8 @@ public sealed partial class MainWindow
                 catch (Exception ex) { inspectionError ??= new InvalidOperationException($"{name} {theme}: {ex.Message}", ex); }
                 finally { dialog.Close(AppDialog.Dismissed); }
             }
-            await AppDialogs.AboutAsync(this, "2.2.3", _ => throw new InvalidOperationException("Layout check must not open a URL."),
+            await AppDialogs.AboutAsync(this, typeof(MainWindow).Assembly.GetName().Version?.ToString(3) ?? "desconocida",
+                _ => throw new InvalidOperationException("Layout check must not open a URL."),
                 deadline.Token, dialog => _ = Inspect(dialog, "About"));
             if (await AppDialogs.SettingsAsync(this, ThemePreference.System, deadline.Token,
                     dialog => _ = Inspect(dialog, "Settings")) is not null)

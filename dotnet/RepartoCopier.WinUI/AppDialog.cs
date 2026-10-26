@@ -10,7 +10,7 @@ using Windows.Graphics;
 
 namespace RepartoCopier.WinUI;
 
-internal enum AppDialogIcon { None, Logo, Info, Warning, Error, Success, Settings }
+internal enum AppDialogIcon { None, Logo, Warning, Error, Success, Settings }
 
 internal sealed record AppDialogSpec(
     string Heading,
