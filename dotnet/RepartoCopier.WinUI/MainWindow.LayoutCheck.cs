@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
@@ -124,18 +125,34 @@ public sealed partial class MainWindow
                             throw new InvalidOperationException($"{textName} uses a different text font family.");
                     }
                     report.Add($"{name}: heading/body/footer share main text font {CurrentFileText.FontFamily.Source}.");
-                    if (name == "LargeResults")
+                    var buttonGrid = (Grid)dialog.Root.FindName("ButtonGrid");
+                    if (Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(dialog.Root.XamlRoot) is not Button focused ||
+                        !buttonGrid.Children.Contains(focused))
+                        throw new InvalidOperationException("Dialog did not focus an action button.");
+                    if (!dialog.Root.KeyboardAccelerators.Any(key => key.Key == Windows.System.VirtualKey.Escape))
+                        throw new InvalidOperationException("Dialog has no Escape dismissal accelerator.");
+                    if (name.StartsWith("BoundaryResults", StringComparison.Ordinal))
                     {
+                        var count = int.Parse(name["BoundaryResults".Length..], System.Globalization.CultureInfo.InvariantCulture);
                         var host = (ContentPresenter)dialog.Root.FindName("ExtraHost");
-                        if (host.Content is not ScrollViewer { Content: ItemsRepeater repeater } scroll ||
-                            repeater.TryGetElement(127) is not null)
-                            throw new InvalidOperationException("Large results are not virtualized.");
-                        if (scroll.ScrollableHeight <= 0 || !scroll.ChangeView(null, scroll.ScrollableHeight, null, true))
-                            throw new InvalidOperationException("Large results cannot scroll to the last destination.");
-                        await SettleLayoutAsync();
-                        if (repeater.TryGetElement(127) is null)
-                            throw new InvalidOperationException("Last destination was not realized after scrolling.");
-                        report.Add("Large results: destination 128 is virtualized until scrolled into view.");
+                        if (host.Content is not UIElement list ||
+                            AutomationProperties.GetName(list) != "Resultados por destino")
+                            throw new InvalidOperationException("Results list has no accessible name.");
+                        if (count == 0 && list is not TextBlock ||
+                            count is > 0 and <= 16 && list is not ItemsControl)
+                            throw new InvalidOperationException("Small results changed presentation at the boundary.");
+                        if (count > 16)
+                        {
+                            if (list is not ScrollViewer { Content: ItemsRepeater repeater } scroll ||
+                                repeater.TryGetElement(count - 1) is not null)
+                                throw new InvalidOperationException("Large results are not virtualized.");
+                            if (scroll.ScrollableHeight <= 0 || !scroll.ChangeView(null, scroll.ScrollableHeight, null, true))
+                                throw new InvalidOperationException("Large results cannot scroll to the last destination.");
+                            await SettleLayoutAsync();
+                            if (repeater.TryGetElement(count - 1) is null)
+                                throw new InvalidOperationException("Last destination was not realized after scrolling.");
+                        }
+                        report.Add($"Results {count}: named list and expected boundary/scroll behavior.");
                     }
                     CheckTextFits(dialog.Root);
                     CheckImageResolution(dialog.Root);
@@ -158,11 +175,23 @@ public sealed partial class MainWindow
                 "", 0, 0)).ToArray();
             if (await AppDialogs.ResultsAsync(this, results, true, true, deadline.Token, dialog => _ = Inspect(dialog, "Results")))
                 throw new InvalidOperationException("Dismissed results authorized saving.");
-            var largeResults = Enumerable.Range(0, 128).Select(index => new DestinationSnapshot(
-                $"D:\\{index}", 100, 100, 5, 0, 0, 0, 0, DestinationPhase.Done, null, "", 0, 0)).ToArray();
-            if (await AppDialogs.ResultsAsync(this, largeResults, false, false, deadline.Token,
-                    dialog => _ = Inspect(dialog, "LargeResults")))
-                throw new InvalidOperationException("Dismissed large results authorized saving.");
+            foreach (var count in new[] { 0, 16, 17, 256 })
+            {
+                var boundaryResults = Enumerable.Range(0, count).Select(index => new DestinationSnapshot(
+                    $"D:\\{index}", 100, 100, 5, 0, 0, 0, 0, DestinationPhase.Done, null, "", 0, 0)).ToArray();
+                if (await AppDialogs.ResultsAsync(this, boundaryResults, false, false, deadline.Token,
+                        dialog => _ = Inspect(dialog, $"BoundaryResults{count}")))
+                    throw new InvalidOperationException("Dismissed boundary results authorized saving.");
+                if (!IsWindowEnabled(nativeOwner)) throw new InvalidOperationException("Owner stayed disabled after results.");
+            }
+            using (var cancelDialog = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            {
+                var cancelled = await AppDialog.ShowAsync(this, new AppDialogSpec("Cancelar diálogo", "", ["Aceptar", "Cancelar"], 0, 1),
+                    cancelDialog.Token, _ => cancelDialog.Cancel());
+                if (cancelled != 1 || !IsWindowEnabled(nativeOwner))
+                    throw new InvalidOperationException("Cancellation did not dismiss the dialog and restore its owner.");
+                report.Add("Dialog cancellation restored its owner.");
+            }
             await AppDialog.ShowAsync(this, new AppDialogSpec("Diálogo en una ventana estrecha",
                 "Texto largo para comprobar el ajuste de líneas, los iconos y los botones cuando el ancho disponible se reduce.",
                 ["Guardar diagnóstico completo", "Cancelar operación"], 1, 1, AppDialogIcon.Warning, WidthDip: 320),
