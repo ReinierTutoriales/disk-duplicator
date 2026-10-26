@@ -10,7 +10,7 @@ Hard constraints that override convenience:
 ## Branches
 - Never create, push, or reference branches whose name contains an AI name, model name, tool name, or non-owner identifier.
 - Forbidden patterns: `claude-*`, `gpt-*`, `grok-*`, `ai-*`, `agent-*`, `copilot-*`, `cursor-*`, or any similar.
-- Use only short, descriptive, owner-neutral names that describe the change (`fix-eta-after-pause`, `show-destination-speed`).
+- Use only short, descriptive, owner-neutral names that describe the change (`fix-eta-after-pause`, `show-destination-speed`, `ui-phase-indicator`).
 
 ## Authorship and signing
 - Never set author, committer, or any signature to a name, email, or identity other than the repository owner (`ReinierTutoriales`).
@@ -18,7 +18,7 @@ Hard constraints that override convenience:
 - Commit messages must describe the change factually; do not attribute the work to an agent.
 
 ## Verify before writing
-- Read the relevant source, tests, contracts, and existing documentation before proposing or writing any change.
+- Read the relevant source, tests, contracts, and existing documentation (UI audits, FANOUT roadmap, TESTING.md) before proposing or writing any change.
 - Do not write code, comments, or documentation for the sake of writing.
 - Every line added must be the minimal change that solves a demonstrated need and is traceable to existing code or a clearly labeled, minimal assumption.
 - If something is unclear, state the gap explicitly instead of inventing behavior.
@@ -31,7 +31,7 @@ Hard constraints that override convenience:
 
 ## Optimal code
 - Prefer the simplest correct solution that matches existing style and patterns.
-- Avoid speculative refactors, unused helpers, extra abstractions, or changes without measured benefit.
-- A change is incomplete until it has been verified against existing tests and contracts.
+- Avoid speculative refactors, unused helpers, extra abstractions, or changes without measured benefit (especially UI frame time, FAN-OUT backpressure, or pool size).
+- A change is incomplete until it has been verified against existing tests, contracts, and (for UI) layout-check.
 
 These rules apply to every agent and every change.
