@@ -1,5 +1,9 @@
 # Dependencias estables — 2026-10-16
 
+## Revisión 2026-10-26
+
+SDK mínimo actualizado de 10.0.402 a 10.0.403 y Microsoft.Web.WebView2 de 1.0.4258.31 a 1.0.4314.35. Las demás referencias directas permanecen en sus versiones estables verificadas; las versiones preliminares de Windows App SDK y BuildTools.MSIX no se incorporan. Pendiente de comprobar esta revisión en CI de Windows: restore, tests, compilación, publish y `--layout-check`. Esta actualización no acredita por sí misma una mejora de latencia ni de rendimiento de copia.
+
 Actualización solicitada de todas las dependencias NuGet, incluidas las transitivas. No se usan versiones preview ni experimentales. No se cambia la semántica del motor ni la versión mínima de Windows.
 
 | Componente | Antes | Ahora |
