@@ -525,7 +525,9 @@ public sealed partial class MainWindow : Window
         if (_job is null) return;
         var snapshots = _job.Snapshot();
         var paused = _job.IsPaused;
-        RunningDestinationScroll.Visibility = snapshots.Count >= 2 ? Visibility.Visible : Visibility.Collapsed;
+        var destinationVisibility = snapshots.Count >= 2 ? Visibility.Visible : Visibility.Collapsed;
+        if (RunningDestinationScroll.Visibility != destinationVisibility)
+            RunningDestinationScroll.Visibility = destinationVisibility;
 
         // One pass over the snapshots per tick: the timer runs four times per second for the whole copy.
         var verifying = false;
@@ -603,8 +605,8 @@ public sealed partial class MainWindow : Window
             SetText(OperationTitleText, "Pausado");
         }
 
-        OverallProgressBar.Value = percent;
-        OverallProgressBar.ShowPaused = paused;
+        if (OverallProgressBar.Value != percent) OverallProgressBar.Value = percent;
+        if (OverallProgressBar.ShowPaused != paused) OverallProgressBar.ShowPaused = paused;
         _taskbar.Set(paused ? TaskbarState.Paused : TaskbarState.Normal, percent);
         SetText(OverallPercentText, $"{DestinationProgressText.FloorPercent(percent)}%");
         SetText(FilesMetricText, $"{filesDone}/{filesTotal}");
@@ -976,10 +978,14 @@ public sealed partial class MainWindow : Window
     // Each state is its own XAML layer bound to a theme brush, so Light/Dark switches recolor it for free.
     private void SetOperationState(OperationState state, string? glyph = null)
     {
-        StatusActiveIcon.Visibility = state == OperationState.Active ? Visibility.Visible : Visibility.Collapsed;
-        StatusSuccessIcon.Visibility = state == OperationState.Success ? Visibility.Visible : Visibility.Collapsed;
-        StatusCriticalIcon.Visibility = state == OperationState.Critical ? Visibility.Visible : Visibility.Collapsed;
-        StatusCautionIcon.Visibility = state == OperationState.Caution ? Visibility.Visible : Visibility.Collapsed;
+        var active = state == OperationState.Active ? Visibility.Visible : Visibility.Collapsed;
+        var success = state == OperationState.Success ? Visibility.Visible : Visibility.Collapsed;
+        var critical = state == OperationState.Critical ? Visibility.Visible : Visibility.Collapsed;
+        var caution = state == OperationState.Caution ? Visibility.Visible : Visibility.Collapsed;
+        if (StatusActiveIcon.Visibility != active) StatusActiveIcon.Visibility = active;
+        if (StatusSuccessIcon.Visibility != success) StatusSuccessIcon.Visibility = success;
+        if (StatusCriticalIcon.Visibility != critical) StatusCriticalIcon.Visibility = critical;
+        if (StatusCautionIcon.Visibility != caution) StatusCautionIcon.Visibility = caution;
         if (glyph is null) return;
         if (state == OperationState.Active && StatusActiveIcon.Glyph != glyph) StatusActiveIcon.Glyph = glyph;
         else if (state == OperationState.Caution && StatusCautionIcon.Glyph != glyph) StatusCautionIcon.Glyph = glyph;
