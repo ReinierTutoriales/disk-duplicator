@@ -1,5 +1,9 @@
 # Materiales, iconos y composición nativos
 
+## Uniformidad de los diálogos — 2026-10-26
+
+La capa de contenido de `AppDialog` usaba `LayerFillColorAltBrush` sobre todo el fondo de la ventana, atenuando el Desktop Acrylic que ya compartía con la ventana principal. Ahora esa capa es transparente; las tarjetas y el pie conservan sus pinceles de tema y la raíz mantiene su fondo sólido cuando no se puede aplicar el material. El verificador de diálogos comprueba también esta capa en los temas claro y oscuro. La notificación final y los selectores son superficies dibujadas por Windows; su material y tipografía dependen del sistema, mientras que la aplicación controla el texto y el logo de la notificación.
+
 ## Problema observado en el código
 
 La ventana principal usaba Mica, que es un material tintado por el wallpaper y no cristal con visión del escritorio. Los diálogos no tenían SystemBackdrop y su raíz sólida tapaba cualquier material de fondo. Aunque compartían fuentes y recursos de tema, eso no acreditaba un acabado translúcido uniforme. Las capturas RenderTargetBitmap anteriores tampoco contenían el compositor y no podían demostrar Mica/Acrylic.

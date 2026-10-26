@@ -113,6 +113,9 @@ public sealed partial class MainWindow
                     dialog.Root.UpdateLayout();
                     if (dialog.Backdrop is not DesktopAcrylicBackdrop || dialog.Root is not Panel { Background: SolidColorBrush { Color.A: 0 } })
                         throw new InvalidOperationException("Dialog covers or lacks its native Acrylic backdrop.");
+                    if (dialog.Root is not Grid { Children: var layers } ||
+                        layers[0] is not Grid { Background: SolidColorBrush { Color.A: 0 } })
+                        throw new InvalidOperationException("Dialog content layer covers its Acrylic backdrop.");
                     report.Add($"{name} {theme}: {CheckDialog(dialog)}");
                     foreach (var textName in new[] { "HeadingText", "BodyText", "FooterText" })
                     {
