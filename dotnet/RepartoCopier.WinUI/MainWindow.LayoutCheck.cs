@@ -124,6 +124,14 @@ public sealed partial class MainWindow
                             throw new InvalidOperationException($"{textName} uses a different text font family.");
                     }
                     report.Add($"{name}: heading/body/footer share main text font {CurrentFileText.FontFamily.Source}.");
+                    if (name == "LargeResults")
+                    {
+                        var host = (ContentPresenter)dialog.Root.FindName("ExtraHost");
+                        if (host.Content is not ScrollViewer { Content: ItemsRepeater repeater } ||
+                            repeater.TryGetElement(127) is not null)
+                            throw new InvalidOperationException("Large results are not virtualized.");
+                        report.Add("Large results: offscreen destination 128 was not realized.");
+                    }
                     CheckTextFits(dialog.Root);
                     CheckImageResolution(dialog.Root);
                     if (capture) await CaptureLayoutAsync(dialog.Root, Path.Combine(captureDirectory, $"{name}-{theme}.png"));
@@ -144,6 +152,11 @@ public sealed partial class MainWindow
                 "", 0, 0)).ToArray();
             if (await AppDialogs.ResultsAsync(this, results, true, true, deadline.Token, dialog => _ = Inspect(dialog, "Results")))
                 throw new InvalidOperationException("Dismissed results authorized saving.");
+            var largeResults = Enumerable.Range(0, 128).Select(index => new DestinationSnapshot(
+                $"D:\\{index}", 100, 100, 5, 0, 0, 0, 0, DestinationPhase.Done, null, "", 0, 0)).ToArray();
+            if (await AppDialogs.ResultsAsync(this, largeResults, false, false, deadline.Token,
+                    dialog => _ = Inspect(dialog, "LargeResults")))
+                throw new InvalidOperationException("Dismissed large results authorized saving.");
             await AppDialog.ShowAsync(this, new AppDialogSpec("Diálogo en una ventana estrecha",
                 "Texto largo para comprobar el ajuste de líneas, los iconos y los botones cuando el ancho disponible se reduce.",
                 ["Guardar diagnóstico completo", "Cancelar operación"], 1, 1, AppDialogIcon.Warning, WidthDip: 320),

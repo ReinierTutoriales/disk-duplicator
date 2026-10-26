@@ -93,6 +93,11 @@
                          Title="No se pudo completar" IsClosable="True" />
 
                 <StackPanel x:Name="PreparationPanel" Grid.Row="1" Visibility="Visible" Spacing="12">
+                    <StackPanel.Transitions>
+                        <TransitionCollection>
+                            <EntranceThemeTransition />
+                        </TransitionCollection>
+                    </StackPanel.Transitions>
 
                     <Grid x:Name="PreparationHeader" ColumnSpacing="12">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -236,6 +241,11 @@
                 </StackPanel>
 
                 <StackPanel x:Name="RunningPanel" Visibility="Collapsed" Spacing="12" VerticalAlignment="Top" Grid.Row="1">
+                    <StackPanel.Transitions>
+                        <TransitionCollection>
+                            <EntranceThemeTransition />
+                        </TransitionCollection>
+                    </StackPanel.Transitions>
                     <Border Style="{StaticResource SurfaceCardStyle}">
                         <StackPanel Spacing="12">
 
