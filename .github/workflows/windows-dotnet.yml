@@ -134,7 +134,14 @@ jobs:
           }
           finally {
             if ($null -ne $appProcess -and -not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
-            Remove-Item $smokeDirectory -Recurse -Force
+            if ($null -ne $appProcess) { $appProcess.Dispose() }
+            for ($attempt = 0; $attempt -lt 10; $attempt++) {
+              try { Remove-Item $smokeDirectory -Recurse -Force -ErrorAction Stop; break }
+              catch [System.IO.IOException] {
+                if ($attempt -eq 9) { throw }
+                Start-Sleep -Milliseconds 500
+              }
+            }
           }
 
       - name: Check rendered layouts and native dialogs

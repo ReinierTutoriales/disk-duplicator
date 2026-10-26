@@ -214,6 +214,7 @@ internal sealed class AppDialog
         presenter.IsMaximizable = false;
         appWindow.SetPresenter(presenter);
         StyleCaptionButtons(appWindow, _theme);
+        WatchCaptionContrast(_window, () => _theme);
 
         // Owned + owner disabled = modal, and it stays above the main window and outside its bounds.
         SetWindowLongPtr(Handle, GwlpHwndParent, _owner);
@@ -283,12 +284,29 @@ internal sealed class AppDialog
     /// Caption buttons drawn over app content: transparent background, glyphs in the app's resolved theme.
     /// High contrast keeps the system colors untouched.
     /// </summary>
-    internal static void StyleCaptionButtons(AppWindow window, ElementTheme theme)
+    internal static void WatchCaptionContrast(Window window, Func<ElementTheme> currentTheme)
+    {
+        var settings = Microsoft.UI.System.ThemeSettings.CreateForWindowId(window.AppWindow.Id);
+        var closed = false;
+        TypedEventHandler<Microsoft.UI.System.ThemeSettings, object> changed = (_, _) =>
+            window.DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!closed) StyleCaptionButtons(window.AppWindow, currentTheme(), settings.HighContrast);
+            });
+        settings.Changed += changed;
+        window.Closed += (_, _) =>
+        {
+            closed = true;
+            settings.Changed -= changed;
+        };
+    }
+
+    internal static void StyleCaptionButtons(AppWindow window, ElementTheme theme, bool? highContrast = null)
     {
         try
         {
             var bar = window.TitleBar;
-            if (new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
+            if (highContrast ?? new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
             {
                 bar.ResetToDefault();
                 return;

@@ -54,6 +54,7 @@ public sealed partial class MainWindow : Window
         ApplySavedTheme();
         // Caption buttons follow the theme the content actually renders in (app setting or Windows).
         AppDialog.StyleCaptionButtons(AppWindow, Root.ActualTheme);
+        AppDialog.WatchCaptionContrast(this, () => Root.ActualTheme);
         Root.ActualThemeChanged += (sender, _) => AppDialog.StyleCaptionButtons(AppWindow, sender.ActualTheme);
         _progressTimer.Tick += ProgressTimer_Tick;
         Closed += MainWindow_Closed;
