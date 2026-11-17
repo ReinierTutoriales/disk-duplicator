@@ -1,11 +1,10 @@
 # Changelog
 
-## Sin publicar
+## v2.3.0 — .NET 11, robustez del motor y dependencias al día
 
 - Origen truncado después del análisis: ahora se trata como origen cambiado y detiene todos los destinos, con lectura directa y con búfer por igual. Antes, con lectura directa a mitad de archivo fallaba con un error de argumento sin clasificar, y un origen ya truncado al abrirlo contaba como error de ese archivo con «Continuar si falla un archivo».
 - Destino colgado: cuando la vigilancia lo marca como fallido, el error del archivo en curso ya no se cuenta dos veces ni sustituye el mensaje «El destino dejó de responder…». La limpieza del temporal se mantiene.
 - Fin de la copia: si falla la construcción del resumen, la ventana sale igualmente del estado «en ejecución», desactiva Pausar y Cancelar, muestra el error y nunca ofrece el apagado que solo sigue a una copia correcta.
-- `RepartoCopier.Core` pasa a la versión 2.2.4, como la aplicación.
 - Memoria: al terminar, cada búfer del motor se libera aunque otro informe una página retenida; antes, el primer error dejaba los demás búferes fijados en memoria hasta cerrar la aplicación.
 - Plataforma: la aplicación pasa a .NET 11 (SDK 11.0.100, C# 15).
 - Dependencias: Windows App SDK 2.6.5, Windows SDK BuildTools 10.0.28000.2957 (MSIX 1.7.261102100), Microsoft.Windows.AI.MachineLearning 2.5.96 y System.Numerics.Tensors 11.0.0; herramientas de test MSTest 4.5.3, Test SDK 18.12.0, OpenTelemetry 1.21.0, Microsoft.Identity.Client 4.92.0, Azure.Core 1.65.0, System.ClientModel 1.17.0 y Microsoft.Extensions/System.* 11.0.0. Se retira código sin uso del motor (`ResourceGovernor`).
