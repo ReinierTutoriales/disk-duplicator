@@ -281,7 +281,7 @@ public sealed class DiskRobustnessTests
             [sourcePath, "truncated.bin", expectedEntrySize, DateTime.UtcNow, 0L],
             null)!;
 
-        using var pool = new SharedFanoutBufferPool(4 * 1024 * 1024, 65536);
+        using var pool = new SharedFanoutBufferPool(4 * 1024 * 1024);
         await using var job = new CopyJob([progress]);
 
         var task = (Task)readMethod.Invoke(
