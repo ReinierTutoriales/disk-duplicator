@@ -12,7 +12,7 @@ Se distribuye como un único ejecutable autocontenido (`RepartoCopier.WinUI.exe`
 
 - C# y .NET 10
 - WinUI 3 + XAML
-- Windows App SDK 2.5
+- Windows App SDK 2.6
 - Windows 10 2004 (19041) o posterior
 - x64
 

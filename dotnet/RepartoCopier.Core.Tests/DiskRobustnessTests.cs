@@ -284,11 +284,45 @@ public sealed class DiskRobustnessTests
         using var pool = new SharedFanoutBufferPool(4 * 1024 * 1024);
         await using var job = new CopyJob([progress]);
 
-        var task = (Task)readMethod.Invoke(
-            null,
-            [entry, sourceDevice, active, 1024 * 1024, 4096, pool, job, null, false])!;
-        var ex = await Assert.ThrowsAsync<IOException>(async () => await task);
-        Assert.AreEqual(sourceChangedType, ex.GetType());
+        try
+        {
+            var task = (Task)readMethod.Invoke(
+                null,
+                [entry, sourceDevice, active, 1024 * 1024, 4096, pool, job, null, false])!;
+            var ex = await Assert.ThrowsAsync<IOException>(async () => await task);
+            Assert.AreEqual(sourceChangedType, ex.GetType());
+        }
+        finally
+        {
+            // Blocks already delivered stay queued: no writer runs here. RunAsync releases them the same way.
+            var channel = workerType.GetProperty("Channel")!.GetValue(worker)!;
+            var reader = channel.GetType().GetProperty("Reader")!.GetValue(channel)!;
+            engineType.GetMethod("DrainAndRelease", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(null, [reader, worker]);
+        }
+    }
+
+    [TestMethod]
+    public void EveryPoolIsReleasedWhenOneStillHoldsAPage()
+    {
+        var disposePools = typeof(CopyEngine).GetMethod("DisposePools",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        var shared = new SharedFanoutBufferPool(64 * 1024);
+        var stuck = new SharedFanoutBufferPool(64 * 1024);
+        var free = new SharedFanoutBufferPool(64 * 1024);
+        var held = stuck.RentAsync(4096, 4096, 1, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+
+        var error = Assert.ThrowsExactly<System.Reflection.TargetInvocationException>(
+            () => disposePools.Invoke(null, [shared, new List<SharedFanoutBufferPool> { stuck, free }]));
+        Assert.IsInstanceOfType<InvalidOperationException>(error.InnerException);
+        // The pools after the stuck one were still released.
+        Assert.ThrowsExactly<ObjectDisposedException>(
+            () => free.RentAsync(4096, 4096, 1, CancellationToken.None).AsTask().GetAwaiter().GetResult());
+        Assert.ThrowsExactly<ObjectDisposedException>(
+            () => shared.RentAsync(4096, 4096, 1, CancellationToken.None).AsTask().GetAwaiter().GetResult());
+
+        held.Dispose();
+        stuck.Dispose();
     }
 
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media) =>

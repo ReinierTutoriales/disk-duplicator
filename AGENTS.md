@@ -5,7 +5,7 @@ Windows desktop disk duplicator (C# / .NET 10 / WinUI 3). Copies one source to m
 
 ## Stack
 - C# / .NET 10 (SDK 10.0.100+)
-- WinUI 3 + Windows App SDK 2.5
+- WinUI 3 + Windows App SDK 2.6
 - Solution: `RepartoCopier.sln`
 - Core: `dotnet/RepartoCopier.Core`
 - UI: `dotnet/RepartoCopier.WinUI`
