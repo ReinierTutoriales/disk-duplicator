@@ -795,10 +795,11 @@ public static class CopyEngine
                 try
                 {
                     var read = await block.Read.ConfigureAwait(false);
-                    if (direct is not null && read < expectedBlockBytes && totalRead + read < entry.Size)
+                    // The source is shorter than its snapshot: it was truncated after the scan. That is a changed
+                    // source, which stops every destination, with direct and buffered reads alike. A short direct
+                    // read must stop here: the next offset would no longer be sector-aligned.
+                    if (read == 0 || (direct is not null && read < expectedBlockBytes && totalRead + read < entry.Size))
                         throw new SourceChangedException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
-                    if (read == 0)
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
 
                     totalRead += read;
                     if (readAhead && totalRead < entry.Size)

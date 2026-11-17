@@ -228,11 +228,13 @@ public sealed class DiskRobustnessTests
     }
 
     [TestMethod]
-    public async Task DirectIoShortReadBeforeExpectedSizeThrowsSourceChangedException()
+    [DataRow(true, DisplayName = "Direct I/O")]
+    [DataRow(false, DisplayName = "Buffered")]
+    public async Task SourceTruncatedAfterScanThrowsSourceChangedException(bool directIo)
     {
         if (!OperatingSystem.IsWindows())
         {
-            Assert.Inconclusive("Requires Windows Direct I/O.");
+            Assert.Inconclusive("Requires Windows.");
             return;
         }
         using var temp = new TempScope();
@@ -240,13 +242,17 @@ public sealed class DiskRobustnessTests
         const int actualLength = 65536 + 512;
         const long expectedEntrySize = 4L * 1024 * 1024;
         await File.WriteAllBytesAsync(sourcePath, new byte[actualLength]);
-        var sourceDevice = Device("NVMe", StorageMediaKind.SolidState);
-        if (!DirectIoSourceReader.TryOpenOverlapped(sourcePath, sourceDevice, 1024 * 1024, out var probe))
+        // A device whose probe failed is never eligible for Direct I/O, which forces the buffered path.
+        var sourceDevice = directIo
+            ? Device("NVMe", StorageMediaKind.SolidState)
+            : Device("NVMe", StorageMediaKind.SolidState) with { ProbeSucceeded = false };
+        if (DirectIoSourceReader.TryOpenOverlapped(sourcePath, sourceDevice, 1024 * 1024, out var probe))
+            probe!.Dispose();
+        else if (directIo)
         {
             Assert.Inconclusive("Volume does not support unbuffered Direct I/O.");
             return;
         }
-        probe!.Dispose();
 
         var engineType = typeof(CopyEngine);
         var workerType = engineType.GetNestedType("DestinationWorker", System.Reflection.BindingFlags.NonPublic)!;

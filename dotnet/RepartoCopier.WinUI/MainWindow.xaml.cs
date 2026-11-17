@@ -426,8 +426,10 @@ public sealed partial class MainWindow : Window
         {
             if (ReferenceEquals(_job, observed))
             {
+                // Until the summary is complete the outcome is unknown: it must never count as a success
+                // (that would offer the shutdown after a failure).
                 var cancelled = false;
-                var completedWithErrors = false;
+                var completedWithErrors = true;
                 try
                 {
                     RefreshProgress();
@@ -467,8 +469,6 @@ public sealed partial class MainWindow : Window
                     CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
                     SpeedMetricText.Text = Throughput.Format(0);
                     RemainingMetricText.Text = "00:00:00";
-                    PauseButton.IsEnabled = false;
-                    CancelButton.IsEnabled = false;
                     // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
                     _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
                     Announce(StatusText.Text);
@@ -477,11 +477,16 @@ public sealed partial class MainWindow : Window
                 }
                 catch (Exception ex)
                 {
+                    completedWithErrors = true;
+                    SetOperationState(OperationState.Critical);
+                    _taskbar.Set(TaskbarState.Error, 100);
                     ShowError(ex.Message);
                 }
                 finally
                 {
                     _progressTimer.Stop();
+                    PauseButton.IsEnabled = false;
+                    CancelButton.IsEnabled = false;
                     _job = null;
                     // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
                     try { await observed.DisposeAsync(); }
