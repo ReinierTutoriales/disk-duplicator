@@ -1,16 +1,20 @@
 ---
 name: code-quality
-description: Use when optimizing, cleaning, reviewing, or polishing code. Prioritizes simplicity, maintainability, performance, and production readiness while preserving invariants.
+description: Use when reviewing, optimizing, cleaning or refactoring code. Prioritizes correctness, simplicity, maintainability and measured production value.
 ---
 
 # Code Quality
 
-- Analyze for real improvements in clarity, performance, robustness, and maintainability.
-- Prefer the simplest correct solution that matches existing style.
-- If a superior alternative exists, compare briefly and choose the most production-solid one; state what improved and why.
-- Do not break copy invariants, recovery guarantees, architecture contracts, UI refresh throttle (250 ms / 2 s), layout adaptive logic, or telemetry contracts.
-- Keep changes focused and measurable. Do not write for the sake of writing.
-- Verify against existing tests, contracts, and (for UI) `--layout-check` before considering the change complete.
-- Update documentation only when it reflects verified current behavior. Prefer editing existing docs (UI audits, FANOUT roadmap) over creating new ones.
-- Note any remaining need for physical Windows validation.
-- Follow agent-governance rules on branches and authorship.
+- Review the real implementation, callers, tests, contracts, diagnostics and current official platform guidance before proposing a change.
+- Prefer the simplest correct solution that fits the existing architecture and naming/style.
+- Compare alternatives only when there is a credible production benefit. State the tradeoff and choose one implementation; do not preserve parallel paths without a demonstrated requirement.
+- Fix root causes rather than symptoms. Separate confirmed defects from speculative risks.
+- Preserve copy semantics, structure, empty folders, atomic replacement, fail-closed path handling, recovery/BLAKE3, cancellation safety, existing-file policy, optional CRC32C verification, FAN-OUT behavior and memory/backpressure limits.
+- Preserve UI contracts: native WinUI, light/dark theme, DPI/work-area sizing, focus/keyboard, Narrator labels, 250 ms foreground / 2 s minimized refresh, deduplicated updates and adaptive layout.
+- Prefer existing telemetry and APIs over new reads, dependencies, configuration or abstractions.
+- Do not change block size, pool budget, queue depth, prefetch, flush policy, scheduler or storage mode based on intuition, virtualized benchmarks or device marketing specifications.
+- Keep changes focused and complete. Remove code made dead by the change; do not add helpers or comments without a real consumer or contract.
+- Verify against existing tests and project contracts. For UI, run `--layout-check`; for performance, follow `performance-invariants` and the physical A/B protocol.
+- A smaller diff, newer API, fewer lines or successful compilation alone does not prove improved performance or quality.
+- Update documentation only when verified behavior changes; prefer the existing audit, roadmap or TESTING.md.
+- Follow `agent-governance` for all Git and release actions.
