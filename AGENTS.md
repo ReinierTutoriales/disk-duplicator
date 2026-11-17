@@ -1,11 +1,11 @@
 # RepartoCopier — Agent Instructions
 
 ## Project
-Windows desktop disk duplicator (C# / .NET 10 / WinUI 3). Copies one source to multiple destinations via FAN-OUT while preserving full folder structure, integrity, recovery, and native OS behavior. Version 2.2.4+ on main.
+Windows desktop disk duplicator (C# / .NET 11 / WinUI 3). Copies one source to multiple destinations via FAN-OUT while preserving full folder structure, integrity, recovery, and native OS behavior. Version 2.2.4+ on main.
 
 ## Stack
-- C# / .NET 10 (SDK 10.0.100+)
-- WinUI 3 + Windows App SDK 2.5
+- C# / .NET 11 (SDK 11.0.100+)
+- WinUI 3 + Windows App SDK 2.6
 - Solution: `RepartoCopier.sln`
 - Core: `dotnet/RepartoCopier.Core`
 - UI: `dotnet/RepartoCopier.WinUI`

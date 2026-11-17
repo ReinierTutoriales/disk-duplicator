@@ -73,6 +73,35 @@ public sealed class IndependentSourceReadTests
         }
     }
 
+    [TestMethod]
+    public async Task SourceChangedWithIndependentReadersFailsEveryDestinationInsteadOfCancelling()
+    {
+        // The first reader to see the change cancels the others, so a sibling reader may end cancelled. The
+        // job must still report the changed source as a failure of every destination, never as a cancel.
+        var payload = Payload(9 * 1024 * 1024 + 37, 252);
+        var (job, _, cleanup) = await RunWithSourceAsync(payload,
+            device => device with { MediaKind = StorageMediaKind.SolidState, BusType = "NVMe", IsNetwork = false },
+            afterPreflight: path =>
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Write);
+                stream.SetLength(payload.Length / 2);
+            });
+        if (job is null) return;
+        await using (job)
+        {
+            try
+            {
+                Assert.AreEqual(true, job.IndependentSourceReads);
+                var snapshots = job.Snapshot();
+                foreach (var snapshot in snapshots)
+                    Assert.AreEqual(DestinationPhase.Failed, snapshot.Phase, snapshot.Error);
+                Assert.IsTrue(snapshots.Any(snapshot => snapshot.Error?.Contains("origen cambió", StringComparison.Ordinal) == true),
+                    string.Join(" | ", snapshots.Select(snapshot => snapshot.Error)));
+            }
+            finally { cleanup(); }
+        }
+    }
+
     private static byte[] Payload(int length, int seed)
     {
         var payload = new byte[length];
@@ -83,7 +112,7 @@ public sealed class IndependentSourceReadTests
     // Real preflight, paths, writers, hashing and file-system I/O; only the source classification is
     // overridden, because the CI runner's disk does not report the media under test.
     private static async Task<(CopyJob? Job, string[] Destinations, Action Cleanup)> RunWithSourceAsync(
-        byte[] payload, Func<StorageDeviceInfo, StorageDeviceInfo> classify)
+        byte[] payload, Func<StorageDeviceInfo, StorageDeviceInfo> classify, Action<string>? afterPreflight = null)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -105,6 +134,7 @@ public sealed class IndependentSourceReadTests
                 .Invoke(null, [plan, CancellationToken.None])!;
             var sourceProperty = prepared.GetType().GetProperty("SourceDevice")!;
             sourceProperty.SetValue(prepared, classify((StorageDeviceInfo)sourceProperty.GetValue(prepared)!));
+            afterPreflight?.Invoke(Path.Combine(source, "payload.bin"));
             var effective = (string[])prepared.GetType().GetProperty("DestinationRoots")!.GetValue(prepared)!;
             var progress = effective.Select(path => new DestinationProgress(path, (ulong)payload.Length, 1)).ToArray();
             job = new CopyJob(progress);

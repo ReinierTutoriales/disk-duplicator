@@ -535,9 +535,8 @@ public static class CopyEngine
 
             // COPY owns the large 256 MiB page pool. Verification deliberately does not.
             // Once every writer drained, release that pinned/locked region before VERIFY.
-            bufferPool?.Dispose();
+            DisposePools(bufferPool, independentPools);
             bufferPool = null;
-            foreach (var pool in independentPools) pool.Dispose();
             independentPools.Clear();
 
             if (options.Verify && !token.IsCancellationRequested)
@@ -593,8 +592,7 @@ public static class CopyEngine
             }
             try
             {
-                bufferPool?.Dispose();
-                foreach (var pool in independentPools) pool.Dispose();
+                DisposePools(bufferPool, independentPools);
             }
             finally
             {
@@ -788,14 +786,18 @@ public static class CopyEngine
                 if (active.Count == 0)
                     return null;
 
+                var expectedBlockBytes = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
                 var block = await (next ?? BeginSourceBlockAsync(totalRead, job.Token)).ConfigureAwait(false);
                 next = null;
                 SharedFanoutBufferPool.Lease? lease = block.Lease;
                 try
                 {
                     var read = await block.Read.ConfigureAwait(false);
-                    if (read == 0)
-                        throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
+                    // The source is shorter than its snapshot: it was truncated after the scan. That is a changed
+                    // source, which stops every destination, with direct and buffered reads alike. A short direct
+                    // read must stop here: the next offset would no longer be sector-aligned.
+                    if (read == 0 || (direct is not null && read < expectedBlockBytes && totalRead + read < entry.Size))
+                        throw new SourceChangedException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
 
                     totalRead += read;
                     if (readAhead && totalRead < entry.Size)
@@ -1664,6 +1666,8 @@ public static class CopyEngine
         TryDelete(current.PartPath);
         if (current.Copied > 0 && !current.Committed)
             worker.Progress.RollbackWritten((ulong)current.Copied);
+        if (!worker.IsActive)
+            return;
         if (options.KeepGoing && !DestinationLost(worker))
             worker.Progress.MarkError(error);
         else if (DestinationLost(worker))
@@ -2362,6 +2366,24 @@ public static class CopyEngine
         });
     }
 
+    /// <summary>
+    /// Releases every pool even when one still reports a referenced page: a single accounting error must not
+    /// leave the other pools' pinned and locked memory behind. The first error is rethrown afterwards.
+    /// </summary>
+    private static void DisposePools(SharedFanoutBufferPool? shared, IReadOnlyList<SharedFanoutBufferPool> independent)
+    {
+        Exception? first = null;
+        try { shared?.Dispose(); }
+        catch (Exception ex) { first = ex; }
+        foreach (var pool in independent)
+        {
+            try { pool.Dispose(); }
+            catch (Exception ex) { first ??= ex; }
+        }
+        if (first is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(first).Throw();
+    }
+
     private static void DrainAndRelease(ChannelReader<FanoutMessage> reader, DestinationWorker worker)
     {
         while (reader.TryRead(out var message))
@@ -2472,174 +2494,6 @@ public static class CopyEngine
                 ?? throw new InvalidOperationException("SharedBlock liberado más veces que referencias asignadas.");
             if (lease.ReleaseReference())
                 Interlocked.CompareExchange(ref _lease, null, lease);
-        }
-    }
-
-    internal sealed class ResourceGovernor : IDisposable
-    {
-        private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
-        private const double CpuGrowThreshold = 0.60;
-        private const double CpuShrinkThreshold = 0.85;
-
-        private readonly object _gate = new();
-        private readonly Queue<CpuWaiter> _waiters = new();
-        private readonly Process _process = Process.GetCurrentProcess();
-        private readonly int _processorCount = Math.Max(1, Environment.ProcessorCount);
-        private TimeSpan _lastCpu;
-        private long _lastSampleTimestamp;
-        private int _limit = 1;
-        private int _active;
-        private bool _disposed;
-
-        internal int Active
-        {
-            get { lock (_gate) return _active; }
-        }
-
-        public ResourceGovernor()
-        {
-            _lastCpu = _process.TotalProcessorTime;
-            _lastSampleTimestamp = Stopwatch.GetTimestamp();
-        }
-
-        public ValueTask<CpuLease> EnterCpuWorkAsync(CancellationToken token)
-        {
-            lock (_gate)
-            {
-                ThrowIfDisposed();
-                SampleAndAdjustLocked();
-                if (_active < _limit)
-                {
-                    _active++;
-                    return ValueTask.FromResult(new CpuLease(this));
-                }
-
-                var waiter = new CpuWaiter();
-                _waiters.Enqueue(waiter);
-                return new ValueTask<CpuLease>(WaitForLeaseAsync(waiter, token));
-            }
-        }
-
-        private async Task<CpuLease> WaitForLeaseAsync(CpuWaiter waiter, CancellationToken token)
-        {
-            try
-            {
-                await waiter.Ready.Task.WaitAsync(token).ConfigureAwait(false);
-                return new CpuLease(this);
-            }
-            catch
-            {
-                lock (_gate)
-                {
-                    if (waiter.Granted)
-                    {
-                        waiter.Granted = false;
-                        if (_active <= 0)
-                            throw new InvalidOperationException("Contabilidad de CPU inválida durante cancelación.");
-                        _active--;
-                    }
-                    else
-                    {
-                        waiter.Cancelled = true;
-                    }
-                    PumpLocked();
-                }
-                throw;
-            }
-        }
-
-        private void ReleaseCpuWork()
-        {
-            lock (_gate)
-            {
-                if (_active > 0)
-                    _active--;
-                SampleAndAdjustLocked();
-                PumpLocked();
-            }
-        }
-
-        private void SampleAndAdjustLocked()
-        {
-            var now = Stopwatch.GetTimestamp();
-            var elapsed = Stopwatch.GetElapsedTime(_lastSampleTimestamp, now);
-            if (elapsed < SampleInterval)
-                return;
-
-            TimeSpan cpu;
-            try
-            {
-                cpu = _process.TotalProcessorTime;
-            }
-            catch (InvalidOperationException)
-            {
-                return;
-            }
-
-            var cpuSeconds = Math.Max(0, (cpu - _lastCpu).TotalSeconds);
-            var wallSeconds = Math.Max(0.001, elapsed.TotalSeconds);
-            var utilization = Math.Clamp(cpuSeconds / (wallSeconds * _processorCount), 0.0, 1.0);
-            _lastCpu = cpu;
-            _lastSampleTimestamp = now;
-
-            if (utilization >= CpuShrinkThreshold)
-                _limit = Math.Max(1, _limit - 1);
-            else if (utilization <= CpuGrowThreshold && _waiters.Count > 0)
-                _limit = Math.Min(_processorCount, _limit + 1);
-        }
-
-        private void PumpLocked()
-        {
-            while (_active < _limit && _waiters.Count > 0)
-            {
-                var waiter = _waiters.Dequeue();
-                if (waiter.Cancelled)
-                    continue;
-                waiter.Granted = true;
-                _active++;
-                waiter.Ready.TrySetResult();
-            }
-        }
-
-        private void ThrowIfDisposed()
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-        }
-
-        public void Dispose()
-        {
-            lock (_gate)
-            {
-                if (_disposed)
-                    return;
-                _disposed = true;
-                while (_waiters.Count > 0)
-                {
-                    var waiter = _waiters.Dequeue();
-                    waiter.Ready.TrySetException(new ObjectDisposedException(nameof(ResourceGovernor)));
-                }
-            }
-            _process.Dispose();
-        }
-
-        private sealed class CpuWaiter
-        {
-            public TaskCompletionSource Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            public bool Cancelled { get; set; }
-            public bool Granted { get; set; }
-        }
-
-        internal sealed class CpuLease : IDisposable
-        {
-            private ResourceGovernor? _owner;
-
-            public CpuLease(ResourceGovernor owner) => _owner = owner;
-
-            public void Dispose()
-            {
-                var owner = Interlocked.Exchange(ref _owner, null);
-                owner?.ReleaseCpuWork();
-            }
         }
     }
 

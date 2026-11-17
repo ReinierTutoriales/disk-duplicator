@@ -426,77 +426,95 @@ public sealed partial class MainWindow : Window
         {
             if (ReferenceEquals(_job, observed))
             {
-                RefreshProgress();
-                _progressTimer.Stop();
-                var snapshots = observed.Snapshot();
-                _lastResult = snapshots;
-                _lastDiagnostics = observed.DiagnosticsSnapshot();
-                _independentSourceReadsUsed = observed.IndependentSourceReads;
-                var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
-                var cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
-                var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
-                var completedWithErrors = failed > 0 || erroredFiles > 0;
-                var hasUnverifiedSkips = snapshots.Any(item => item.FilesSkipped > 0);
-                var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
-                var filesDone = snapshots.Count == 0 ? 0UL : snapshots
-                    .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
-                    .Select(item => item.FilesDone)
-                    .DefaultIfEmpty(snapshots.Max(item => item.FilesDone))
-                    .Min();
-                var sourceBytes = snapshots.Count == 0 ? 0UL : snapshots[0].Total;
-                var elapsed = _copyStartedAt is null ? TimeSpan.Zero : DateTimeOffset.Now - _copyStartedAt.Value;
-
-                OperationTitleText.Text = cancelled
-                    ? "Cancelado"
-                    : completedWithErrors ? "Completado con errores"
-                    : _verificationRequested && hasUnverifiedSkips ? "Terminado · omitidos sin verificar"
-                    : _verificationRequested ? "Copia y verificación terminadas" : "Copiado · sin verificación";
-                if (cancelled) SetOperationState(OperationState.Caution, "\uE711");
-                else if (completedWithErrors) SetOperationState(OperationState.Critical);
-                else SetOperationState(OperationState.Success);
-                StatusText.Text = cancelled
-                    ? "Copia cancelada"
-                    : completedWithErrors ? "La copia terminó con algunos errores"
-                    : _verificationRequested && hasUnverifiedSkips ? "Terminada; los omitidos no se verificaron al finalizar"
-                    : _verificationRequested ? "Copia y verificación completadas" : "Copia completada sin verificación final";
-                CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
-                CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
-                SpeedMetricText.Text = Throughput.Format(0);
-                RemainingMetricText.Text = "00:00:00";
-                PauseButton.IsEnabled = false;
-                CancelButton.IsEnabled = false;
-                // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
-                _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
-                Announce(StatusText.Text);
-                if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text,
-                    $"{FormatDestinationCount(snapshots.Count)} · {FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}");
-                _job = null;
-                // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
-                try { await observed.DisposeAsync(); }
-                catch (Exception ex) { ShowError(ex.Message); }
-                // The copy's pinned buffers are garbage now; return their memory to Windows without waiting
-                // for the next natural full collection.
-                GC.Collect(2, GCCollectionMode.Forced, blocking: false);
-                SetEditingEnabled(true);
-                StartButton.IsEnabled = true;
-                NewCopyButton.Visibility = Visibility.Visible;
-                ResultDetailsButton.Visibility = Visibility.Visible;
-
-                if (_closeRequested)
+                // Until the summary is complete the outcome is unknown: it must never count as a success
+                // (that would offer the shutdown after a failure).
+                var cancelled = false;
+                var completedWithErrors = true;
+                try
                 {
-                    ReleasePower();
-                    Close();
+                    RefreshProgress();
+                    _progressTimer.Stop();
+                    var snapshots = observed.Snapshot();
+                    _lastResult = snapshots;
+                    _lastDiagnostics = observed.DiagnosticsSnapshot();
+                    _independentSourceReadsUsed = observed.IndependentSourceReads;
+                    var failed = snapshots.Count(item => item.Phase == DestinationPhase.Failed);
+                    cancelled = snapshots.Any(item => item.Phase == DestinationPhase.Cancelled);
+                    var erroredFiles = snapshots.Aggregate<DestinationSnapshot, ulong>(0, (sum, item) => sum + item.FilesErrored);
+                    completedWithErrors = failed > 0 || erroredFiles > 0;
+                    var hasUnverifiedSkips = snapshots.Any(item => item.FilesSkipped > 0);
+                    var filesTotal = snapshots.Count == 0 ? 0UL : snapshots.Max(item => item.FilesTotal);
+                    var filesDone = snapshots.Count == 0 ? 0UL : snapshots
+                        .Where(item => item.Phase is not DestinationPhase.Failed and not DestinationPhase.Cancelled)
+                        .Select(item => item.FilesDone)
+                        .DefaultIfEmpty(snapshots.Max(item => item.FilesDone))
+                        .Min();
+                    var sourceBytes = snapshots.Count == 0 ? 0UL : snapshots[0].Total;
+                    var elapsed = _copyStartedAt is null ? TimeSpan.Zero : DateTimeOffset.Now - _copyStartedAt.Value;
+
+                    OperationTitleText.Text = cancelled
+                        ? "Cancelado"
+                        : completedWithErrors ? "Completado con errores"
+                        : _verificationRequested && hasUnverifiedSkips ? "Terminado · omitidos sin verificar"
+                        : _verificationRequested ? "Copia y verificación terminadas" : "Copiado · sin verificación";
+                    if (cancelled) SetOperationState(OperationState.Caution, "\uE711");
+                    else if (completedWithErrors) SetOperationState(OperationState.Critical);
+                    else SetOperationState(OperationState.Success);
+                    StatusText.Text = cancelled
+                        ? "Copia cancelada"
+                        : completedWithErrors ? "La copia terminó con algunos errores"
+                        : _verificationRequested && hasUnverifiedSkips ? "Terminada; los omitidos no se verificaron al finalizar"
+                        : _verificationRequested ? "Copia y verificación completadas" : "Copia completada sin verificación final";
+                    CurrentFileText.Text = filesTotal == 0 ? "Sin archivos" : $"{filesDone}/{filesTotal} archivos";
+                    CurrentPathText.Text = $"{FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}";
+                    SpeedMetricText.Text = Throughput.Format(0);
+                    RemainingMetricText.Text = "00:00:00";
+                    // A failed result stays red on the taskbar until the next copy; success or cancel clears it.
+                    _taskbar.Set(completedWithErrors && !cancelled ? TaskbarState.Error : TaskbarState.None, 100);
+                    Announce(StatusText.Text);
+                    if (!cancelled) _notifier.ShowIfInBackground(OperationTitleText.Text,
+                        $"{FormatDestinationCount(snapshots.Count)} · {FormatBytes(sourceBytes)} · {FormatDuration(elapsed)}");
                 }
-                else if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
+                catch (Exception ex)
                 {
-                    // Keep the system awake through the shutdown countdown, then let it go.
-                    try { await OfferShutdownAsync(); }
+                    completedWithErrors = true;
+                    SetOperationState(OperationState.Critical);
+                    _taskbar.Set(TaskbarState.Error, 100);
+                    ShowError(ex.Message);
+                }
+                finally
+                {
+                    _progressTimer.Stop();
+                    PauseButton.IsEnabled = false;
+                    CancelButton.IsEnabled = false;
+                    _job = null;
+                    // Disposing waits for the engine's own cleanup; it must never strand the window in "running".
+                    try { await observed.DisposeAsync(); }
                     catch (Exception ex) { ShowError(ex.Message); }
-                    finally { ReleasePower(); }
-                }
-                else
-                {
-                    ReleasePower();
+                    // The copy's pinned buffers are garbage now; return their memory to Windows without waiting
+                    // for the next natural full collection.
+                    GC.Collect(2, GCCollectionMode.Forced, blocking: false);
+                    SetEditingEnabled(true);
+                    StartButton.IsEnabled = true;
+                    NewCopyButton.Visibility = Visibility.Visible;
+                    ResultDetailsButton.Visibility = Visibility.Visible;
+
+                    if (_closeRequested)
+                    {
+                        ReleasePower();
+                        Close();
+                    }
+                    else if (!cancelled && !completedWithErrors && ShutdownCheck.IsChecked == true)
+                    {
+                        // Keep the system awake through the shutdown countdown, then let it go.
+                        try { await OfferShutdownAsync(); }
+                        catch (Exception ex) { ShowError(ex.Message); }
+                        finally { ReleasePower(); }
+                    }
+                    else
+                    {
+                        ReleasePower();
+                    }
                 }
             }
         }

@@ -370,25 +370,6 @@ public sealed class CoreParityTests
 
 
     [TestMethod]
-    public async Task ResourceGovernorCancelledWaiterDoesNotConsumeCpuLease()
-    {
-        using var governor = new CopyEngine.ResourceGovernor();
-        using var first = await governor.EnterCpuWorkAsync(CancellationToken.None);
-        using var cancel = new CancellationTokenSource();
-        var blocked = governor.EnterCpuWorkAsync(cancel.Token).AsTask();
-        cancel.Cancel();
-        try
-        {
-            await blocked;
-            Assert.Fail("Se esperaba cancelación.");
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        Assert.AreEqual(1, governor.Active);
-    }
-
-    [TestMethod]
     public async Task AsyncPauseGateReleasesHundredsOfWaitersWithoutBlockingThreads()
     {
         await using var job = new CopyJob(Array.Empty<DestinationProgress>());

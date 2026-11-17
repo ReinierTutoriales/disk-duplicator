@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
-    <Version>2.2.3</Version>
-    <AssemblyVersion>2.2.3.0</AssemblyVersion>
-    <FileVersion>2.2.3.0</FileVersion>
+    <TargetFramework>net11.0-windows10.0.19041.0</TargetFramework>
+    <Version>2.2.4</Version>
+    <AssemblyVersion>2.2.4.0</AssemblyVersion>
+    <FileVersion>2.2.4.0</FileVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <LangVersion>14.0</LangVersion>
+    <LangVersion>15.0</LangVersion>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest</AnalysisLevel>
