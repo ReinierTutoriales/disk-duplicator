@@ -788,12 +788,15 @@ public static class CopyEngine
                 if (active.Count == 0)
                     return null;
 
+                var expectedBlockBytes = checked((int)Math.Min(readBufferSize, entry.Size - totalRead));
                 var block = await (next ?? BeginSourceBlockAsync(totalRead, job.Token)).ConfigureAwait(false);
                 next = null;
                 SharedFanoutBufferPool.Lease? lease = block.Lease;
                 try
                 {
                     var read = await block.Read.ConfigureAwait(false);
+                    if (direct is not null && read < expectedBlockBytes && totalRead + read < entry.Size)
+                        throw new SourceChangedException($"El origen cambió de tamaño durante la copia: {entry.RelativePath}");
                     if (read == 0)
                         throw new IOException($"Lectura incompleta del origen: {entry.RelativePath}");
 
@@ -1664,6 +1667,8 @@ public static class CopyEngine
         TryDelete(current.PartPath);
         if (current.Copied > 0 && !current.Committed)
             worker.Progress.RollbackWritten((ulong)current.Copied);
+        if (!worker.IsActive)
+            return;
         if (options.KeepGoing && !DestinationLost(worker))
             worker.Progress.MarkError(error);
         else if (DestinationLost(worker))

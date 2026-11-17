@@ -176,6 +176,115 @@ public sealed class DiskRobustnessTests
             "A file copied into a compressed folder must be compressed like the folder.");
     }
 
+    [TestMethod]
+    public void FailCurrentFileAfterWatchdogFailureCleansUpWithoutDoubleCountingOrOverwritingError()
+    {
+        using var temp = new TempScope();
+        var root = Directory.CreateDirectory(Path.Combine(temp.Path, "dest", "Source")).FullName;
+        var partPath = Path.Combine(root, "a.bin.reparto-part");
+        File.WriteAllBytes(partPath, new byte[4096]);
+        using var partStream = new FileStream(partPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        var engineType = typeof(CopyEngine);
+        var workerType = engineType.GetNestedType("DestinationWorker", System.Reflection.BindingFlags.NonPublic)!;
+        var currentFileType = engineType.GetNestedType("CurrentFile", System.Reflection.BindingFlags.NonPublic)!;
+        var entryType = engineType.GetNestedType("FileEntry", System.Reflection.BindingFlags.NonPublic)!;
+        var failCurrentFile = engineType.GetMethod("FailCurrentFile", flags)!;
+
+        var progress = new DestinationProgress("dest", 4096, 1);
+        using var scheduler = new DeviceScheduler("disk-1", 1, 1024 * 1024);
+        var budget = new AdaptiveControlByteBudget(_ => 1024 * 1024);
+        var worker = Activator.CreateInstance(
+            workerType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+            null,
+            [root, 0, progress, Device("USB", StorageMediaKind.SolidState), scheduler, budget],
+            null)!;
+
+        var entry = Activator.CreateInstance(
+            entryType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+            null,
+            [Path.Combine(temp.Path, "a.bin"), "a.bin", 4096L, DateTime.UtcNow, 0L],
+            null)!;
+        var current = Activator.CreateInstance(
+            currentFileType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+            null,
+            [entry, Path.Combine(root, "a.bin"), partPath, Path.Combine(root, "a.bin.reparto-bak"), partStream, null, false],
+            null)!;
+
+        const string watchdogMessage = "El destino dejó de responder durante la escritura.";
+        workerType.GetMethod("Fail")!.Invoke(worker, [watchdogMessage]);
+        failCurrentFile.Invoke(null, [worker, current, new CopyOptions(KeepGoing: true), "a.bin: error 995"]);
+
+        var snapshot = progress.Snapshot();
+        Assert.AreEqual(1UL, snapshot.FilesErrored);
+        Assert.AreEqual(DestinationPhase.Failed, snapshot.Phase);
+        Assert.AreEqual(watchdogMessage, snapshot.Error);
+        Assert.IsFalse(File.Exists(partPath), "Cleanup must still delete the orphaned .part file.");
+        Assert.IsTrue(partStream.SafeFileHandle.IsClosed, "Cleanup must still close the open part stream.");
+    }
+
+    [TestMethod]
+    public async Task DirectIoShortReadBeforeExpectedSizeThrowsSourceChangedException()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Requires Windows Direct I/O.");
+            return;
+        }
+        using var temp = new TempScope();
+        var sourcePath = Path.Combine(temp.Path, "truncated.bin");
+        const int actualLength = 65536 + 512;
+        const long expectedEntrySize = 4L * 1024 * 1024;
+        await File.WriteAllBytesAsync(sourcePath, new byte[actualLength]);
+        var sourceDevice = Device("NVMe", StorageMediaKind.SolidState);
+        if (!DirectIoSourceReader.TryOpenOverlapped(sourcePath, sourceDevice, 1024 * 1024, out var probe))
+        {
+            Assert.Inconclusive("Volume does not support unbuffered Direct I/O.");
+            return;
+        }
+        probe!.Dispose();
+
+        var engineType = typeof(CopyEngine);
+        var workerType = engineType.GetNestedType("DestinationWorker", System.Reflection.BindingFlags.NonPublic)!;
+        var entryType = engineType.GetNestedType("FileEntry", System.Reflection.BindingFlags.NonPublic)!;
+        var sourceChangedType = engineType.GetNestedType("SourceChangedException", System.Reflection.BindingFlags.NonPublic)!;
+        var readMethod = engineType.GetMethod("ReadAndFanOutSequentialAsync",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+
+        var progress = new DestinationProgress("dest", (ulong)expectedEntrySize, 1);
+        using var scheduler = new DeviceScheduler("disk-1", 1, 4 * 1024 * 1024);
+        var budget = new AdaptiveControlByteBudget(_ => 4 * 1024 * 1024);
+        var worker = Activator.CreateInstance(
+            workerType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+            null,
+            [Path.Combine(temp.Path, "dest"), 0, progress, Device("NVMe", StorageMediaKind.SolidState), scheduler, budget],
+            null)!;
+        var activeListType = typeof(List<>).MakeGenericType(workerType);
+        var active = Activator.CreateInstance(activeListType)!;
+        activeListType.GetMethod("Add")!.Invoke(active, [worker]);
+
+        var entry = Activator.CreateInstance(
+            entryType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic,
+            null,
+            [sourcePath, "truncated.bin", expectedEntrySize, DateTime.UtcNow, 0L],
+            null)!;
+
+        using var pool = new SharedFanoutBufferPool(4 * 1024 * 1024, 65536);
+        await using var job = new CopyJob([progress]);
+
+        var task = (Task)readMethod.Invoke(
+            null,
+            [entry, sourceDevice, active, 1024 * 1024, 4096, pool, job, null, false])!;
+        var ex = await Assert.ThrowsAsync<IOException>(async () => await task);
+        Assert.AreEqual(sourceChangedType, ex.GetType());
+    }
+
     private static StorageDeviceInfo Device(string bus, StorageMediaKind media) =>
         new(@"C:\dest", @"C:\", 1, 1, bus, media, false, 512, 4096, true, null, false, "NTFS", DriveType.Fixed, false, true, null, 0);
 
