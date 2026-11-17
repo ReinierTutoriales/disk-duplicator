@@ -18,6 +18,7 @@
 
   <!-- Stable overrides for the test tooling dependency graph. -->
   <ItemGroup>
+    <PackageReference Include="Azure.Core" Version="1.65.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="11.0.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="11.0.0" PrivateAssets="all" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="11.0.0" PrivateAssets="all" />
@@ -43,6 +44,7 @@
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.21.0" PrivateAssets="all" />
     <PackageReference Include="OpenTelemetry.PersistentStorage.Abstractions" Version="1.2.0" PrivateAssets="all" />
     <PackageReference Include="OpenTelemetry.PersistentStorage.FileSystem" Version="1.2.0" PrivateAssets="all" />
+    <PackageReference Include="System.ClientModel" Version="1.17.0" PrivateAssets="all" />
     <PackageReference Include="System.Memory.Data" Version="11.0.0" PrivateAssets="all" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="11.0.0" PrivateAssets="all" />
   </ItemGroup>
