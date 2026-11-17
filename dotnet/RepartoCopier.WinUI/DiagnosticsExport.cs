@@ -25,7 +25,7 @@ internal static class DiagnosticsExport
     // 5: IndependentSourceReads is the effective mode chosen by the engine, not the UI request.
     internal const int SchemaVersion = 5;
 
-    internal static IReadOnlyList<string> MeasurementNotes { get; } =
+    internal static IReadOnlyList<string> MeasurementNotes { get; } = (string[])
     [
         "Durations are TimeSpan strings; byte rates use bytes per second.",
         "Diagnostics.BufferWaitTime measures the complete RentAsync call, including immediate rentals; it is not pure blocking time.",
